@@ -1,4 +1,4 @@
-package torrent
+package storage
 
 import (
 	"bytes"
@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pterm/pterm"
-	"github.com/xssnick/tonutils-go/adnl/storage"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
@@ -17,13 +16,15 @@ import (
 	"strings"
 )
 
-type fileInfo struct {
+type fileInfoData struct {
 	Path string
 	Name string
 }
 
-func CreateTorrent(path, description string) (*Torrent, error) {
+func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 	const pieceSize = 128 * 1024
+
+	torrent := NewTorrent(path, db, true)
 
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
@@ -40,15 +41,15 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 	}
 
 	dir := filepath.Base(path) + "/"
-	header := storage.TorrentHeader{
+	torrent.Header = &TorrentHeader{
 		DirNameSize: uint32(len(dir)),
 		DirName:     []byte(dir),
 	}
 
-	waiter, _ := pterm.DefaultSpinner.Start("Scanning torrent files...")
+	waiter, _ := pterm.DefaultSpinner.Start("Scanning files...")
 
 	var filesSize uint64
-	filesList := make([]fileInfo, 0, 64)
+	filesList := make([]fileInfoData, 0, 64)
 	err = filepath.Walk(path, func(filePath string, f os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -61,10 +62,10 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 		name := filePath[len(path)+1:]
 		name = strings.ReplaceAll(name, "\\", "/") // to unix style
 
-		header.FilesCount++
-		header.TotalNameSize += uint64(len(name))
-		header.Names = append(header.Names, name...)
-		header.NameIndex = append(header.NameIndex, header.TotalNameSize)
+		torrent.Header.FilesCount++
+		torrent.Header.TotalNameSize += uint64(len(name))
+		torrent.Header.Names = append(torrent.Header.Names, name...)
+		torrent.Header.NameIndex = append(torrent.Header.NameIndex, torrent.Header.TotalNameSize)
 
 		// TODO: optimize
 		// stat is not always gives the right file size, so we open file and find the end
@@ -80,10 +81,10 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 		}
 		filesSize += uint64(sz)
 
-		header.DataIndex = append(header.DataIndex, filesSize)
+		torrent.Header.DataIndex = append(torrent.Header.DataIndex, filesSize)
 
 		// log.Println("Added file ", name, "at", filePath)
-		filesList = append(filesList, fileInfo{
+		filesList = append(filesList, fileInfoData{
 			Path: filePath,
 			Name: name,
 		})
@@ -100,7 +101,7 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 	hashes := make([][]byte, 0, 256)
 	pieces := make([]*PieceInfo, 0, 256)
 
-	blockStartFileIndex := 0
+	pieceStartFileIndex := uint32(0)
 
 	process := func(name string, rd io.Reader) error {
 		fi := FileIndex{
@@ -111,7 +112,7 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 
 		for {
 			if cbOffset == 0 {
-				blockStartFileIndex = len(files)
+				pieceStartFileIndex = uint32(len(files))
 			}
 
 			n, err := rd.Read(cb[cbOffset:])
@@ -129,8 +130,7 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 
 				// save index of file where block starts
 				pieces = append(pieces, &PieceInfo{
-					HashForProof:   cell.BeginCell().MustStoreSlice(hash, 256).EndCell().Hash(),
-					StartFileIndex: blockStartFileIndex,
+					StartFileIndex: pieceStartFileIndex,
 				})
 
 				cbOffset = 0
@@ -144,8 +144,8 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 		return nil
 	}
 
-	waiter, _ = pterm.DefaultSpinner.Start("Generating torrent header...")
-	headerData, err := tl.Serialize(&header, true)
+	waiter, _ = pterm.DefaultSpinner.Start("Generating bag header...")
+	headerData, err := tl.Serialize(&torrent.Header, true)
 	if err != nil {
 		waiter.Fail(err.Error())
 		return nil, fmt.Errorf("failed to serialize header: %w", err)
@@ -157,7 +157,7 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 	}
 	waiter.Success()
 
-	progress, _ := pterm.DefaultProgressbar.WithTotal(len(filesList)).WithTitle("Validating torrent files...").Start()
+	progress, _ := pterm.DefaultProgressbar.WithTotal(len(filesList)).WithTitle("Validating files...").Start()
 
 	// add files
 	for _, f := range filesList {
@@ -182,14 +182,34 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 
 		// save index of file where block starts
 		pieces = append(pieces, &PieceInfo{
-			HashForProof:   cell.BeginCell().MustStoreSlice(hash, 256).EndCell().Hash(),
-			StartFileIndex: blockStartFileIndex,
+			StartFileIndex: pieceStartFileIndex,
 		})
 	}
 
 	hashTree := buildHashTree(hashes)
+	for i, piece := range pieces {
+		proof, err := hashTree.CreateProof([][]byte{cell.BeginCell().MustStoreSlice(hashes[i], 256).EndCell().Hash()})
+		if err != nil {
+			return nil, fmt.Errorf("failed to calc proof for piece %d: %w", i, err)
+		}
+		piece.Proof = proof.ToBOCWithFlags(false)
+	}
 
-	info := storage.TorrentInfo{
+	for i, piece := range pieces {
+		err := torrent.setPiece(uint32(i), piece)
+		if err != nil {
+			return nil, fmt.Errorf("failed to store piece %d in db: %w", i, err)
+		}
+	}
+
+	for i, file := range files {
+		err := torrent.setFileIndex(uint32(i), file)
+		if err != nil {
+			return nil, fmt.Errorf("failed to store file index %d in db: %w", i, err)
+		}
+	}
+
+	torrent.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
 		FileSize:   uint64(len(headerData)) + filesSize,
 		RootHash:   hashTree.Hash(),
@@ -201,22 +221,16 @@ func CreateTorrent(path, description string) (*Torrent, error) {
 		},
 	}
 
-	tCell, err := tlb.ToCell(info)
+	tCell, err := tlb.ToCell(torrent.Info)
 	if err != nil {
 		waiter.Fail(err.Error())
 		return nil, err
 	}
-	waiter.Success()
+	waiter.Success("Merkle tree successfully built")
 
-	return &Torrent{
-		BagID:      tCell.Hash(),
-		Path:       path,
-		Header:     header,
-		Info:       info,
-		PieceIndex: pieces,
-		Index:      files,
-		HashTree:   hashTree,
-	}, nil
+	torrent.BagID = tCell.Hash()
+
+	return torrent, nil
 }
 
 func buildHashTree(hashes [][]byte) *cell.Cell {

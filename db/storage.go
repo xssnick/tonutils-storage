@@ -1,17 +1,15 @@
 package db
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-go/adnl"
-	"github.com/xssnick/tonutils-storage/torrent"
-	"io/fs"
-	"log"
-	"os"
-	"path/filepath"
+	"github.com/xssnick/tonutils-storage/storage"
 	"sync"
 )
 
@@ -23,20 +21,21 @@ type Config struct {
 }
 
 type Storage struct {
-	dbPath          string
-	torrents        map[string]*torrent.Torrent
-	torrentsOverlay map[string]*torrent.Torrent
-	mx              sync.RWMutex
+	torrents        map[string]*storage.Torrent
+	torrentsOverlay map[string]*storage.Torrent
+
+	db *leveldb.DB
+	mx sync.RWMutex
 }
 
-func NewStorage(dbPath string) (*Storage, error) {
+func NewStorage(db *leveldb.DB) (*Storage, error) {
 	s := &Storage{
-		dbPath:          dbPath,
-		torrents:        map[string]*torrent.Torrent{},
-		torrentsOverlay: map[string]*torrent.Torrent{},
+		torrents:        map[string]*storage.Torrent{},
+		torrentsOverlay: map[string]*storage.Torrent{},
+		db:              db,
 	}
 
-	err := s.loadTorrents(dbPath + "/torrents")
+	err := s.loadTorrents()
 	if err != nil {
 		return nil, err
 	}
@@ -44,39 +43,48 @@ func NewStorage(dbPath string) (*Storage, error) {
 	return s, nil
 }
 
-func (s *Storage) GetTorrent(hash []byte) *torrent.Torrent {
+func (s *Storage) GetTorrent(hash []byte) *storage.Torrent {
 	s.mx.RLock()
 	defer s.mx.RUnlock()
 
 	return s.torrents[string(hash)]
 }
 
-func (s *Storage) GetTorrentByOverlay(overlay []byte) *torrent.Torrent {
+func (s *Storage) GetTorrentByOverlay(overlay []byte) *storage.Torrent {
 	s.mx.RLock()
 	defer s.mx.RUnlock()
 
 	return s.torrentsOverlay[string(overlay)]
 }
 
-func (s *Storage) GetAll() []*torrent.Torrent {
+func (s *Storage) GetAll() []*storage.Torrent {
 	s.mx.RLock()
 	defer s.mx.RUnlock()
 
-	res := make([]*torrent.Torrent, 0, len(s.torrents))
+	res := make([]*storage.Torrent, 0, len(s.torrents))
 	for _, t := range s.torrents {
 		res = append(res, t)
 	}
 	return res
 }
 
-func (s *Storage) AddTorrent(t *torrent.Torrent) error {
-	f, err := os.Create(s.dbPath + "/torrents/" + hex.EncodeToString(t.BagID) + ".json")
+func (s *Storage) SetTorrent(t *storage.Torrent) error {
+	data, err := json.Marshal(&TorrentStored{
+		BagID:  t.BagID,
+		Path:   t.Path,
+		Info:   t.Info,
+		Header: t.Header,
+		Active: t.IsActive(),
+	})
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
-	err = json.NewEncoder(f).Encode(t)
+	k := make([]byte, 5+32)
+	copy(k, "bags:")
+	copy(k[5:], t.BagID)
+
+	err = s.db.Put(k, data, nil)
 	if err != nil {
 		return err
 	}
@@ -84,7 +92,7 @@ func (s *Storage) AddTorrent(t *torrent.Torrent) error {
 	return s.addTorrent(t)
 }
 
-func (s *Storage) addTorrent(t *torrent.Torrent) error {
+func (s *Storage) addTorrent(t *storage.Torrent) error {
 	id, err := adnl.ToKeyID(adnl.PublicKeyOverlay{Key: t.BagID})
 	if err != nil {
 		return err
@@ -96,49 +104,46 @@ func (s *Storage) addTorrent(t *torrent.Torrent) error {
 	return nil
 }
 
-func (s *Storage) loadTorrents(path string) error {
-	_, err := os.Stat(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			err = os.MkdirAll(path, os.ModePerm)
+type TorrentStored struct {
+	BagID  []byte
+	Path   string
+	Info   *storage.TorrentInfo
+	Header *storage.TorrentHeader
+	Active bool
+}
+
+func (s *Storage) loadTorrents() error {
+	iter := s.db.NewIterator(&util.Range{Start: []byte("bags:")}, nil)
+	for iter.Next() {
+		if !bytes.HasPrefix(iter.Key(), []byte("bags:")) {
+			break
 		}
+
+		var tr TorrentStored
+		err := json.Unmarshal(iter.Value(), &tr)
 		if err != nil {
-			return err
-		}
-	}
-
-	err = filepath.Walk(path, func(filePath string, info fs.FileInfo, err error) error {
-		if info.IsDir() {
-			return nil
+			return fmt.Errorf("failed to load %s from db: %w", hex.EncodeToString(iter.Key()[5:]), err)
 		}
 
-		if err != nil {
-			log.Println("failed to load", info.Name())
-			return nil
-		}
+		t := storage.NewTorrent(tr.Path, s, tr.Active)
+		t.Info = tr.Info
+		t.Header = tr.Header
+		t.BagID = tr.BagID
 
-		file, err := os.Open(filePath)
-		if err != nil {
-			log.Println("failed to open", info.Name())
-			return nil
-		}
-		defer file.Close()
-
-		var t *torrent.Torrent
-		if err = json.NewDecoder(file).Decode(&t); err != nil {
-			log.Println("failed to parse db for", info.Name())
-			return nil
+		if t.Info != nil {
+			t.InitMask()
+			// cache header
+			err = t.BuildCache(int(t.Info.HeaderSize/uint64(t.Info.PieceSize)) + 1)
+			if err != nil {
+				return fmt.Errorf("failed to build cache for %s: %w", hex.EncodeToString(t.BagID), err)
+			}
 		}
 
 		err = s.addTorrent(t)
 		if err != nil {
-			log.Println("failed to add", info.Name())
-			return nil
+			return fmt.Errorf("failed to add torrent %s from db: %w", hex.EncodeToString(t.BagID), err)
 		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to load torrents: %w", err)
 	}
+
 	return nil
 }

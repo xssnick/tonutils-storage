@@ -73,7 +73,7 @@ func checkCanSeed() (string, bool) {
 	}
 	sp.Success("Port checker resolved.")
 
-	sp, _ = pterm.DefaultSpinner.Start("Using port checker at", ips[0].String())
+	sp, _ = pterm.DefaultSpinner.Start("Using port checker tonutils.com at ", ips[0].String())
 	conn, err := net.Dial("tcp", ips[0].String()+":9099")
 	if err != nil {
 		return "", false
@@ -87,12 +87,11 @@ func checkCanSeed() (string, bool) {
 	select {
 	case k := <-ch:
 		ok = k
-		_ = sp.Stop()
-		pterm.Success.Println("Ports are open, public ip is", ip, "Seed mode will be used.")
+		sp.Success("Ports are open, public ip is ", ip, " Seeding is available, bags can be downloaded from you.")
 	case <-ctx.Done():
 		_ = sp.Stop()
-		pterm.Warning.Println("No request from port checker, looks like it cannot reach us, so ports probably closed. You can download, " +
-			"but no-one can download from you, unless you specify your ip manually in config.json")
+		pterm.Warning.Println("No request from port checker, looks like it cannot reach you, so ports are probably closed. You can download, " +
+			"but no-one can download from you, unless you specify your ip manually in db's config.json")
 	}
 
 	return ip, ok

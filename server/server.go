@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"github.com/pterm/pterm"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
@@ -12,10 +14,9 @@ import (
 	"github.com/xssnick/tonutils-go/adnl/storage"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-storage/db"
-	"log"
 	"math/rand"
-	"net"
-	"reflect"
+	"sort"
+	"sync"
 	"time"
 )
 
@@ -25,12 +26,16 @@ type Server struct {
 	gate     *adnl.Gateway
 	store    *db.Storage
 	closeCtx context.Context
-	closer   func()
+
+	bytesLimitPerSec  uint64
+	uploaded          uint64
+	uploadedUpdatedAt time.Time
+	speedMx           sync.Mutex
+
+	closer func()
 }
 
-func NewServer(store *db.Storage, dht *dht.Client, key ed25519.PrivateKey, listen string, externalIP net.IP) error {
-	gate := adnl.NewGateway(key)
-	serverMode := externalIP != nil
+func NewServer(store *db.Storage, dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool) error {
 
 	s := Server{
 		key:   key,
@@ -39,19 +44,6 @@ func NewServer(store *db.Storage, dht *dht.Client, key ed25519.PrivateKey, liste
 		store: store,
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
-
-	if serverMode {
-		gate.SetExternalIP(externalIP)
-		err := s.gate.StartServer(listen)
-		if err != nil {
-			return err
-		}
-	} else {
-		err := s.gate.StartClient()
-		if err != nil {
-			return err
-		}
-	}
 
 	s.gate.SetConnectionHandler(func(client adnl.Peer) error {
 		session := rand.Int63()
@@ -81,7 +73,7 @@ func NewServer(store *db.Storage, dht *dht.Client, key ed25519.PrivateKey, liste
 				cancel()
 
 				if err != nil {
-					println("DHT ADNL address record update failed: ", err, ". We will retry in 5 sec")
+					pterm.Warning.Println("DHT ADNL address record update failed: ", err, ". We will retry in 5 sec")
 
 					// on err, retry sooner
 					wait = 5 * time.Second
@@ -112,13 +104,17 @@ func NewServer(store *db.Storage, dht *dht.Client, key ed25519.PrivateKey, liste
 	return nil
 }
 
+func (s *Server) SetSpeedLimit(bytesPerSec uint64) {
+	s.bytesLimitPerSec = bytesPerSec
+}
+
 func (s *Server) handleQuery(peer *overlay.ADNLWrapper, session int64) func(query *adnl.MessageQuery) error {
 	return func(query *adnl.MessageQuery) error {
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		t := s.store.GetTorrentByOverlay(over)
-		if t == nil {
-			return fmt.Errorf("torrent not found")
+		if t == nil || !t.IsActive() {
+			return fmt.Errorf("bag not found")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -177,12 +173,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		t := s.store.GetTorrentByOverlay(over)
-		if t == nil {
-			return fmt.Errorf("torrent not found")
+		if t == nil || !t.IsActive() {
+			return fmt.Errorf("bag not found")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+
+		updatePeer := true
 
 		switch q := req.(type) {
 		case overlay.GetRandomPeers:
@@ -196,9 +194,38 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 		case storage.GetPiece:
+			if s.bytesLimitPerSec > 0 {
+				limitCtx, cancelLimit := context.WithTimeout(ctx, time.Duration(query.Timeout)*time.Second)
+				defer cancelLimit()
+
+				s.speedMx.Lock()
+				select {
+				case <-limitCtx.Done():
+					s.speedMx.Unlock()
+					// piece is not needed anymore
+					return nil
+				default:
+				}
+
+				if s.uploaded > s.bytesLimitPerSec {
+					wait := time.Duration(float64(s.uploaded) / float64(s.bytesLimitPerSec) * float64(time.Second))
+
+					select {
+					case <-limitCtx.Done():
+						s.speedMx.Unlock()
+						// piece is not needed anymore
+						return nil
+					case <-time.After(wait):
+						s.uploaded = 0
+					}
+				}
+				s.uploadedUpdatedAt = time.Now()
+				s.uploaded += uint64(t.Info.PieceSize)
+				s.speedMx.Unlock()
+			}
+
 			p, err := t.GetPiece(uint32(q.PieceID))
 			if err != nil {
-				println("ERR", err.Error())
 				return err
 			}
 
@@ -207,6 +234,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
+			t.UpdateUploadedPeer(peer.GetADNL().GetID(), uint64(len(p.Data)))
+			updatePeer = false
 		case storage.Ping:
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, storage.Pong{})
 			if err != nil {
@@ -215,26 +244,11 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 
 			if isFirst {
 				isFirst = false
-				maskLen := len(t.PieceIndex) / 8
-				if len(t.PieceIndex)%8 != 0 {
-					maskLen++
-				}
-
-				bitmask := make([]byte, maskLen)
-				for i := 0; i < maskLen; i++ {
-					bitmask[i] = 0xFF
-				}
-
-				ppc := make([]int32, len(t.PieceIndex))
-				for i := range t.PieceIndex {
-					ppc[i] = int32(i)
-				}
-
 				up := storage.AddUpdate{
 					SessionID: q.SessionID,
 					Seqno:     1,
 					Update: storage.UpdateInit{
-						HavePieces:       bitmask,
+						HavePieces:       t.PiecesMask(),
 						HavePiecesOffset: 0,
 						State: storage.State{
 							WillUpload:   true,
@@ -279,8 +293,13 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 		default:
-			println("UNEXPECTED ", reflect.TypeOf(q).String())
+			updatePeer = false
 		}
+
+		if updatePeer {
+			t.TouchPeer(peer.GetADNL().GetID())
+		}
+
 		return nil
 	}
 }
@@ -308,20 +327,60 @@ func (s *Server) updateTorrents(ctx context.Context) error {
 	list := s.store.GetAll()
 
 	for _, torrent := range list {
-		node, err := overlay.NewNode(torrent.BagID, s.key)
-		if err != nil {
-			log.Printf("Failed to update DHT record for torrent %s: %v", hex.EncodeToString(torrent.BagID), err)
+		nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
+		if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
 			continue
 		}
-		nodesList := &overlay.NodesList{
-			List: []overlay.Node{*node},
+
+		if nodesList == nil {
+			nodesList = &overlay.NodesList{}
+		}
+
+		node, err := overlay.NewNode(torrent.BagID, s.key)
+		if err != nil {
+			pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+			continue
+		}
+
+		refreshed := false
+		// refresh if already exists
+		for i := range nodesList.List {
+			id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
+			if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
+				nodesList.List[i] = *node
+				refreshed = true
+				break
+			}
+		}
+
+		if !refreshed {
+			// create if no records
+			if len(nodesList.List) == 0 {
+				nodesList = &overlay.NodesList{
+					List: []overlay.Node{*node},
+				}
+			} else {
+				if len(nodesList.List) >= 5 {
+					sort.Slice(nodesList.List, func(i, j int) bool {
+						return nodesList.List[i].Version < nodesList.List[j].Version
+					})
+
+					// TODO: store in diff dht node instead
+					// replace oldest
+					nodesList.List[0] = *node
+				} else {
+					// add our node if < 5 in list
+					nodesList.List = append(nodesList.List, *node)
+				}
+			}
 		}
 
 		ctxStore, cancel := context.WithTimeout(ctx, 30*time.Second)
 		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
 		cancel()
 		if err != nil && stored == 0 {
-			return err
+			pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+			continue
 		}
 
 		//	log.Println("DHT ADNL address record for bag was refreshed successfully")
