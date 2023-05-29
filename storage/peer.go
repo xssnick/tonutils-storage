@@ -5,6 +5,22 @@ import (
 	"time"
 )
 
+type speedInfo struct {
+	prevAt    time.Time
+	prevBytes uint64
+	nextBytes uint64
+	speed     uint64
+}
+
+type PeerInfo struct {
+	LastSeenAt time.Time
+	Uploaded   uint64
+	Downloaded uint64
+
+	uploadSpeed   *speedInfo
+	downloadSpeed *speedInfo
+}
+
 func (t *Torrent) GetPeers() map[string]PeerInfo {
 	t.peersMx.RLock()
 	defer t.peersMx.RUnlock()
@@ -43,7 +59,10 @@ func (t *Torrent) touchPeer(id []byte) *PeerInfo {
 	strId := hex.EncodeToString(id)
 	p := t.peers[strId]
 	if p == nil {
-		p = &PeerInfo{}
+		p = &PeerInfo{
+			uploadSpeed:   &speedInfo{},
+			downloadSpeed: &speedInfo{},
+		}
 		t.peers[strId] = p
 	}
 	p.LastSeenAt = time.Now()
@@ -58,7 +77,7 @@ func (t *Torrent) runPeersMonitor() {
 			t.peers = map[string]*PeerInfo{}
 			t.peersMx.Unlock()
 			return
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 		}
 
 		t.peersMx.Lock()
@@ -69,5 +88,35 @@ func (t *Torrent) runPeersMonitor() {
 		}
 		t.peersMx.Unlock()
 
+		for _, p := range t.GetPeers() {
+			p.downloadSpeed.calculate(p.Downloaded)
+			p.uploadSpeed.calculate(p.Uploaded)
+		}
 	}
+}
+
+func (s *speedInfo) calculate(nowBytes uint64) {
+	downloaded := nowBytes - s.prevBytes
+
+	period := uint64(time.Since(s.prevAt) / (1 * time.Second))
+	if period == 0 {
+		period = 1
+	}
+
+	if time.Since(s.prevAt) > 20*time.Second {
+		s.prevBytes = s.nextBytes
+		s.prevAt = time.Now()
+	} else if time.Since(s.prevAt) >= 10*time.Second {
+		s.nextBytes = nowBytes
+	}
+
+	s.speed = downloaded / period
+}
+
+func (p *PeerInfo) GetDownloadSpeed() uint64 {
+	return p.downloadSpeed.speed
+}
+
+func (p *PeerInfo) GetUploadSpeed() uint64 {
+	return p.uploadSpeed.speed
 }

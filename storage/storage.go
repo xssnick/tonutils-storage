@@ -208,6 +208,14 @@ func (t *Torrent) GetFileOffsets(name string) (*FileInfo, error) {
 	if !ok {
 		return nil, ErrFileNotExist
 	}
+	return t.GetFileOffsetsByID(i)
+}
+
+func (t *Torrent) GetFileOffsetsByID(i uint32) (*FileInfo, error) {
+	if int(i) >= len(t.Header.DataIndex) {
+		println("LL", i, len(t.Header.DataIndex))
+		return nil, ErrFileNotExist
+	}
 	info := &FileInfo{
 		Index: i,
 	}
@@ -222,6 +230,13 @@ func (t *Torrent) GetFileOffsets(name string) (*FileInfo, error) {
 	info.FromPieceOffset = uint32((t.Info.HeaderSize + start) - uint64(info.FromPiece)*uint64(t.Info.PieceSize))
 	info.ToPieceOffset = uint32((t.Info.HeaderSize + end) - uint64(info.ToPiece)*uint64(t.Info.PieceSize))
 	info.Size = (uint64(info.ToPiece-info.FromPiece)*uint64(t.Info.PieceSize) + uint64(info.ToPieceOffset)) - uint64(info.FromPieceOffset)
+
+	var nameFrom uint64 = 0
+	if i > 0 {
+		nameFrom = t.Header.NameIndex[i-1]
+	}
+	info.Name = string(t.Header.Names[nameFrom:t.Header.NameIndex[i]])
+
 	return info, nil
 }
 

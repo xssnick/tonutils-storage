@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-storage/storage"
 )
@@ -50,6 +51,56 @@ func (s *Storage) SetFileIndex(bagId []byte, id uint32, fi *storage.FileIndex) e
 	copy(v[16:], name)
 
 	return s.db.Put(k, v, nil)
+}
+
+func (s *Storage) RemoveFileIndex(bagId []byte, id uint32) error {
+	if len(bagId) != 32 {
+		panic("invalid bag id len, should be 32")
+	}
+
+	k := make([]byte, 3+4+32)
+	copy(k, "fi:")
+	copy(k[3:3+32], bagId)
+	binary.LittleEndian.PutUint32(k[3+32:], id)
+
+	return s.db.Delete(k, nil)
+}
+
+func (s *Storage) SetActiveFiles(bagId []byte, ids []uint32) error {
+	if len(bagId) != 32 {
+		panic("invalid bag id len, should be 32")
+	}
+
+	k := make([]byte, 3+32)
+	copy(k, "ai:")
+	copy(k[3:3+32], bagId)
+
+	v := make([]byte, len(ids)*4)
+	for i := 0; i < len(ids); i++ {
+		binary.LittleEndian.PutUint32(v[i*4:], ids[i])
+	}
+	return s.db.Put(k, v, nil)
+}
+
+func (s *Storage) GetActiveFiles(bagId []byte) ([]uint32, error) {
+	if len(bagId) != 32 {
+		panic("invalid bag id len, should be 32")
+	}
+
+	k := make([]byte, 3+32)
+	copy(k, "ai:")
+	copy(k[3:3+32], bagId)
+
+	res, err := s.db.Get(k, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var files = make([]uint32, len(res)/4)
+	for i := 0; i < len(res)/4; i++ {
+		files[i] = binary.LittleEndian.Uint32(res[i*4:])
+	}
+	return files, nil
 }
 
 func (s *Storage) GetPiece(bagId []byte, id uint32) (*storage.PieceInfo, error) {
@@ -100,6 +151,7 @@ func (s *Storage) SetPiece(bagId []byte, id uint32, p *storage.PieceInfo) error 
 	binary.LittleEndian.PutUint32(v, p.StartFileIndex)
 	copy(v[4:], p.Proof)
 
+	println("PUT", hex.EncodeToString(bagId), id, p.StartFileIndex)
 	return s.db.Put(k, v, nil)
 }
 

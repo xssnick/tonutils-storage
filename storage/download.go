@@ -1,26 +1,14 @@
 package storage
 
 import (
-	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
-	"github.com/xssnick/tonutils-go/adnl"
 	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 )
-
-type Downloader struct {
-	client *Client
-}
-
-func NewDownloader(dht DHT) *Downloader {
-	return &Downloader{
-		client: NewClient(dht),
-	}
-}
 
 type fileInfo struct {
 	path string
@@ -52,69 +40,98 @@ const (
 	EventProgress        = "PROGRESS"
 )
 
-func (d *Downloader) Download(t *Torrent, gate *adnl.Gateway, bag []byte, onlyHeader bool, report chan<- Event, files []string) func() {
-	ctx, stopper := context.WithCancel(context.Background())
+func (t *Torrent) prepareDownloader(ctx context.Context) error {
+	if t.connector == nil {
+		return fmt.Errorf("no connector for torrent")
+	}
+
+	var err error
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		if t.downloader == nil || !t.downloader.IsActive() {
+			t.downloader, err = t.connector.CreateDownloader(ctx, t, 5, 20, math.MaxUint32)
+			if err != nil {
+				Logger("bag information not resolved: %s", err.Error())
+				time.Sleep(1 * time.Second)
+				continue
+			}
+		}
+		return nil
+	}
+}
+
+func (t *Torrent) startDownload(report func(Event), downloadAll bool) error {
+	if t.BagID == nil {
+		return fmt.Errorf("bag is not set")
+	}
+
+	t.mx.Lock()
+	if t.stopDownload != nil {
+		// stop current download
+		t.stopDownload()
+	}
+	var ctx context.Context
+	ctx, t.stopDownload = context.WithCancel(t.globalCtx)
+	t.mx.Unlock()
+
 	go func() {
-		if t.BagID != nil && !bytes.Equal(t.BagID, bag) {
-			report <- Event{Name: EventErr, Value: fmt.Errorf("bag not matches torrent: %s %s",
-				hex.EncodeToString(t.BagID), hex.EncodeToString(bag))}
-			return
-		}
-		t.BagID = bag
-
-		dn, err := d.client.createDownloader(ctx, t, gate, 5, 20, math.MaxUint32)
-		if err != nil {
-			report <- Event{Name: EventErr, Value: fmt.Errorf("bag information not resolved: %w", err)}
-			return
-		}
-		defer dn.Close()
-
 		piecesMap := map[uint32]bool{}
-		list := make([]fileInfo, 0, len(files))
+		var list []fileInfo
+
+		if t.Header == nil || t.Info == nil {
+			if err := t.prepareDownloader(ctx); err != nil {
+				return
+			}
+		}
 
 		var downloaded uint64
-		var rootPath string
-		if !onlyHeader {
-			rootPath = t.Path + "/" + string(t.Header.DirName)
-			if len(files) == 0 {
-				files, err = t.ListFiles()
-				if err != nil {
-					report <- Event{Name: EventErr, Value: fmt.Errorf("failed to list files: %w", err)}
-					return
+		rootPath := t.Path + "/" + string(t.Header.DirName)
+
+		var files []uint32
+		if downloadAll {
+			for i := uint32(0); i < t.Header.FilesCount; i++ {
+				files = append(files, i)
+			}
+		} else {
+			files = t.GetActiveFilesIDs()
+		}
+
+		list = make([]fileInfo, 0, len(files))
+		for _, f := range files {
+			info, err := t.GetFileOffsetsByID(f)
+			if err != nil {
+				continue
+			}
+
+			needFile := false
+
+			_, err = os.Stat(rootPath + "/" + info.Name)
+			if err != nil {
+				needFile = true
+				for i := info.FromPiece; i <= info.ToPiece; i++ {
+					piecesMap[i] = true
+					// file was deleted, delete pieces records also
+					_ = t.removePiece(i)
+				}
+			} else {
+				for i := info.FromPiece; i <= info.ToPiece; i++ {
+					// TODO: read file parts and compare with hashes
+					if _, err = t.getPiece(i); err != nil {
+						needFile = true
+						piecesMap[i] = true
+						continue
+					}
+					downloaded++
 				}
 			}
 
-			for _, f := range files {
-				info, err := t.GetFileOffsets(f)
-				if err != nil {
-					continue
-				}
-
-				needFile := false
-
-				_, err = os.Stat(rootPath + "/" + f)
-				if err != nil {
-					needFile = true
-					for i := info.FromPiece; i <= info.ToPiece; i++ {
-						piecesMap[i] = true
-						// file was deleted, delete pieces records also
-						_ = t.removePiece(i)
-					}
-				} else {
-					for i := info.FromPiece; i <= info.ToPiece; i++ {
-						// TODO: read file parts and compare with hashes
-						if _, err = t.getPiece(i); err != nil {
-							needFile = true
-							piecesMap[i] = true
-							continue
-						}
-						downloaded++
-					}
-				}
-
-				if needFile {
-					list = append(list, fileInfo{info: info, path: f})
-				}
+			if needFile {
+				list = append(list, fileInfo{info: info, path: info.Name})
 			}
 		}
 
@@ -123,38 +140,40 @@ func (d *Downloader) Download(t *Torrent, gate *adnl.Gateway, bag []byte, onlyHe
 			pieces = append(pieces, p)
 		}
 
-		sort.Slice(pieces, func(i, j int) bool {
-			return pieces[i] < pieces[j]
-		})
-		sort.Slice(list, func(i, j int) bool {
-			return uint64(list[i].info.ToPiece)<<32+uint64(list[i].info.ToPieceOffset) <
-				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
-		})
+		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.PiecesNum()), PiecesToDownload: len(pieces)}})
+		if len(pieces) > 0 {
+			sort.Slice(pieces, func(i, j int) bool {
+				return pieces[i] < pieces[j]
+			})
+			sort.Slice(list, func(i, j int) bool {
+				return uint64(list[i].info.ToPiece)<<32+uint64(list[i].info.ToPieceOffset) <
+					uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
+			})
 
-		report <- Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.piecesNum()), PiecesToDownload: len(pieces)}}
-		if onlyHeader {
-			return
+			if err := t.prepareDownloader(ctx); err != nil {
+				return
+			}
+
+			fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 20, 200, 0, pieces)
+			defer fetch.Stop()
+
+			if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
+				report(Event{Name: EventErr, Value: err})
+				return
+			}
 		}
 
-		fetch := NewPreFetcher(ctx, t, dn, report, downloaded, 20, 200, 0, pieces)
-		defer fetch.Stop()
-
-		if err = writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
-			report <- Event{Name: EventErr, Value: err}
-			return
-		}
-
-		report <- Event{Name: EventDone, Value: DownloadResult{
+		report(Event{Name: EventDone, Value: DownloadResult{
 			Path:        rootPath,
 			Dir:         string(t.Header.DirName),
 			Description: t.Info.Description.Value,
-		}}
+		}})
 	}()
 
-	return stopper
+	return nil
 }
 
-func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap map[uint32]bool, rootPath string, report chan<- Event, fetch *PreFetcher) error {
+func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap map[uint32]bool, rootPath string, report func(Event), fetch *PreFetcher) error {
 	var currentPieceId uint32
 	var pieceStartFileIndex uint32
 	var currentPiece, currentProof []byte
@@ -226,7 +245,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 				}
 			}
 
-			report <- Event{Name: EventFileDownloaded, Value: off.path}
+			report(Event{Name: EventFileDownloaded, Value: off.path})
 			return nil
 		}()
 		if err != nil {

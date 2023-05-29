@@ -29,7 +29,7 @@ type PreFetcher struct {
 	limitMx                  sync.Mutex
 
 	downloaded uint64
-	report     chan<- Event
+	report     func(Event)
 
 	mx    sync.RWMutex
 	ctx   context.Context
@@ -41,7 +41,7 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, dn TorrentDownloader, report chan<- Event, downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, dn TorrentDownloader, report func(Event), downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
@@ -128,7 +128,7 @@ func (f *PreFetcher) worker() {
 		case <-f.ctx.Done():
 			return
 		case task = <-f.tasks:
-			if f.bytesLimitPerSec > 0 {
+			/*if f.bytesLimitPerSec > 0 {
 				f.limitMx.Lock()
 				if f.limitDownloaded > f.bytesLimitPerSec {
 					wait := time.Duration(float64(f.limitDownloaded) / float64(f.bytesLimitPerSec) * float64(time.Second))
@@ -143,7 +143,7 @@ func (f *PreFetcher) worker() {
 				f.limitDownloadedUpdatedAt = time.Now()
 				f.limitDownloaded += uint64(f.torrent.Info.PieceSize)
 				f.limitMx.Unlock()
-			}
+			}*/
 		}
 
 		for {
@@ -159,7 +159,7 @@ func (f *PreFetcher) worker() {
 				f.torrent.UpdateDownloadedPeer(peer, uint64(len(data)))
 
 				atomic.AddUint64(&f.downloaded, 1)
-				f.report <- Event{Name: EventPieceDownloaded, Value: task}
+				f.report(Event{Name: EventPieceDownloaded, Value: task})
 
 				break
 			}
@@ -202,10 +202,10 @@ func (f *PreFetcher) speedometer() {
 
 		f.speed = downloaded / period
 
-		f.report <- Event{Name: EventProgress, Value: Progress{
+		f.report(Event{Name: EventProgress, Value: Progress{
 			Downloaded: ToSz(atomic.LoadUint64(&f.downloaded) * uint64(f.torrent.Info.PieceSize)),
 			Speed:      ToSpeed(f.speed),
-		}}
+		}})
 	}
 }
 

@@ -39,6 +39,7 @@ type FileInfo struct {
 	FromPieceOffset uint32
 	ToPieceOffset   uint32
 	Index           uint32
+	Name            string
 }
 
 type TorrentDownloader interface {
@@ -46,16 +47,7 @@ type TorrentDownloader interface {
 	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, err error)
 	SetDesiredMinNodesNum(num int)
 	Close()
-}
-
-type Client struct {
-	dht DHT
-}
-
-func NewClient(dht DHT) *Client {
-	return &Client{
-		dht: dht,
-	}
+	IsActive() bool
 }
 
 type torrentDownloader struct {
@@ -66,7 +58,7 @@ type torrentDownloader struct {
 	attempts           int
 
 	torrent     *Torrent
-	client      *Client
+	dht         DHT
 	knownNodes  map[string]*overlay.Node
 	activeNodes map[string]*storageNode
 	gate        *adnl.Gateway
@@ -113,21 +105,30 @@ type TorrentInfo struct {
 	Description tlb.Text `tlb:"."`
 }
 
-func (c *Client) createDownloader(ctx context.Context, torrent *Torrent, gate *adnl.Gateway, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error) {
+type Connector struct {
+	gate *adnl.Gateway
+	dht  DHT
+}
+
+func NewConnector(gate *adnl.Gateway, dht DHT) *Connector {
+	return &Connector{gate: gate, dht: dht}
+}
+
+func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error) {
 	tries := 2
 	if len(attempts) > 0 {
 		tries = attempts[0]
 	}
 
-	if len(torrent.BagID) != 32 {
+	if len(t.BagID) != 32 {
 		return nil, fmt.Errorf("invalid torrent bag id")
 	}
 
-	globalCtx, downloadCancel := context.WithCancel(context.Background())
+	globalCtx, downloadCancel := context.WithCancel(ctx)
 	var dow = &torrentDownloader{
-		client:             c,
-		gate:               gate,
-		torrent:            torrent,
+		dht:                c.dht,
+		gate:               c.gate,
+		torrent:            t,
 		activeNodes:        map[string]*storageNode{},
 		knownNodes:         map[string]*overlay.Node{},
 		globalCtx:          globalCtx,
@@ -144,7 +145,7 @@ func (c *Client) createDownloader(ctx context.Context, torrent *Torrent, gate *a
 
 	if dow.torrent.Info == nil {
 		// connect to first node and resolve torrent info
-		err = dow.scale(ctx, 1, tries)
+		err = dow.scale(globalCtx, 1, tries)
 		if err != nil {
 			err = fmt.Errorf("failed to find storage nodes for this bag, err: %w", err)
 			return nil, err
@@ -163,7 +164,7 @@ func (c *Client) createDownloader(ctx context.Context, torrent *Torrent, gate *a
 			return nil, err
 		}
 	}
-	dow.piecesNum = dow.torrent.piecesNum()
+	dow.piecesNum = dow.torrent.PiecesNum()
 
 	go dow.scaleController()
 
@@ -177,7 +178,7 @@ func (c *Client) createDownloader(ctx context.Context, torrent *Torrent, gate *a
 		data := make([]byte, 0, hdrPieces*uint64(dow.torrent.Info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
 		for i := uint32(0); i < uint32(hdrPieces); i++ {
-			piece, proof, peer, pieceErr := dow.DownloadPieceDetailed(ctx, i)
+			piece, proof, peer, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
 			if pieceErr != nil {
 				err = fmt.Errorf("failed to get header piece %d, err: %w", i, pieceErr)
 				return nil, err
@@ -316,7 +317,7 @@ func (s *storageNode) loop() {
 }
 
 func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, node *overlay.Node, onDisconnect func()) (*storageNode, error) {
-	addrs, keyN, err := t.client.dht.FindAddresses(ctx, adnlID)
+	addrs, keyN, err := t.dht.FindAddresses(ctx, adnlID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find node address: %w", err)
 	}
@@ -689,7 +690,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 		var nodes *overlay.NodesList
 
 		ctxFind, cancel := context.WithTimeout(ctx, 15*time.Second)
-		nodes, nodesDhtCont, err = t.client.dht.FindOverlayNodes(ctxFind, t.torrent.BagID, nodesDhtCont)
+		nodes, nodesDhtCont, err = t.dht.FindOverlayNodes(ctxFind, t.torrent.BagID, nodesDhtCont)
 		cancel()
 		if err != nil {
 			if attempts != -1 {
@@ -742,4 +743,13 @@ func (t *torrentDownloader) SetDesiredMinNodesNum(num int) {
 
 func (t *torrentDownloader) Close() {
 	t.downloadCancel()
+}
+
+func (t *torrentDownloader) IsActive() bool {
+	select {
+	case <-t.globalCtx.Done():
+		return false
+	default:
+		return true
+	}
 }

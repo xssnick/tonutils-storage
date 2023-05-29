@@ -36,7 +36,6 @@ type Server struct {
 }
 
 func NewServer(store *db.Storage, dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool) error {
-
 	s := Server{
 		key:   key,
 		dht:   dht,
@@ -113,8 +112,13 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper, session int64) func(quer
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		t := s.store.GetTorrentByOverlay(over)
-		if t == nil || !t.IsActive() {
+		if t == nil {
 			return fmt.Errorf("bag not found")
+		}
+
+		_, isUpl := t.IsActive()
+		if !isUpl {
+			return fmt.Errorf("bag is not active")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -173,8 +177,13 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		t := s.store.GetTorrentByOverlay(over)
-		if t == nil || !t.IsActive() {
+		if t == nil {
 			return fmt.Errorf("bag not found")
+		}
+
+		_, isUpl := t.IsActive()
+		if !isUpl {
+			return fmt.Errorf("bag is not active")
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

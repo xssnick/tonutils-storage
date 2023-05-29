@@ -24,8 +24,8 @@ var (
 	DBPath = flag.String("db", "", "Path to db folder")
 )
 
-var Downloader *storage.Downloader
 var Storage *db.Storage
+var Connector storage.NetConnector
 
 func main() {
 	flag.Parse()
@@ -102,9 +102,16 @@ func main() {
 		pterm.Error.Println("Failed to init dht client:", err.Error())
 		os.Exit(1)
 	}
-	Downloader = storage.NewDownloader(dhtClient)
 
-	Storage, err = db.NewStorage(ldb)
+	downloadGate := adnl.NewGateway(cfg.Key)
+	if err = downloadGate.StartClient(); err != nil {
+		pterm.Error.Println("Failed to init dht downloader gateway:", err.Error())
+		os.Exit(1)
+	}
+
+	Connector = storage.NewConnector(downloadGate, dhtClient)
+
+	Storage, err = db.NewStorage(ldb, Connector)
 	if err != nil {
 		pterm.Error.Println("Failed to init storage:", err.Error())
 		os.Exit(1)
@@ -113,12 +120,6 @@ func main() {
 	err = server.NewServer(Storage, dhtClient, gate, cfg.Key, serverMode)
 	if err != nil {
 		pterm.Error.Println("Failed to start adnl server:", err.Error())
-		os.Exit(1)
-	}
-
-	downloadGate := adnl.NewGateway(cfg.Key)
-	if err = downloadGate.StartClient(); err != nil {
-		pterm.Error.Println("Failed to init dht downloader gateway:", err.Error())
 		os.Exit(1)
 	}
 
@@ -178,16 +179,14 @@ func download(bagId string, gate *adnl.Gateway) {
 
 	tor := Storage.GetTorrent(bag)
 	if tor == nil {
-		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, true)
+		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, Connector)
+		if err = tor.Start(true); err != nil {
+			pterm.Error.Println("Failed to start:", err.Error())
+			return
+		}
 	}
 
-	//_, priv, err := ed25519.GenerateKey(nil)
-	//	gate = adnl.NewGateway(priv)
-	//	gate.StartClient()
-
 	report := make(chan storage.Event, 100)
-	_ = Downloader.Download(tor, gate, bag, false, report, []string{})
-
 	sp, _ := pterm.DefaultSpinner.WithText("Resolving bag information...").Start()
 
 	var res *storage.DownloadResult
@@ -241,11 +240,12 @@ func download(bagId string, gate *adnl.Gateway) {
 }
 
 func create(path, name string) {
-	it, err := storage.CreateTorrent(path, name, Storage)
+	it, err := storage.CreateTorrent(path, name, Storage, Connector)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return
 	}
+	it.Start(true)
 
 	err = Storage.SetTorrent(it)
 	if err != nil {

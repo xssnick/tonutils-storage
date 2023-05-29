@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
@@ -24,26 +25,33 @@ type PieceInfo struct {
 	Proof          []byte
 }
 
-type PeerInfo struct {
-	LastSeenAt time.Time
-	Uploaded   uint64
-	Downloaded uint64
-}
-
 type Storage interface {
 	GetFileIndex(bagId []byte, id uint32) (*FileIndex, error)
 	SetFileIndex(bagId []byte, id uint32, fi *FileIndex) error
+	SetActiveFiles(bagId []byte, ids []uint32) error
+	GetActiveFiles(bagId []byte) ([]uint32, error)
 	GetPiece(bagId []byte, id uint32) (*PieceInfo, error)
 	RemovePiece(bagId []byte, id uint32) error
 	SetPiece(bagId []byte, id uint32, p *PieceInfo) error
 	PiecesMask(bagId []byte, num uint32) []byte
 }
 
+type NetConnector interface {
+	CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error)
+}
+
 type Torrent struct {
-	BagID  []byte
-	Path   string
-	Info   *TorrentInfo
-	Header *TorrentHeader
+	BagID     []byte
+	Path      string
+	Info      *TorrentInfo
+	Header    *TorrentHeader
+	CreatedAt time.Time
+
+	activeFiles  []uint32
+	activeUpload bool
+
+	connector  NetConnector
+	downloader TorrentDownloader
 
 	peers   map[string]*PeerInfo
 	peersMx sync.RWMutex
@@ -52,33 +60,33 @@ type Torrent struct {
 	db       Storage
 
 	globalCtx context.Context
-	close     func()
+	pause     func()
 
-	filesIndexCalc sync.Once
-	filesIndex     map[string]uint32
+	filesIndex map[string]uint32
 
 	pieceMask []byte
 
-	mx sync.Mutex
+	mx           sync.Mutex
+	stopDownload func()
 }
 
 var fs = NewFSController()
 
 func (t *Torrent) InitMask() {
-	t.pieceMask = t.db.PiecesMask(t.BagID, t.piecesNum())
+	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
 }
 
 func (t *Torrent) BuildCache(cachePiecesNum int) error {
 	t.memCache = map[uint32]*Piece{}
 
-	num := t.piecesNum()
+	num := t.PiecesNum()
 	if cachePiecesNum > int(num) {
 		cachePiecesNum = int(num)
 	}
 
 	t.memCache = map[uint32]*Piece{}
 	for i := 0; i < cachePiecesNum; i++ {
-		p, err := t.GetPiece(uint32(i))
+		p, err := t.getPieceInternal(uint32(i))
 		if err != nil {
 			return err
 		}
@@ -88,41 +96,52 @@ func (t *Torrent) BuildCache(cachePiecesNum int) error {
 	return nil
 }
 
-func NewTorrent(path string, db Storage, started bool) *Torrent {
+func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t := &Torrent{
-		Path:     path,
-		peers:    map[string]*PeerInfo{},
-		memCache: map[uint32]*Piece{},
-		db:       db,
+		Path:      path,
+		CreatedAt: time.Now(),
+		peers:     map[string]*PeerInfo{},
+		memCache:  map[uint32]*Piece{},
+		db:        db,
+		connector: connector,
 	}
-	t.Start()
 
-	if !started {
-		t.Pause()
-	}
+	// create as stopped
+	t.globalCtx, t.pause = context.WithCancel(context.Background())
+	t.pause()
 
 	return t
 }
 
-func (t *Torrent) IsActive() bool {
+func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	select {
 	case <-t.globalCtx.Done():
-		return false
+		return false, false
 	default:
-		return true
+		return true, t.activeUpload
 	}
 }
 
-func (t *Torrent) Pause() {
-	t.close()
+func (t *Torrent) Stop() {
+	t.activeUpload = false
+	t.pause()
 }
 
-func (t *Torrent) Start() {
-	t.globalCtx, t.close = context.WithCancel(context.Background())
+func (t *Torrent) Start(withUpload bool) (err error) {
+	t.activeUpload = withUpload
+
+	if d, _ := t.IsActive(); d {
+		return nil
+	}
+
+	t.globalCtx, t.pause = context.WithCancel(context.Background())
 	go t.runPeersMonitor()
+
+	println("START", hex.EncodeToString(t.BagID), hex.EncodeToString(t.pieceMask))
+	return t.startDownload(func(event Event) {}, false)
 }
 
-func (t *Torrent) piecesNum() uint32 {
+func (t *Torrent) PiecesNum() uint32 {
 	piecesNum := t.Info.FileSize / uint64(t.Info.PieceSize)
 	if t.Info.FileSize%uint64(t.Info.PieceSize) != 0 {
 		piecesNum++
@@ -145,7 +164,7 @@ func (t *Torrent) getPiece(id uint32) (*PieceInfo, error) {
 func (t *Torrent) removePiece(id uint32) error {
 	i := id / 8
 	y := id % 8
-	t.pieceMask[i] &= 1 << y
+	t.pieceMask[i] &= ^(1 << y)
 	return t.db.RemovePiece(t.BagID, id)
 }
 
@@ -160,13 +179,53 @@ func (t *Torrent) PiecesMask() []byte {
 	return t.pieceMask
 }
 
+func (t *Torrent) LoadActiveFilesIDs() error {
+	files, err := t.db.GetActiveFiles(t.BagID)
+	if err != nil {
+		return fmt.Errorf("failed to load active files from db: %w", err)
+	}
+	t.activeFiles = files
+	return nil
+}
+
+func (t *Torrent) GetActiveFilesIDs() []uint32 {
+	return t.activeFiles
+}
+
+func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
+	if err := t.db.SetActiveFiles(t.BagID, ids); err != nil {
+		return fmt.Errorf("failed to store active files in db: %w", err)
+	}
+	t.activeFiles = ids
+	return t.startDownload(func(event Event) {}, false)
+}
+
+func (t *Torrent) SetActiveFiles(names []string) error {
+	if err := t.calcFileIndexes(); err != nil {
+		return err
+	}
+
+	ids := make([]uint32, 0, len(names))
+	for _, name := range names {
+		val, ok := t.filesIndex[name]
+		if !ok {
+			return fmt.Errorf("file %s is not exist in torrent", name)
+		}
+		ids = append(ids, val)
+	}
+	return t.SetActiveFilesIDs(ids)
+}
+
 func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 	select {
 	case <-t.globalCtx.Done():
 		return nil, fmt.Errorf("torrent paused")
 	default:
 	}
+	return t.getPieceInternal(id)
+}
 
+func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 	if t.memCache != nil {
 		p := t.memCache[id]
 		if p != nil {
@@ -174,8 +233,8 @@ func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 		}
 	}
 
-	if id >= t.piecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.piecesNum())
+	if id >= t.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
 	}
 
 	piece, err := t.getPiece(id)
@@ -195,13 +254,13 @@ func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 
 		// header
 		if f.Name == "" {
-			headerData, err := tl.Serialize(&t.Header, true)
+			headerData, err := tl.Serialize(t.Header, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to serialize header: %w", err)
 			}
 			offset += copy(block[offset:], headerData[id*t.Info.PieceSize:])
 		} else {
-			path := t.Path + "/" + f.Name
+			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
 			read := func(path string, from int64) error {
 				f.mx.Lock()
 				defer f.mx.Unlock()
