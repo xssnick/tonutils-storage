@@ -211,9 +211,36 @@ func (t *Torrent) GetFileOffsets(name string) (*FileInfo, error) {
 	return t.GetFileOffsetsByID(i)
 }
 
+func (t *Torrent) GetFilesInPiece(piece uint32) ([]*FileInfo, error) {
+	start := uint64(piece) * uint64(t.Info.PieceSize)
+	end := uint64(piece+1) * uint64(t.Info.PieceSize)
+
+	var files []*FileInfo
+	for i := range t.Header.DataIndex {
+		fileStart, fileEnd := uint64(0), t.Header.DataIndex[i]
+		if i > 0 {
+			fileStart = t.Header.DataIndex[i-1]
+		}
+
+		if fileStart >= end {
+			break
+		}
+		if fileEnd < start {
+			continue
+		}
+
+		file, err := t.GetFileOffsetsByID(uint32(i))
+		if err != nil {
+			return nil, fmt.Errorf("failed to get offsets for %d: %w", i, err)
+		}
+		files = append(files, file)
+	}
+
+	return files, nil
+}
+
 func (t *Torrent) GetFileOffsetsByID(i uint32) (*FileInfo, error) {
 	if int(i) >= len(t.Header.DataIndex) {
-		println("LL", i, len(t.Header.DataIndex))
 		return nil, ErrFileNotExist
 	}
 	info := &FileInfo{

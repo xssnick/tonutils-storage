@@ -65,7 +65,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) startDownload(report func(Event), downloadAll bool) error {
+func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered bool) error {
 	if t.BagID == nil {
 		return fmt.Errorf("bag is not set")
 	}
@@ -140,26 +140,133 @@ func (t *Torrent) startDownload(report func(Event), downloadAll bool) error {
 			pieces = append(pieces, p)
 		}
 
+		sort.Slice(pieces, func(i, j int) bool {
+			return pieces[i] < pieces[j]
+		})
+		sort.Slice(list, func(i, j int) bool {
+			return uint64(list[i].info.ToPiece)<<32+uint64(list[i].info.ToPieceOffset) <
+				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
+		})
+
 		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.PiecesNum()), PiecesToDownload: len(pieces)}})
 		if len(pieces) > 0 {
-			sort.Slice(pieces, func(i, j int) bool {
-				return pieces[i] < pieces[j]
-			})
-			sort.Slice(list, func(i, j int) bool {
-				return uint64(list[i].info.ToPiece)<<32+uint64(list[i].info.ToPieceOffset) <
-					uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
-			})
-
 			if err := t.prepareDownloader(ctx); err != nil {
 				return
 			}
 
-			fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 20, 200, 0, pieces)
-			defer fetch.Stop()
+			if downloadOrdered {
+				fetch := NewPreFetcher(ctx, t, report, downloaded, 20, 200, 0, pieces)
+				defer fetch.Stop()
 
-			if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
-				report(Event{Name: EventErr, Value: err})
-				return
+				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
+					report(Event{Name: EventErr, Value: err})
+					return
+				}
+			} else {
+				filesMap := map[uint32]bool{}
+				for _, file := range files {
+					filesMap[file] = true
+				}
+
+				left := len(pieces)
+				ready := make(chan uint32, 200)
+				fetch := NewPreFetcher(ctx, t, func(event Event) {
+					if event.Name == EventPieceDownloaded {
+						ready <- event.Value.(uint32)
+					}
+					report(event)
+				}, downloaded, 20, 200, 0, pieces)
+				defer fetch.Stop()
+
+				for i := 0; i < left; i++ {
+					select {
+					case e := <-ready:
+						err := func(piece uint32) error {
+							currentPiece, currentProof, err := fetch.Get(ctx, piece)
+							if err != nil {
+								return fmt.Errorf("failed to download piece %d: %w", piece, err)
+							}
+							defer fetch.Free(piece)
+
+							pieceFiles, err := t.GetFilesInPiece(piece)
+							if err != nil {
+								return fmt.Errorf("failed to get files of piece %d: %w", piece, err)
+							}
+
+							for _, file := range pieceFiles {
+								if !filesMap[file.Index] {
+									continue
+								}
+
+								err = func() error {
+									if err := os.MkdirAll(filepath.Dir(rootPath+"/"+file.Name), os.ModePerm); err != nil {
+										return err
+									}
+
+									f, err := os.OpenFile(rootPath+"/"+file.Name, os.O_RDWR|os.O_CREATE, 0666)
+									if err != nil {
+										return fmt.Errorf("failed to create file %s: %w", file.Name, err)
+									}
+									defer f.Close()
+
+									notEmptyFile := file.FromPiece != file.ToPiece || file.FromPieceOffset != file.ToPieceOffset
+									if notEmptyFile {
+										fileOff := uint32(0)
+										if file.FromPiece != piece {
+											fileOff = (piece-file.FromPiece)*t.Info.PieceSize - file.FromPieceOffset
+										}
+
+										data := currentPiece
+										if file.ToPiece == piece {
+											data = data[:file.ToPieceOffset]
+										}
+										if file.FromPiece == piece {
+											data = data[file.FromPieceOffset:]
+										}
+
+										_, err = f.WriteAt(data, int64(fileOff))
+										if err != nil {
+											return fmt.Errorf("failed to write file %s: %w", file.Name, err)
+										}
+
+										err = t.setFileIndex(file.Index, &FileIndex{
+											BlockFrom:       file.FromPiece,
+											BlockTo:         file.ToPiece,
+											BlockFromOffset: file.FromPieceOffset,
+											BlockToOffset:   file.ToPieceOffset,
+											Name:            file.Name,
+										})
+										if err != nil {
+											return fmt.Errorf("failed to write file index for %s: %w", file.Name, err)
+										}
+									}
+
+									return nil
+								}()
+								if err != nil {
+									return err
+								}
+							}
+
+							err = t.setPiece(piece, &PieceInfo{
+								StartFileIndex: pieceFiles[0].Index,
+								Proof:          currentProof,
+							})
+							if err != nil {
+								return fmt.Errorf("failed to save piece %d to db: %w", piece, err)
+							}
+
+							return nil
+						}(e)
+						if err != nil {
+							report(Event{Name: EventErr, Value: err})
+							return
+						}
+					case <-ctx.Done():
+						report(Event{Name: EventErr, Value: ctx.Err()})
+						return
+					}
+				}
 			}
 		}
 
@@ -243,6 +350,17 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						return fmt.Errorf("failed to write piece %d for file %s: %w", piece, off.path, err)
 					}
 				}
+			}
+
+			err = t.setFileIndex(off.info.Index, &FileIndex{
+				BlockFrom:       off.info.FromPiece,
+				BlockTo:         off.info.ToPiece,
+				BlockFromOffset: off.info.FromPieceOffset,
+				BlockToOffset:   off.info.ToPieceOffset,
+				Name:            off.info.Name,
+			})
+			if err != nil {
+				return fmt.Errorf("failed to write file index for %s: %w", off.info.Name, err)
 			}
 
 			report(Event{Name: EventFileDownloaded, Value: off.path})

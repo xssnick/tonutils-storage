@@ -138,7 +138,7 @@ func (t *Torrent) Start(withUpload bool) (err error) {
 	go t.runPeersMonitor()
 
 	println("START", hex.EncodeToString(t.BagID), hex.EncodeToString(t.pieceMask))
-	return t.startDownload(func(event Event) {}, false)
+	return t.startDownload(func(event Event) {}, false, false)
 }
 
 func (t *Torrent) PiecesNum() uint32 {
@@ -197,7 +197,7 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 		return fmt.Errorf("failed to store active files in db: %w", err)
 	}
 	t.activeFiles = ids
-	return t.startDownload(func(event Event) {}, false)
+	return t.startDownload(func(event Event) {}, false, false)
 }
 
 func (t *Torrent) SetActiveFiles(names []string) error {

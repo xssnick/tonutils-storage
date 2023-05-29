@@ -16,7 +16,6 @@ type piecePack struct {
 
 type PreFetcher struct {
 	torrent    *Torrent
-	dn         TorrentDownloader
 	offset     int
 	pieces     map[uint32]*piecePack
 	tasks      chan uint32
@@ -41,13 +40,12 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, dn TorrentDownloader, report func(Event), downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
 
 	ff := &PreFetcher{
-		dn:               dn,
 		torrent:          torrent,
 		report:           report,
 		piecesList:       pieces,
@@ -147,7 +145,7 @@ func (f *PreFetcher) worker() {
 		}
 
 		for {
-			data, proof, peer, err := f.dn.DownloadPieceDetailed(f.ctx, task)
+			data, proof, peer, err := f.torrent.downloader.DownloadPieceDetailed(f.ctx, task)
 			if err == nil {
 				f.mx.Lock()
 				f.pieces[task] = &piecePack{
