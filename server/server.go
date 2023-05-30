@@ -243,7 +243,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
-			t.UpdateUploadedPeer(peer.GetADNL().GetID(), uint64(len(p.Data)))
+			adn := peer.GetADNL().(overlay.ADNL)
+			t.UpdateUploadedPeer(adn.GetID(), adn.RemoteAddr(), uint64(len(p.Data)))
 			updatePeer = false
 		case storage.Ping:
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, storage.Pong{})
@@ -306,7 +307,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 		}
 
 		if updatePeer {
-			t.TouchPeer(peer.GetADNL().GetID())
+			adn := peer.GetADNL().(overlay.ADNL)
+			t.TouchPeer(adn.GetID(), adn.RemoteAddr())
 		}
 
 		return nil

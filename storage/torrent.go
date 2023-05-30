@@ -2,7 +2,6 @@ package storage
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
@@ -137,7 +136,6 @@ func (t *Torrent) Start(withUpload bool) (err error) {
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
 	go t.runPeersMonitor()
 
-	println("START", hex.EncodeToString(t.BagID), hex.EncodeToString(t.pieceMask))
 	return t.startDownload(func(event Event) {}, false, false)
 }
 

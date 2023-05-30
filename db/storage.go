@@ -88,6 +88,8 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	delete(s.torrentsOverlay, string(id))
 	s.mx.Unlock()
 
+	t.Stop()
+
 	k := make([]byte, 5+32)
 	copy(k, "bags:")
 	copy(k[5:], t.BagID)
@@ -155,7 +157,6 @@ func (s *Storage) SetTorrent(t *storage.Torrent) error {
 	k := make([]byte, 5+32)
 	copy(k, "bags:")
 	copy(k[5:], t.BagID)
-	println("STORE", hex.EncodeToString(t.BagID))
 
 	err = s.db.Put(k, data, nil)
 	if err != nil {
@@ -206,8 +207,6 @@ func (s *Storage) loadTorrents() error {
 		t.Header = tr.Header
 		t.BagID = tr.BagID
 		t.CreatedAt = tr.CreatedAt
-
-		println("LOAD", hex.EncodeToString(t.BagID), t.Path)
 
 		if t.Info != nil {
 			t.InitMask()

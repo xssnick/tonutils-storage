@@ -3,7 +3,6 @@ package storage
 import (
 	"bytes"
 	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"github.com/pterm/pterm"
@@ -40,7 +39,6 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 	}
 
 	dir := filepath.Base(path) + "/"
-	println("BASE", dir, filepath.Dir(path))
 
 	torrent := NewTorrent(filepath.Dir(path), db, connector)
 	torrent.Header = &TorrentHeader{
@@ -244,8 +242,6 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 	if err = torrent.db.SetActiveFiles(torrent.BagID, torrent.activeFiles); err != nil {
 		return nil, fmt.Errorf("failed to store active files in db: %w", err)
 	}
-
-	println("CREATED", hex.EncodeToString(torrent.BagID), hex.EncodeToString(torrent.pieceMask))
 
 	return torrent, nil
 }

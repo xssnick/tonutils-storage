@@ -3,7 +3,6 @@ package db
 import (
 	"bytes"
 	"encoding/binary"
-	"encoding/hex"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-storage/storage"
 )
@@ -151,7 +150,6 @@ func (s *Storage) SetPiece(bagId []byte, id uint32, p *storage.PieceInfo) error 
 	binary.LittleEndian.PutUint32(v, p.StartFileIndex)
 	copy(v[4:], p.Proof)
 
-	println("PUT", hex.EncodeToString(bagId), id, p.StartFileIndex)
 	return s.db.Put(k, v, nil)
 }
 

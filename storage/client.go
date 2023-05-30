@@ -44,7 +44,7 @@ type FileInfo struct {
 
 type TorrentDownloader interface {
 	DownloadPiece(ctx context.Context, pieceIndex uint32) (_ []byte, err error)
-	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, err error)
+	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, peerAddr string, err error)
 	SetDesiredMinNodesNum(num int)
 	Close()
 	IsActive() bool
@@ -72,10 +72,10 @@ type torrentDownloader struct {
 }
 
 type pieceResponse struct {
-	index  int32
-	peerId []byte
-	piece  Piece
-	err    error
+	index int32
+	node  *storageNode
+	piece Piece
+	err   error
 }
 
 type pieceRequest struct {
@@ -85,6 +85,7 @@ type pieceRequest struct {
 }
 
 type storageNode struct {
+	nodeAddr  string
 	nodeId    []byte
 	dow       *torrentDownloader
 	sessionId int64
@@ -178,12 +179,12 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 		data := make([]byte, 0, hdrPieces*uint64(dow.torrent.Info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
 		for i := uint32(0); i < uint32(hdrPieces); i++ {
-			piece, proof, peer, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
+			piece, proof, peer, peerAddr, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
 			if pieceErr != nil {
 				err = fmt.Errorf("failed to get header piece %d, err: %w", i, pieceErr)
 				return nil, err
 			}
-			dow.torrent.UpdateDownloadedPeer(peer, uint64(len(piece)))
+			dow.torrent.UpdateDownloadedPeer(peer, peerAddr, uint64(len(piece)))
 			data = append(data, piece...)
 			proofs = append(proofs, proof)
 		}
@@ -246,8 +247,8 @@ func (s *storageNode) loop() {
 		}
 
 		resp := pieceResponse{
-			index:  req.index,
-			peerId: s.nodeId,
+			index: req.index,
+			node:  s,
 		}
 
 		s.piecesMx.RLock()
@@ -317,12 +318,33 @@ func (s *storageNode) loop() {
 }
 
 func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, node *overlay.Node, onDisconnect func()) (*storageNode, error) {
-	addrs, keyN, err := t.dht.FindAddresses(ctx, adnlID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find node address: %w", err)
+	var addrs *address.List
+	var keyN ed25519.PublicKey
+	var err error
+	for {
+		Logger("[SCALER] LOOKING FOR NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.torrent.BagID))
+
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		addrs, keyN, err = t.dht.FindAddresses(ctx, adnlID)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return nil, fmt.Errorf("failed to find node address: %w", err)
+			default:
+				cancel()
+				continue
+			}
+		}
+		cancel()
+		break
 	}
 
-	ax, err := t.gate.RegisterClient(addrs.Addresses[0].IP.String()+":"+fmt.Sprint(addrs.Addresses[0].Port), keyN)
+	Logger("[SCALER] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID))
+
+	addr := addrs.Addresses[0].IP.String() + ":" + fmt.Sprint(addrs.Addresses[0].Port)
+
+	ax, err := t.gate.RegisterClient(addr, keyN)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connnect to node: %w", err)
 	}
@@ -331,6 +353,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 
 	stNode := &storageNode{
 		nodeId:    adnlID,
+		nodeAddr:  addr,
 		rawAdnl:   ax,
 		rldp:      rl,
 		dow:       t,
@@ -403,11 +426,26 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 		return nil
 	})
 
+	Logger("[SCALER] REQUESTING TORRENT INFO FROM FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID))
+
 	var res TorrentInfoContainer
-	err = rl.DoQuery(ctx, 1<<25, &GetTorrentInfo{}, &res)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get torrent info: %w", err)
+	for {
+		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = rl.DoQuery(ctx, 1<<25, &GetTorrentInfo{}, &res)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				cancel()
+				return nil, err
+			default:
+				cancel()
+				continue
+			}
+		}
+		cancel()
+		break
 	}
+
 	cl, err := cell.FromBOC(res.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse torrent info boc: %w", err)
@@ -439,7 +477,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 
 	// query first piece to be sure node is ready for downloading
 	for {
-		Logger("[SCALER] TRY LOAD PIECE FROM", addrs.Addresses[0].IP.String())
+		Logger("[SCALER] TRY LOAD PIECE FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID))
 		qCtx, cancelC := context.WithTimeout(ctx, 7*time.Second)
 		var piece Piece
 		err = rl.DoQuery(qCtx, 4096+int64(t.torrent.Info.PieceSize)*3, &GetPiece{0}, &piece)
@@ -453,7 +491,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 			}
 			continue
 		}
-		Logger("[SCALER] GOT PIECE FROM", addrs.Addresses[0].IP.String(), "CONNECTED!")
+		Logger("[SCALER] GOT PIECE FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID), "CONNECTED!")
 
 		break
 	}
@@ -470,7 +508,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 }
 
 // DownloadPieceDetailed - same as DownloadPiece, but also returns proof data
-func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (piece []byte, proof []byte, peer []byte, err error) {
+func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (piece []byte, proof []byte, peer []byte, peerAddr string, err error) {
 	resp := make(chan pieceResponse, 1)
 	req := pieceRequest{
 		index:  int32(pieceIndex),
@@ -481,19 +519,19 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, nil, nil, ctx.Err()
+			return nil, nil, nil, "", ctx.Err()
 		case t.pieceQueue <- &req:
 		}
 
 		select {
 		case <-ctx.Done():
-			return nil, nil, nil, ctx.Err()
+			return nil, nil, nil, "", ctx.Err()
 		case result := <-resp:
 			if result.err != nil {
 				continue
 				// return nil, fmt.Errorf("failed to query piece %d after retries: %w", pieceIndex, err)
 			}
-			return result.piece.Data, result.piece.Proof, result.peerId, nil
+			return result.piece.Data, result.piece.Proof, result.node.nodeId, result.node.nodeAddr, nil
 		}
 	}
 }
@@ -501,7 +539,7 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 // DownloadPiece - downloads piece from one of available nodes.
 // Can be used concurrently to download from multiple nodes in the same time
 func (t *torrentDownloader) DownloadPiece(ctx context.Context, pieceIndex uint32) (_ []byte, err error) {
-	piece, _, _, err := t.DownloadPieceDetailed(ctx, pieceIndex)
+	piece, _, _, _, err := t.DownloadPieceDetailed(ctx, pieceIndex)
 	return piece, err
 }
 
@@ -566,6 +604,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 
 	connections := make(chan bool, num)
 
+	amp := 0
 	checkedNodes := map[string]bool{}
 	for {
 		toCheck := make([]*overlay.Node, 0, len(t.knownNodes))
@@ -618,16 +657,17 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 					t.mx.Unlock()
 				}
 
-				scaleCtx, stopScale := context.WithTimeout(t.globalCtx, 60*time.Second)
+				scaleCtx, stopScale := context.WithTimeout(t.globalCtx, 35*time.Second)
 				defer stopScale()
 
-				Logger("CONNECTING TO PEER", hex.EncodeToString(adnlID))
+				Logger("[SCALER] CONNECTING TO PEER", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.torrent.BagID))
 				stNode, err := t.connectToNode(scaleCtx, adnlID, node, onFail)
 				if err != nil {
 					onFail()
 					return
 				}
 
+				Logger("[SCALER] REQUESTING NODES LIST OF PEER", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.torrent.BagID))
 				var al overlay.NodesList
 				err = stNode.rldp.DoQuery(scaleCtx, 1<<25, &overlay.GetRandomPeers{}, &al)
 				if err != nil {
@@ -663,7 +703,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 		}
 
 		if len(toCheck) > 0 {
-			timer := time.After(40 * time.Second)
+			timer := time.After(60 * time.Second)
 		waiter:
 			for {
 				select {
@@ -689,7 +729,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 		var err error
 		var nodes *overlay.NodesList
 
-		ctxFind, cancel := context.WithTimeout(ctx, 15*time.Second)
+		ctxFind, cancel := context.WithTimeout(ctx, time.Duration(15+amp*5)*time.Second)
 		nodes, nodesDhtCont, err = t.dht.FindOverlayNodes(ctxFind, t.torrent.BagID, nodesDhtCont)
 		cancel()
 		if err != nil {
@@ -702,8 +742,15 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 
 			select {
 			case <-ctx.Done():
+				Logger("[SCALER] DHT CONTEXT CANCEL", hex.EncodeToString(t.torrent.BagID))
+
 				return ctx.Err()
 			case <-time.After(1 * time.Second):
+				if amp < 10 {
+					amp++
+				}
+				Logger("[SCALER] DHT RETRY", hex.EncodeToString(t.torrent.BagID))
+				nodesDhtCont = nil
 				continue
 			}
 		}
@@ -714,6 +761,9 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 				continue
 			}
 			// add known nodes in case we will need them in future to scale
+			if t.knownNodes[hex.EncodeToString(id)] == nil {
+				Logger("[SCALER] ADD KNOWN NODE ", hex.EncodeToString(id), "for", hex.EncodeToString(t.torrent.BagID))
+			}
 			t.knownNodes[hex.EncodeToString(id)] = &nodes.List[i]
 		}
 	}

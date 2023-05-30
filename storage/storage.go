@@ -221,6 +221,8 @@ func (t *Torrent) GetFilesInPiece(piece uint32) ([]*FileInfo, error) {
 		if i > 0 {
 			fileStart = t.Header.DataIndex[i-1]
 		}
+		fileStart += t.Info.HeaderSize
+		fileEnd += t.Info.HeaderSize
 
 		if fileStart >= end {
 			break
