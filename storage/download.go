@@ -87,6 +87,11 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 			if err := t.prepareDownloader(ctx); err != nil {
 				return
 			}
+
+			// update torrent in db
+			if err := t.db.SetTorrent(t); err != nil {
+				return
+			}
 		}
 
 		var downloaded uint64

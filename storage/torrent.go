@@ -25,6 +25,7 @@ type PieceInfo struct {
 }
 
 type Storage interface {
+	SetTorrent(torrent *Torrent) error
 	GetFileIndex(bagId []byte, id uint32) (*FileIndex, error)
 	SetFileIndex(bagId []byte, id uint32, fi *FileIndex) error
 	SetActiveFiles(bagId []byte, ids []uint32) error
@@ -117,7 +118,7 @@ func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	case <-t.globalCtx.Done():
 		return false, false
 	default:
-		return true, t.activeUpload
+		return true, t.activeUpload && t.Header != nil
 	}
 }
 
