@@ -37,6 +37,12 @@ type Storage interface {
 }
 
 type NetConnector interface {
+	SetDownloadLimit(bytesPerSec uint64)
+	SetUploadLimit(bytesPerSec uint64)
+	GetUploadLimit() uint64
+	GetDownloadLimit() uint64
+	ThrottleDownload(ctx context.Context, sz uint64) error
+	ThrottleUpload(ctx context.Context, sz uint64) error
 	CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error)
 }
 
@@ -74,6 +80,10 @@ var fs = NewFSController()
 
 func (t *Torrent) InitMask() {
 	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
+}
+
+func (t *Torrent) GetConnector() NetConnector {
+	return t.connector
 }
 
 func (t *Torrent) BuildCache(cachePiecesNum int) error {

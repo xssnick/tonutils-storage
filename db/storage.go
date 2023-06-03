@@ -3,8 +3,10 @@ package db
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/util"
@@ -76,6 +78,32 @@ func (s *Storage) GetAll() []*storage.Torrent {
 		return res[i].CreatedAt.Unix() > res[j].CreatedAt.Unix()
 	})
 	return res
+}
+
+func (s *Storage) SetSpeedLimits(download, upload uint64) error {
+	k := make([]byte, 13)
+	copy(k, "speed_limits:")
+
+	data := make([]byte, 16)
+	binary.LittleEndian.PutUint64(data, download)
+	binary.LittleEndian.PutUint64(data[8:], upload)
+
+	return s.db.Put(k, data, nil)
+}
+
+func (s *Storage) GetSpeedLimits() (download uint64, upload uint64, err error) {
+	k := make([]byte, 13)
+	copy(k, "speed_limits:")
+
+	var data []byte
+	data, err = s.db.Get(k, nil)
+	if err != nil {
+		if errors.Is(err, leveldb.ErrNotFound) {
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	}
+	return binary.LittleEndian.Uint64(data), binary.LittleEndian.Uint64(data[8:]), nil
 }
 
 func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {

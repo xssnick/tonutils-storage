@@ -106,13 +106,93 @@ type TorrentInfo struct {
 	Description tlb.Text `tlb:"."`
 }
 
+type speedLimit struct {
+	bytesPerSec uint64
+	limitUsed   uint64
+	lastUsedAt  time.Time
+	mx          sync.Mutex
+}
+
 type Connector struct {
+	downloadLimit *speedLimit
+	uploadLimit   *speedLimit
+
 	gate *adnl.Gateway
 	dht  DHT
 }
 
 func NewConnector(gate *adnl.Gateway, dht DHT) *Connector {
-	return &Connector{gate: gate, dht: dht}
+	return &Connector{
+		gate:          gate,
+		dht:           dht,
+		downloadLimit: &speedLimit{},
+		uploadLimit:   &speedLimit{},
+	}
+}
+
+func (s *speedLimit) SetLimit(bytesPerSec uint64) {
+	atomic.StoreUint64(&s.limitUsed, 0)
+	atomic.StoreUint64(&s.bytesPerSec, bytesPerSec)
+}
+
+func (s *speedLimit) GetLimit() uint64 {
+	return atomic.LoadUint64(&s.bytesPerSec)
+}
+
+func (s *speedLimit) Throttle(ctx context.Context, sz uint64) error {
+	if atomic.LoadUint64(&s.bytesPerSec) > 0 {
+		s.mx.Lock()
+		defer s.mx.Unlock()
+
+		select {
+		case <-ctx.Done():
+			// skip if not needed anymore
+			return ctx.Err()
+		default:
+		}
+
+		used := atomic.LoadUint64(&s.limitUsed)
+		limit := atomic.LoadUint64(&s.bytesPerSec)
+		if limit > 0 && used > limit {
+			wait := time.Duration(float64(used)/float64(limit)*float64(time.Second)) - time.Since(s.lastUsedAt)
+			if wait > 0 {
+				select {
+				case <-ctx.Done():
+					// skip if not needed anymore
+					return ctx.Err()
+				case <-time.After(wait):
+				}
+			}
+			atomic.StoreUint64(&s.limitUsed, 0)
+		}
+		s.lastUsedAt = time.Now()
+		atomic.AddUint64(&s.limitUsed, sz)
+	}
+	return nil
+}
+
+func (c *Connector) GetUploadLimit() uint64 {
+	return c.uploadLimit.GetLimit()
+}
+
+func (c *Connector) GetDownloadLimit() uint64 {
+	return c.downloadLimit.GetLimit()
+}
+
+func (c *Connector) SetDownloadLimit(bytesPerSec uint64) {
+	c.downloadLimit.SetLimit(bytesPerSec)
+}
+
+func (c *Connector) SetUploadLimit(bytesPerSec uint64) {
+	c.uploadLimit.SetLimit(bytesPerSec)
+}
+
+func (c *Connector) ThrottleDownload(ctx context.Context, sz uint64) error {
+	return c.downloadLimit.Throttle(ctx, sz)
+}
+
+func (c *Connector) ThrottleUpload(ctx context.Context, sz uint64) error {
+	return c.uploadLimit.Throttle(ctx, sz)
 }
 
 func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error) {
@@ -229,6 +309,8 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 }
 
 func (s *storageNode) Close() {
+	Logger("[STORAGE_NODE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
+
 	s.rawAdnl.Close()
 }
 
@@ -300,12 +382,12 @@ func (s *storageNode) loop() {
 		}
 		req.result <- resp
 
-		if fails > 3 {
-			// something wrong, close connection, we should reconnect after it
-			return
-		}
-
 		if resp.err != nil {
+			if fails > 2 {
+				// something wrong, close connection, we should reconnect after it
+				return
+			}
+
 			select {
 			case <-s.globalCtx.Done():
 				return
@@ -620,6 +702,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 
 			// will not connect to already active node
 			if isActive {
+				println("ALREADY ACTIVE", id, t.activeNodes[id].nodeAddr)
 				continue
 			}
 
@@ -693,6 +776,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 				t.mx.Lock()
 				t.activeNodes[id] = stNode
 				t.mx.Unlock()
+				Logger("[SCALER] ADDED PEER", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.torrent.BagID))
 
 				select {
 				case connections <- true:

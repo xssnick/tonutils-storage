@@ -6,9 +6,10 @@ import (
 )
 
 type speedInfo struct {
-	prevAt    time.Time
+	wantReset bool
 	prevBytes uint64
-	nextBytes uint64
+	buf       []uint64
+	off       uint64
 	speed     uint64
 }
 
@@ -48,6 +49,20 @@ func (t *Torrent) UpdateDownloadedPeer(id []byte, addr string, bytes uint64) {
 	p.Downloaded += bytes
 }
 
+func (t *Torrent) ResetDownloadPeer(id []byte) {
+	t.peersMx.Lock()
+	defer t.peersMx.Unlock()
+
+	strId := hex.EncodeToString(id)
+	p := t.peers[strId]
+	if p != nil {
+		p.Downloaded = 0
+		p.downloadSpeed = &speedInfo{
+			buf: make([]uint64, 200),
+		}
+	}
+}
+
 func (t *Torrent) UpdateUploadedPeer(id []byte, addr string, bytes uint64) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
@@ -61,8 +76,12 @@ func (t *Torrent) touchPeer(id []byte, addr string) *PeerInfo {
 	p := t.peers[strId]
 	if p == nil {
 		p = &PeerInfo{
-			uploadSpeed:   &speedInfo{},
-			downloadSpeed: &speedInfo{},
+			uploadSpeed: &speedInfo{
+				buf: make([]uint64, 200),
+			},
+			downloadSpeed: &speedInfo{
+				buf: make([]uint64, 200),
+			},
 		}
 		t.peers[strId] = p
 	}
@@ -91,28 +110,27 @@ func (t *Torrent) runPeersMonitor() {
 		t.peersMx.Unlock()
 
 		for _, p := range t.GetPeers() {
-			p.downloadSpeed.calculate(p.Downloaded)
-			p.uploadSpeed.calculate(p.Uploaded)
+			p.downloadSpeed.calculate(p.Downloaded, 10)
+			p.uploadSpeed.calculate(p.Uploaded, 10)
 		}
 	}
 }
 
-func (s *speedInfo) calculate(nowBytes uint64) {
-	downloaded := nowBytes - s.prevBytes
+func (s *speedInfo) calculate(nowBytes uint64, amp uint64) {
+	s.buf[s.off%uint64(len(s.buf))] = nowBytes - s.prevBytes
+	s.off++
 
-	period := uint64(time.Since(s.prevAt) / (1 * time.Second))
-	if period == 0 {
-		period = 1
+	m := uint64(len(s.buf))
+	if m > s.off {
+		m = s.off
 	}
 
-	if time.Since(s.prevAt) > 20*time.Second {
-		s.prevBytes = s.nextBytes
-		s.prevAt = time.Now()
-	} else if time.Since(s.prevAt) >= 10*time.Second {
-		s.nextBytes = nowBytes
+	sum := uint64(0)
+	for i := uint64(0); i < m; i++ {
+		sum += s.buf[i]
 	}
-
-	s.speed = downloaded / period
+	s.speed = (sum / m) * amp
+	s.prevBytes = nowBytes
 }
 
 func (p *PeerInfo) GetDownloadSpeed() uint64 {

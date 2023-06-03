@@ -16,7 +16,6 @@ import (
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/rand"
 	"sort"
-	"sync"
 	"time"
 )
 
@@ -26,11 +25,6 @@ type Server struct {
 	gate     *adnl.Gateway
 	store    *db.Storage
 	closeCtx context.Context
-
-	bytesLimitPerSec  uint64
-	uploaded          uint64
-	uploadedUpdatedAt time.Time
-	speedMx           sync.Mutex
 
 	closer func()
 }
@@ -101,10 +95,6 @@ func NewServer(store *db.Storage, dht *dht.Client, gate *adnl.Gateway, key ed255
 	}
 
 	return nil
-}
-
-func (s *Server) SetSpeedLimit(bytesPerSec uint64) {
-	s.bytesLimitPerSec = bytesPerSec
 }
 
 func (s *Server) handleQuery(peer *overlay.ADNLWrapper, session int64) func(query *adnl.MessageQuery) error {
@@ -203,34 +193,9 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 		case storage.GetPiece:
-			if s.bytesLimitPerSec > 0 {
-				limitCtx, cancelLimit := context.WithTimeout(ctx, time.Duration(query.Timeout)*time.Second)
-				defer cancelLimit()
-
-				s.speedMx.Lock()
-				select {
-				case <-limitCtx.Done():
-					s.speedMx.Unlock()
-					// piece is not needed anymore
-					return nil
-				default:
-				}
-
-				if s.uploaded > s.bytesLimitPerSec {
-					wait := time.Duration(float64(s.uploaded) / float64(s.bytesLimitPerSec) * float64(time.Second))
-
-					select {
-					case <-limitCtx.Done():
-						s.speedMx.Unlock()
-						// piece is not needed anymore
-						return nil
-					case <-time.After(wait):
-						s.uploaded = 0
-					}
-				}
-				s.uploadedUpdatedAt = time.Now()
-				s.uploaded += uint64(t.Info.PieceSize)
-				s.speedMx.Unlock()
+			err := t.GetConnector().ThrottleDownload(ctx, uint64(t.Info.PieceSize))
+			if err != nil {
+				return err
 			}
 
 			p, err := t.GetPiece(uint32(q.PieceID))
@@ -243,6 +208,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
+			// TODO: refactor
 			adn := peer.GetADNL().(overlay.ADNL)
 			t.UpdateUploadedPeer(adn.GetID(), adn.RemoteAddr(), uint64(len(p.Data)))
 			updatePeer = false
@@ -293,6 +259,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 		case storage.UpdateState:
+			// TODO: support pieces updates
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, storage.Ok{})
 			if err != nil {
 				return err

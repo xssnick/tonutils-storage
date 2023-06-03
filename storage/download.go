@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"math"
 	"os"
@@ -54,7 +55,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 		}
 
 		if t.downloader == nil || !t.downloader.IsActive() {
-			t.downloader, err = t.connector.CreateDownloader(ctx, t, 5, 20, math.MaxUint32)
+			t.downloader, err = t.connector.CreateDownloader(ctx, t, 5, 12, math.MaxUint32)
 			if err != nil {
 				Logger("bag information not resolved: %s", err.Error())
 				time.Sleep(1 * time.Second)
@@ -76,7 +77,8 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 		t.stopDownload()
 	}
 	var ctx context.Context
-	ctx, t.stopDownload = context.WithCancel(t.globalCtx)
+	ctx, stop := context.WithCancel(t.globalCtx)
+	t.stopDownload = stop
 	t.mx.Unlock()
 
 	go func() {
@@ -85,11 +87,13 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 
 		if t.Header == nil || t.Info == nil {
 			if err := t.prepareDownloader(ctx); err != nil {
+				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
 				return
 			}
 
 			// update torrent in db
 			if err := t.db.SetTorrent(t); err != nil {
+				Logger("failed to set torrent in db", hex.EncodeToString(t.BagID), "err: ", err.Error())
 				return
 			}
 		}
@@ -156,11 +160,12 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.PiecesNum()), PiecesToDownload: len(pieces)}})
 		if len(pieces) > 0 {
 			if err := t.prepareDownloader(ctx); err != nil {
+				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
 				return
 			}
 
 			if downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, report, downloaded, 20, 200, 0, pieces)
+				fetch := NewPreFetcher(ctx, t, report, downloaded, 12, 200, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -180,7 +185,7 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 						ready <- event.Value.(uint32)
 					}
 					report(event)
-				}, downloaded, 20, 200, 0, pieces)
+				}, downloaded, 12, 200, pieces)
 				defer fetch.Stop()
 
 				for i := 0; i < left; i++ {
@@ -280,6 +285,13 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 			Dir:         string(t.Header.DirName),
 			Description: t.Info.Description.Value,
 		}})
+
+		for id := range t.GetPeers() {
+			peerId, _ := hex.DecodeString(id)
+			t.ResetDownloadPeer(peerId)
+		}
+
+		stop()
 	}()
 
 	return nil

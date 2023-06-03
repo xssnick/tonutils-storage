@@ -22,11 +22,6 @@ type PreFetcher struct {
 	piecesList []uint32
 	speed      uint64
 
-	limitDownloadedUpdatedAt time.Time
-	limitDownloaded          uint64
-	bytesLimitPerSec         uint64
-	limitMx                  sync.Mutex
-
 	downloaded uint64
 	report     func(Event)
 
@@ -40,20 +35,19 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), downloaded uint64, threads, prefetch int, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
 
 	ff := &PreFetcher{
-		torrent:          torrent,
-		report:           report,
-		piecesList:       pieces,
-		downloaded:       downloaded,
-		offset:           prefetch - 1,
-		bytesLimitPerSec: speedLimit,
-		pieces:           map[uint32]*piecePack{},
-		tasks:            make(chan uint32, prefetch),
+		torrent:    torrent,
+		report:     report,
+		piecesList: pieces,
+		downloaded: downloaded,
+		offset:     prefetch - 1,
+		pieces:     map[uint32]*piecePack{},
+		tasks:      make(chan uint32, prefetch),
 	}
 	ff.ctx, ff.close = context.WithCancel(ctx)
 
@@ -126,22 +120,10 @@ func (f *PreFetcher) worker() {
 		case <-f.ctx.Done():
 			return
 		case task = <-f.tasks:
-			/*if f.bytesLimitPerSec > 0 {
-				f.limitMx.Lock()
-				if f.limitDownloaded > f.bytesLimitPerSec {
-					wait := time.Duration(float64(f.limitDownloaded) / float64(f.bytesLimitPerSec) * float64(time.Second))
-					select {
-					case <-f.ctx.Done():
-						f.limitMx.Unlock()
-						return
-					case <-time.After(wait):
-						f.limitDownloaded = 0
-					}
-				}
-				f.limitDownloadedUpdatedAt = time.Now()
-				f.limitDownloaded += uint64(f.torrent.Info.PieceSize)
-				f.limitMx.Unlock()
-			}*/
+			err := f.torrent.connector.ThrottleDownload(f.ctx, uint64(f.torrent.Info.PieceSize))
+			if err != nil {
+				return
+			}
 		}
 
 		for {
