@@ -127,7 +127,7 @@ func (f *PreFetcher) worker() {
 		}
 
 		for {
-			data, proof, peer, peerAddr, err := f.torrent.downloader.DownloadPieceDetailed(f.ctx, task)
+			data, proof, _, _, err := f.torrent.downloader.DownloadPieceDetailed(f.ctx, task)
 			if err == nil {
 				f.mx.Lock()
 				f.pieces[task] = &piecePack{
@@ -135,8 +135,6 @@ func (f *PreFetcher) worker() {
 					proof: proof,
 				}
 				f.mx.Unlock()
-
-				f.torrent.UpdateDownloadedPeer(peer, peerAddr, uint64(len(data)))
 
 				atomic.AddUint64(&f.downloaded, 1)
 				f.report(Event{Name: EventPieceDownloaded, Value: task})

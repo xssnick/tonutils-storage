@@ -193,7 +193,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 		case storage.GetPiece:
-			err := t.GetConnector().ThrottleDownload(ctx, uint64(t.Info.PieceSize))
+			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
 			if err != nil {
 				return err
 			}

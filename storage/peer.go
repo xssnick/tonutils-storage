@@ -49,6 +49,14 @@ func (t *Torrent) UpdateDownloadedPeer(id []byte, addr string, bytes uint64) {
 	p.Downloaded += bytes
 }
 
+func (t *Torrent) RemovePeer(id []byte) {
+	t.peersMx.Lock()
+	defer t.peersMx.Unlock()
+
+	strId := hex.EncodeToString(id)
+	delete(t.peers, strId)
+}
+
 func (t *Torrent) ResetDownloadPeer(id []byte) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()

@@ -16,7 +16,6 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
-	"log"
 	"math"
 	"reflect"
 	"sync"
@@ -181,14 +180,10 @@ func (c *Connector) GetDownloadLimit() uint64 {
 }
 
 func (c *Connector) SetDownloadLimit(bytesPerSec uint64) {
-	log.Println("SET LIMIT DOW", bytesPerSec)
-
 	c.downloadLimit.SetLimit(bytesPerSec)
 }
 
 func (c *Connector) SetUploadLimit(bytesPerSec uint64) {
-	log.Println("SET LIMIT UPL", bytesPerSec)
-
 	c.uploadLimit.SetLimit(bytesPerSec)
 }
 
@@ -264,12 +259,11 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 		data := make([]byte, 0, hdrPieces*uint64(dow.torrent.Info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
 		for i := uint32(0); i < uint32(hdrPieces); i++ {
-			piece, proof, peer, peerAddr, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
+			piece, proof, _, _, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
 			if pieceErr != nil {
 				err = fmt.Errorf("failed to get header piece %d, err: %w", i, pieceErr)
 				return nil, err
 			}
-			dow.torrent.UpdateDownloadedPeer(peer, peerAddr, uint64(len(piece)))
 			data = append(data, piece...)
 			proofs = append(proofs, proof)
 		}
@@ -316,6 +310,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 func (s *storageNode) Close() {
 	Logger("[STORAGE_NODE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
 
+	s.dow.torrent.RemovePeer(s.nodeId)
 	s.rawAdnl.Close()
 }
 
@@ -359,6 +354,7 @@ func (s *storageNode) loop() {
 			if err != nil {
 				return fmt.Errorf("failed to query piece %d. err: %w", req.index, err)
 			}
+			s.dow.torrent.UpdateDownloadedPeer(s.nodeId, s.nodeAddr, uint64(len(piece.Data)))
 
 			proof, err := cell.FromBOC(piece.Proof)
 			if err != nil {
@@ -388,7 +384,7 @@ func (s *storageNode) loop() {
 		req.result <- resp
 
 		if resp.err != nil {
-			if fails > 2 {
+			if fails >= 3 {
 				// something wrong, close connection, we should reconnect after it
 				return
 			}
@@ -396,7 +392,7 @@ func (s *storageNode) loop() {
 			select {
 			case <-s.globalCtx.Done():
 				return
-			case <-time.After(500 * time.Millisecond):
+			case <-time.After(300 * time.Millisecond):
 				// TODO: take down all loops
 				// take loop down for some time, to allow other nodes to pickup piece
 			}
