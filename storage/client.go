@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"log"
 	"math"
 	"reflect"
 	"sync"
@@ -180,10 +181,14 @@ func (c *Connector) GetDownloadLimit() uint64 {
 }
 
 func (c *Connector) SetDownloadLimit(bytesPerSec uint64) {
+	log.Println("SET LIMIT DOW", bytesPerSec)
+
 	c.downloadLimit.SetLimit(bytesPerSec)
 }
 
 func (c *Connector) SetUploadLimit(bytesPerSec uint64) {
+	log.Println("SET LIMIT UPL", bytesPerSec)
+
 	c.uploadLimit.SetLimit(bytesPerSec)
 }
 
@@ -702,7 +707,6 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 
 			// will not connect to already active node
 			if isActive {
-				println("ALREADY ACTIVE", id, t.activeNodes[id].nodeAddr)
 				continue
 			}
 
@@ -813,6 +817,8 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 		var err error
 		var nodes *overlay.NodesList
 
+		Logger("[SCALER] SEARCHING STORAGE NODES FOR", hex.EncodeToString(t.torrent.BagID))
+
 		ctxFind, cancel := context.WithTimeout(ctx, time.Duration(15+amp*5)*time.Second)
 		nodes, nodesDhtCont, err = t.dht.FindOverlayNodes(ctxFind, t.torrent.BagID, nodesDhtCont)
 		cancel()
@@ -835,6 +841,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 				}
 				Logger("[SCALER] DHT RETRY", hex.EncodeToString(t.torrent.BagID))
 				nodesDhtCont = nil
+				checkedNodes = map[string]bool{}
 				continue
 			}
 		}
