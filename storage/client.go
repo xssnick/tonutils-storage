@@ -364,11 +364,13 @@ func (s *storageNode) loop() {
 
 			proof, err := cell.FromBOC(piece.Proof)
 			if err != nil {
+				time.Sleep(50 * time.Millisecond)
 				return fmt.Errorf("failed to parse BoC of piece %d, err: %w", req.index, err)
 			}
 
 			err = cell.CheckProof(proof, s.dow.torrent.Info.RootHash)
 			if err != nil {
+				time.Sleep(50 * time.Millisecond)
 				return fmt.Errorf("proof check of piece %d failed: %w", req.index, err)
 			}
 
