@@ -94,6 +94,9 @@ type storageNode struct {
 	hasPieces map[uint32]bool
 	piecesMx  sync.RWMutex
 
+	fails int32
+	loops int32
+
 	globalCtx context.Context
 }
 
@@ -317,9 +320,12 @@ func (s *storageNode) Close() {
 var errNoPieceOnNode = errors.New("node doesnt have this piece")
 
 func (s *storageNode) loop() {
-	defer s.Close()
+	atomic.AddInt32(&s.loops, 1)
+	defer func() {
+		atomic.AddInt32(&s.loops, -1)
+		s.Close()
+	}()
 
-	fails := 0
 	for {
 		var req *pieceRequest
 		select {
@@ -374,17 +380,16 @@ func (s *storageNode) loop() {
 			return nil
 		}()
 		if resp.err == nil {
-			fails = 0
+			atomic.StoreInt32(&s.fails, 0)
 			resp.piece = piece
 		} else {
 			Logger("[DOWNLOADER] LOAD PIECE FROM", s.rawAdnl.RemoteAddr(), "ERR:", resp.err.Error())
-
-			fails++
+			atomic.AddInt32(&s.fails, 1)
 		}
 		req.result <- resp
 
 		if resp.err != nil {
-			if fails >= 3 {
+			if atomic.LoadInt32(&s.fails) >= 3*atomic.LoadInt32(&s.loops) {
 				// something wrong, close connection, we should reconnect after it
 				return
 			}
