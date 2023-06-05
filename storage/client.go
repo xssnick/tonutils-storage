@@ -694,7 +694,7 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 
 	connections := make(chan bool, num)
 
-	amp := 0
+	tries, amp := 0, 0
 	checkedNodes := map[string]bool{}
 	for {
 		toCheck := make([]*overlay.Node, 0, len(t.knownNodes))
@@ -820,6 +820,13 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 		var err error
 		var nodes *overlay.NodesList
 
+		tries++
+		if tries%3 == 0 {
+			// try again from start
+			nodesDhtCont = nil
+			checkedNodes = map[string]bool{}
+		}
+
 		Logger("[SCALER] SEARCHING STORAGE NODES FOR", hex.EncodeToString(t.torrent.BagID))
 
 		ctxFind, cancel := context.WithTimeout(ctx, time.Duration(15+amp*5)*time.Second)
@@ -843,8 +850,6 @@ func (t *torrentDownloader) scale(ctx context.Context, num, attempts int) error 
 					amp++
 				}
 				Logger("[SCALER] DHT RETRY", hex.EncodeToString(t.torrent.BagID))
-				nodesDhtCont = nil
-				checkedNodes = map[string]bool{}
 				continue
 			}
 		}
