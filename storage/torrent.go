@@ -43,7 +43,7 @@ type NetConnector interface {
 	GetDownloadLimit() uint64
 	ThrottleDownload(ctx context.Context, sz uint64) error
 	ThrottleUpload(ctx context.Context, sz uint64) error
-	CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int, attempts ...int) (_ TorrentDownloader, err error)
+	CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int) (_ TorrentDownloader, err error)
 }
 
 type Torrent struct {

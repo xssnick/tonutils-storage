@@ -286,7 +286,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 80*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 5*time.Minute, s.key, 5)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 15*time.Minute, s.key, 5)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
