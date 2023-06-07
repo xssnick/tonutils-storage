@@ -256,19 +256,21 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 
 	fileFrom := piece.StartFileIndex
 	for {
-		f, err := t.getFileIndex(fileFrom)
-		if err != nil {
-			break
-		}
+		isHdr := t.Info.HeaderSize > uint64(id)*uint64(t.Info.PieceSize)+uint64(offset)
 
 		// header
-		if f.Name == "" {
+		if isHdr {
 			headerData, err := tl.Serialize(t.Header, true)
 			if err != nil {
 				return nil, fmt.Errorf("failed to serialize header: %w", err)
 			}
 			offset += copy(block[offset:], headerData[id*t.Info.PieceSize:])
 		} else {
+			f, err := t.getFileIndex(fileFrom)
+			if err != nil {
+				break
+			}
+
 			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
 			read := func(path string, from int64) error {
 				f.mx.Lock()
@@ -293,16 +295,16 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 			if f.BlockFrom != id {
 				fileOff = (id-f.BlockFrom)*t.Info.PieceSize - f.BlockFromOffset
 			}
-			err := read(path, int64(fileOff))
+			err = read(path, int64(fileOff))
 			if err != nil {
 				return nil, err
 			}
+			fileFrom++
 		}
 
 		if offset == int(t.Info.PieceSize) {
 			break
 		}
-		fileFrom++
 	}
 
 	if offset > 0 {

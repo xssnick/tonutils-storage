@@ -736,12 +736,6 @@ func (t *torrentDownloader) searcher() {
 
 	var nodesDhtCont *dht.Continuation
 	for {
-		select {
-		case <-t.globalCtx.Done():
-			return
-		default:
-		}
-
 		var err error
 		var nodes *overlay.NodesList
 
@@ -763,6 +757,14 @@ func (t *torrentDownloader) searcher() {
 		for i := range nodes.List {
 			// add known nodes in case we will need them in future to scale
 			t.addNode(&nodes.List[i])
+		}
+
+		if len(nodes.List) > 0 {
+			select {
+			case <-t.globalCtx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
 		}
 	}
 }
@@ -812,7 +814,6 @@ func (t *torrentDownloader) nodeConnector(adnlID []byte, node *overlay.Node, att
 	scaleCtx, stopScale := context.WithTimeout(t.globalCtx, 120*time.Second)
 	defer stopScale()
 
-	Logger("[DOWNLOADER] CONNECTING TO PEER", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.torrent.BagID))
 	stNode, err := t.connectToNode(scaleCtx, adnlID, node, onFail)
 	if err != nil {
 		onFail()
