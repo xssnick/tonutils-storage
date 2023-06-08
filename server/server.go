@@ -204,11 +204,13 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 
 			p, err := t.GetPiece(uint32(q.PieceID))
 			if err != nil {
+				println("GET PC ERR", err.Error())
 				return err
 			}
 
 			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, p)
 			if err != nil {
+				println("ANSW PC ERR", err.Error())
 				return err
 			}
 
@@ -247,7 +249,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 			} else if len(lastPieces) > 0 {
 				mask := t.PiecesMask()
 				var newPieces []int32
-				mx.RLock()
+				mx.Lock()
 				for i := 0; i < len(lastPieces); i++ {
 					for j := 0; j < 8; j++ {
 						if mask[i]&(1<<j) > 0 && lastPieces[i]&(1<<j) == 0 {
@@ -255,7 +257,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 						}
 					}
 				}
-				mx.RUnlock()
+				lastPieces = mask
+				mx.Unlock()
 
 				if len(newPieces) > 0 {
 					up := storage.AddUpdate{

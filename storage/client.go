@@ -344,7 +344,7 @@ func (s *storageNode) pinger() {
 		} else {
 			fails = 0
 		}
-		println("PING DONE")
+		println("PING DONE", fails, s.nodeAddr)
 
 		select {
 		case <-s.globalCtx.Done():
