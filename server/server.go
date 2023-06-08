@@ -222,7 +222,29 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
-			if len(lastPieces) > 0 {
+			if updSeqno == 0 {
+				mx.Lock()
+				lastPieces = t.PiecesMask()
+				up := storage.AddUpdate{
+					SessionID: session,
+					Seqno:     atomic.AddInt64(&updSeqno, 1),
+					Update: storage.UpdateInit{
+						HavePieces:       lastPieces,
+						HavePiecesOffset: 0,
+						State: storage.State{
+							WillUpload:   true,
+							WantDownload: true,
+						},
+					},
+				}
+				mx.Unlock()
+
+				var updRes storage.Ok
+				err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, up), &updRes)
+				if err != nil {
+					return err
+				}
+			} else if len(lastPieces) > 0 {
 				mask := t.PiecesMask()
 				var newPieces []int32
 				mx.RLock()
@@ -264,32 +286,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
+			// TODO: reinit on adnl reinit with new session
+			// reset seqno, consider it as reinit flow for now
+			atomic.StoreInt64(&updSeqno, 0)
+
 			var res storage.Pong
 			err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, storage.Ping{
 				SessionID: session,
 			}), &res)
-			if err != nil {
-				return err
-			}
-
-			mx.Lock()
-			lastPieces = t.PiecesMask()
-			up := storage.AddUpdate{
-				SessionID: session,
-				Seqno:     atomic.AddInt64(&updSeqno, 1),
-				Update: storage.UpdateInit{
-					HavePieces:       lastPieces,
-					HavePiecesOffset: 0,
-					State: storage.State{
-						WillUpload:   true,
-						WantDownload: true,
-					},
-				},
-			}
-			mx.Unlock()
-
-			var updRes storage.Ok
-			err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, up), &updRes)
 			if err != nil {
 				return err
 			}

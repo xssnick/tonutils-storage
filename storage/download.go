@@ -249,7 +249,9 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 										if err != nil {
 											return fmt.Errorf("failed to write file %s: %w", file.Name, err)
 										}
+									}
 
+									if file.FromPiece == piece {
 										err = t.setFileIndex(file.Index, &FileIndex{
 											BlockFrom:       file.FromPiece,
 											BlockTo:         file.ToPiece,
