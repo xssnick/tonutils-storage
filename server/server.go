@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/rand"
 	"sort"
+	"sync/atomic"
 	"time"
 )
 
@@ -163,6 +164,8 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper, session int64) func(quer
 
 func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(transfer []byte, query *rldp.Query) error {
 	isFirst := true
+	var lastPieces []byte
+	var updSeqno int64
 	return func(transfer []byte, query *rldp.Query) error {
 		req, over := overlay.UnwrapQuery(query.Data)
 
@@ -218,13 +221,15 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				return err
 			}
 
+			mask := t.PiecesMask()
 			if isFirst {
 				isFirst = false
+				lastPieces = mask
 				up := storage.AddUpdate{
 					SessionID: q.SessionID,
-					Seqno:     1,
+					Seqno:     atomic.AddInt64(&updSeqno, 1),
 					Update: storage.UpdateInit{
-						HavePieces:       t.PiecesMask(),
+						HavePieces:       mask,
 						HavePiecesOffset: 0,
 						State: storage.State{
 							WillUpload:   true,
@@ -232,6 +237,29 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 						},
 					},
 				}
+				var res storage.Ok
+				err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, up), &res)
+				if err != nil {
+					return err
+				}
+			} else {
+				var newPieces []int32
+				for i := 0; i < len(lastPieces); i++ {
+					for j := 0; j < 8; j++ {
+						if mask[i]&(1<<j) > 0 && lastPieces[i]&(1<<j) == 0 {
+							newPieces = append(newPieces, int32(i*8+j))
+						}
+					}
+				}
+
+				up := storage.AddUpdate{
+					SessionID: q.SessionID,
+					Seqno:     atomic.AddInt64(&updSeqno, 1),
+					Update: storage.UpdateHavePieces{
+						PieceIDs: newPieces,
+					},
+				}
+
 				var res storage.Ok
 				err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, up), &res)
 				if err != nil {

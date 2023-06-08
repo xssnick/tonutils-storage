@@ -324,12 +324,39 @@ func (s *storageNode) Close() {
 
 var errNoPieceOnNode = errors.New("node doesnt have this piece")
 
-func (s *storageNode) loop() {
-	atomic.AddInt32(&s.loops, 1)
+func (s *storageNode) pinger() {
 	defer func() {
-		atomic.AddInt32(&s.loops, -1)
 		s.Close()
 	}()
+
+	fails := 0
+	for {
+		var pong Pong
+		ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
+		err := s.rldp.DoQuery(ctx, 1<<25, &Ping{SessionID: s.sessionId}, &pong)
+		cancel()
+		if err != nil {
+			fails++
+			if fails >= 3 {
+				Logger("[DOWNLOADER] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.rawAdnl.RemoteAddr())
+				return
+			}
+		} else {
+			fails = 0
+		}
+		println("PING DONE")
+
+		select {
+		case <-s.globalCtx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+func (s *storageNode) loop() {
+	atomic.AddInt32(&s.loops, 1)
+	defer atomic.AddInt32(&s.loops, -1)
 
 	for {
 		var req *pieceRequest
@@ -376,6 +403,14 @@ func (s *storageNode) loop() {
 			}
 			s.dow.torrent.UpdateDownloadedPeer(s.nodeId, s.nodeAddr, uint64(len(piece.Data)))
 
+			if req.index == 0 {
+				d := piece.Data
+				if len(d) > 4096 {
+					d = d[:4096]
+				}
+				//	println(s.nodeAddr)
+				//		println(hex.EncodeToString(d))
+			}
 			proof, err := cell.FromBOC(piece.Proof)
 			if err != nil {
 				untrusted = true
@@ -399,6 +434,7 @@ func (s *storageNode) loop() {
 			atomic.StoreInt32(&s.fails, 0)
 			resp.piece = piece
 		} else {
+			println(resp.err.Error())
 			Logger("[DOWNLOADER] LOAD PIECE FROM", s.rawAdnl.RemoteAddr(), "ERR:", resp.err.Error())
 			atomic.AddInt32(&s.fails, 1)
 		}
@@ -470,6 +506,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 	var sessionReady = make(chan int64, 1)
 	var ready bool
 	var readyMx sync.Mutex
+
 	rl.SetOnQuery(func(transferId []byte, query *rldp.Query) error {
 		ctx, cancel := context.WithTimeout(t.globalCtx, 30*time.Second)
 		defer cancel()
@@ -505,6 +542,9 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 		case AddUpdate:
 			switch u := q.Update.(type) {
 			case UpdateInit:
+				println("GOT UPD!")
+
+				Logger("[DOWNLOADER] NODE REPORTED PIECES INFO", hex.EncodeToString(adnlID))
 				stNode.piecesMx.Lock()
 				off := uint32(u.HavePiecesOffset)
 				for i := 0; i < len(u.HavePieces); i++ {
@@ -516,6 +556,7 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 				}
 				stNode.piecesMx.Unlock()
 			case UpdateHavePieces:
+				Logger("[DOWNLOADER] NODE HAS NEW PIECES", hex.EncodeToString(adnlID))
 				stNode.piecesMx.Lock()
 				for _, d := range u.PieceIDs {
 					stNode.hasPieces[uint32(d)] = true
@@ -534,6 +575,13 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 	})
 
 	Logger("[DOWNLOADER] REQUESTING TORRENT INFO FROM FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID))
+
+	nodeCtx, cancel := context.WithCancel(t.globalCtx)
+	stNode.globalCtx = nodeCtx
+	rl.SetOnDisconnect(func() {
+		cancel()
+		onDisconnect()
+	})
 
 	var res TorrentInfoContainer
 	for {
@@ -562,13 +610,6 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 		return nil, fmt.Errorf("incorrect torrent info")
 	}
 
-	nodeCtx, cancel := context.WithCancel(t.globalCtx)
-	stNode.globalCtx = nodeCtx
-	rl.SetOnDisconnect(func() {
-		cancel()
-		onDisconnect()
-	})
-
 	t.mx.Lock()
 	if t.torrent.Info == nil {
 		var info TorrentInfo
@@ -582,30 +623,11 @@ func (t *torrentDownloader) connectToNode(ctx context.Context, adnlID []byte, no
 	}
 	t.mx.Unlock()
 
-	// query first piece to be sure node is ready for downloading
-	for {
-		Logger("[DOWNLOADER] TRY LOAD PIECE FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID))
-		qCtx, cancelC := context.WithTimeout(ctx, 10*time.Second)
-		var piece Piece
-		err = rl.DoQuery(qCtx, 4096+int64(t.torrent.Info.PieceSize)*3, &GetPiece{0}, &piece)
-		cancelC()
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				ax.Close()
-				return nil, fmt.Errorf("failed to query first peice, err: %w", err)
-			case <-time.After(1 * time.Second):
-			}
-			continue
-		}
-		Logger("[DOWNLOADER] GOT PIECE FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.torrent.BagID), "CONNECTED!")
-
-		break
-	}
-
 	select {
 	case id := <-sessionReady:
 		stNode.sessionId = id
+		go stNode.pinger()
+
 		return stNode, nil
 	case <-ctx.Done():
 		// close connection and all related overlays
@@ -631,7 +653,14 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			if skip[string(node.nodeId)] != nil {
 				continue
 			}
-			nodes = append(nodes, node)
+
+			node.piecesMx.RLock()
+			hasPiece := node.hasPieces[pieceIndex]
+			node.piecesMx.RUnlock()
+
+			if hasPiece {
+				nodes = append(nodes, node)
+			}
 		}
 		t.mx.RUnlock()
 
