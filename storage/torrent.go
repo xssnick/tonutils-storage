@@ -268,6 +268,7 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 		} else {
 			f, err := t.getFileIndex(fileFrom)
 			if err != nil {
+				println("FI ERR", err.Error())
 				break
 			}
 
