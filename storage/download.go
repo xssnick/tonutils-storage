@@ -82,6 +82,12 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 	t.mx.Unlock()
 
 	go func() {
+		defer func() {
+			if stop != nil {
+				stop()
+			}
+		}()
+
 		piecesMap := map[uint32]bool{}
 		var list []fileInfo
 
@@ -301,8 +307,6 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 		if len(files) == 0 {
 			// stop if downloaded failed, on header we leave it for reuse
 			stop = nil
-		} else {
-			stop()
 		}
 	}()
 

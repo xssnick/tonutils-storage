@@ -133,6 +133,8 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper, session int64) func(quer
 				return err
 			}
 		case storage.GetTorrentInfo:
+			println("GET INF ADNL")
+
 			c, err := tlb.ToCell(t.Info)
 			if err != nil {
 				return err
@@ -277,8 +279,11 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				}
 			}
 		case storage.GetTorrentInfo:
+			println("GET INF RLDP")
+
 			c, err := tlb.ToCell(t.Info)
 			if err != nil {
+				println("GET INF CELL ERR", err.Error())
 				return err
 			}
 
@@ -286,6 +291,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper, session int64) func(
 				Data: c.ToBOC(),
 			})
 			if err != nil {
+				println("SEND INF ERR", err.Error())
+
 				return err
 			}
 
