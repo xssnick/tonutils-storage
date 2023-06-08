@@ -136,10 +136,13 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 				cbOffset = 0
 			}
 		}
-		fi.BlockTo = uint32(len(hashes))
-		fi.BlockToOffset = uint32(cbOffset)
 
-		files = append(files, &fi)
+		if name != "" { // if not header
+			fi.BlockTo = uint32(len(hashes))
+			fi.BlockToOffset = uint32(cbOffset)
+
+			files = append(files, &fi)
+		}
 
 		return nil
 	}
