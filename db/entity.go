@@ -3,6 +3,7 @@ package db
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/hex"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-storage/storage"
 )
@@ -12,6 +13,7 @@ func (s *Storage) GetFileIndex(bagId []byte, id uint32) (*storage.FileIndex, err
 		panic("invalid bag id len, should be 32")
 	}
 
+	println("GET FI for", id, hex.EncodeToString(bagId))
 	k := make([]byte, 3+32+4)
 	copy(k, "fi:")
 	copy(k[3:3+32], bagId)
@@ -35,6 +37,8 @@ func (s *Storage) SetFileIndex(bagId []byte, id uint32, fi *storage.FileIndex) e
 	if len(bagId) != 32 {
 		panic("invalid bag id len, should be 32")
 	}
+
+	println("SET FI for", id, hex.EncodeToString(bagId))
 
 	k := make([]byte, 3+4+32)
 	copy(k, "fi:")
