@@ -71,16 +71,23 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 	}
 
 	t.mx.Lock()
-	if t.stopDownload != nil {
+	stop := t.stopDownload
+	if stop != nil {
 		// stop current download
-		t.stopDownload()
+		stop()
 	}
 	var ctx context.Context
-	ctx, stop := context.WithCancel(t.globalCtx)
+	ctx, stop = context.WithCancel(t.globalCtx)
 	t.stopDownload = stop
 	t.mx.Unlock()
 
 	go func() {
+		defer func() {
+			if stop != nil {
+				stop()
+			}
+		}()
+
 		piecesMap := map[uint32]bool{}
 		var list []fileInfo
 
@@ -107,6 +114,11 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 			}
 		} else {
 			files = t.GetActiveFilesIDs()
+			if len(files) == 0 {
+				// do not stop download because we just loaded headers
+				// TODO: make it better
+				t.stopDownload = nil
+			}
 		}
 
 		list = make([]fileInfo, 0, len(files))
@@ -290,7 +302,10 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 			t.ResetDownloadPeer(peerId)
 		}
 
-		stop()
+		if len(files) == 0 {
+			// stop if downloaded failed, on header we leave it for reuse
+			stop = nil
+		}
 	}()
 
 	return nil
