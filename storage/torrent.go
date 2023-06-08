@@ -87,6 +87,7 @@ func (t *Torrent) GetConnector() NetConnector {
 }
 
 func (t *Torrent) BuildCache(cachePiecesNum int) error {
+	return nil
 	t.memCache = map[uint32]*Piece{}
 
 	num := t.PiecesNum()
@@ -254,6 +255,7 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 	offset := 0
 	block := make([]byte, t.Info.PieceSize)
 
+	println("GETTING PIECE", id)
 	fileFrom := piece.StartFileIndex
 	for {
 		isHdr := t.Info.HeaderSize > uint64(id)*uint64(t.Info.PieceSize)+uint64(offset)
@@ -268,7 +270,7 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 		} else {
 			f, err := t.getFileIndex(fileFrom)
 			if err != nil {
-				println("FI ERR", err.Error())
+				println("FI ERR", fileFrom, err.Error())
 				break
 			}
 

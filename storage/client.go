@@ -408,8 +408,8 @@ func (s *storageNode) loop() {
 				if len(d) > 4096 {
 					d = d[:4096]
 				}
-				//	println(s.nodeAddr)
-				//		println(hex.EncodeToString(d))
+				println(s.nodeAddr)
+				println(hex.EncodeToString(d))
 			}
 			proof, err := cell.FromBOC(piece.Proof)
 			if err != nil {
