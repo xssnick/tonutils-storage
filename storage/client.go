@@ -82,7 +82,6 @@ type storagePeer struct {
 	nodeId       []byte
 	sessionId    int64
 	sessionSeqno int64
-	rawAdnl      overlay.ADNL
 	rldp         overlay.RLDP
 
 	lastSentPieces []byte
@@ -291,7 +290,7 @@ func (s *storagePeer) Close() {
 	Logger("[STORAGE_NODE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
 	s.stop()
 	s.torrent.RemovePeer(s.nodeId)
-	s.rawAdnl.Close()
+	s.rldp.Close()
 }
 
 func (s *storagePeer) activate() {
@@ -322,7 +321,7 @@ func (s *storagePeer) pinger() {
 			if err != nil {
 				fails++
 				if fails >= 3 {
-					Logger("[DOWNLOADER] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.rawAdnl.RemoteAddr(), err.Error())
+					Logger("[DOWNLOADER] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.nodeAddr, err.Error())
 					return
 				}
 			} else {
@@ -355,12 +354,12 @@ func (s *storagePeer) loop() {
 		case req = <-s.pieceQueue:
 			select {
 			case <-req.ctx.Done():
-				Logger("[DOWNLOADER] ABANDONED PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rawAdnl.RemoteAddr())
+				Logger("[DOWNLOADER] ABANDONED PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rldp.GetADNL().RemoteAddr())
 				continue
 			default:
 			}
 
-			Logger("[DOWNLOADER] PICKED UP PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rawAdnl.RemoteAddr())
+			Logger("[DOWNLOADER] PICKED UP PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rldp.GetADNL().RemoteAddr())
 		}
 
 		resp := pieceResponse{
@@ -404,14 +403,14 @@ func (s *storagePeer) loop() {
 			resp.piece = piece
 		} else {
 			println(resp.err.Error())
-			Logger("[DOWNLOADER] LOAD PIECE FROM", s.rawAdnl.RemoteAddr(), "ERR:", resp.err.Error())
+			Logger("[DOWNLOADER] LOAD PIECE FROM", s.rldp.GetADNL().RemoteAddr(), "ERR:", resp.err.Error())
 			atomic.AddInt32(&s.fails, 1)
 		}
 		req.result <- resp
 
 		if resp.err != nil {
 			if atomic.LoadInt32(&s.fails) >= 3*atomic.LoadInt32(&s.loops) || untrusted {
-				Logger("[DOWNLOADER] TOO MANY FAILS FROM", s.rawAdnl.RemoteAddr(), "CLOSING CONNECTION, ERR:", resp.err.Error())
+				Logger("[DOWNLOADER] TOO MANY FAILS FROM", s.rldp.GetADNL().RemoteAddr(), "CLOSING CONNECTION, ERR:", resp.err.Error())
 				// something wrong, close connection, we should reconnect after it
 				return
 			}

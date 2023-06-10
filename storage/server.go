@@ -29,7 +29,7 @@ type Server struct {
 	store    Storage
 	closeCtx context.Context
 
-	bootstrapped map[adnl.Peer]overlay.RLDP
+	bootstrapped map[string]overlay.RLDP
 	mx           sync.RWMutex
 
 	closer func()
@@ -40,7 +40,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 		key:          key,
 		dht:          dht,
 		gate:         gate,
-		bootstrapped: map[adnl.Peer]overlay.RLDP{},
+		bootstrapped: map[string]overlay.RLDP{},
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
 	s.gate.SetConnectionHandler(s.bootstrapPeerWrap)
@@ -105,11 +105,18 @@ func (s *Server) bootstrapPeerWrap(client adnl.Peer) error {
 	return nil
 }
 
+func (s *Server) GetPeerIfActive(id []byte) overlay.RLDP {
+	s.mx.RLock()
+	defer s.mx.RUnlock()
+
+	return s.bootstrapped[hex.EncodeToString(id)]
+}
+
 func (s *Server) bootstrapPeer(client adnl.Peer) overlay.RLDP {
 	s.mx.Lock()
 	defer s.mx.Unlock()
 
-	if rl := s.bootstrapped[client]; rl != nil {
+	if rl := s.bootstrapped[hex.EncodeToString(client.GetID())]; rl != nil {
 		return rl
 	}
 
@@ -117,13 +124,13 @@ func (s *Server) bootstrapPeer(client adnl.Peer) overlay.RLDP {
 	extADNL.SetOnUnknownOverlayQuery(s.handleQuery(extADNL))
 	extADNL.SetDisconnectHandler(func(addr string, key ed25519.PublicKey) {
 		s.mx.Lock()
-		delete(s.bootstrapped, client)
+		delete(s.bootstrapped, hex.EncodeToString(client.GetID()))
 		s.mx.Unlock()
 	})
 
 	rl := overlay.CreateExtendedRLDP(rldp.NewClientV2(extADNL))
 	rl.SetOnUnknownOverlayQuery(s.handleRLDPQuery(rl))
-	s.bootstrapped[client] = rl
+	s.bootstrapped[hex.EncodeToString(client.GetID())] = rl
 
 	return rl
 }
@@ -208,7 +215,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		t.mx.Lock()
 		p := t.GetPeer(adnlId)
 		if p == nil {
-			stPeer = initStoragePeer(t.globalCtx, t, over, peer.GetADNL().(overlay.ADNL), peer, 0)
+			stPeer = initStoragePeer(t.globalCtx, t, over, peer, 0)
 			stPeer.activate()
 		} else {
 			stPeer = p.peer
@@ -585,42 +592,43 @@ func (s *Server) nodeConnector(adnlID []byte, t *Torrent, node *overlay.Node, at
 }
 
 func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, node *overlay.Node) (*storagePeer, error) {
-	lcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	addrs, keyN, err := s.dht.FindAddresses(lcCtx, adnlID)
-	cancel()
-	if err != nil {
-		Logger("[DOWNLOADER] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID))
-		return nil, fmt.Errorf("failed to find node address: %w", err)
+	rl := s.GetPeerIfActive(adnlID)
+	if rl == nil {
+		lcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		addrs, keyN, err := s.dht.FindAddresses(lcCtx, adnlID)
+		cancel()
+		if err != nil {
+			Logger("[DOWNLOADER] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID))
+			return nil, fmt.Errorf("failed to find node address: %w", err)
+		}
+
+		Logger("[DOWNLOADER] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+
+		addr := addrs.Addresses[0].IP.String() + ":" + fmt.Sprint(addrs.Addresses[0].Port)
+
+		ax, err := s.gate.RegisterClient(addr, keyN)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connnect to node: %w", err)
+		}
+		rl = s.bootstrapPeer(ax)
 	}
 
-	Logger("[DOWNLOADER] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+	addr := rl.GetADNL().RemoteAddr()
+	stNode := initStoragePeer(t.globalCtx, t, node.Overlay, rl, rand.Int63())
 
-	addr := addrs.Addresses[0].IP.String() + ":" + fmt.Sprint(addrs.Addresses[0].Port)
-
-	ax, err := s.gate.RegisterClient(addr, keyN)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connnect to node: %w", err)
-	}
-
-	rl := s.bootstrapPeer(ax)
-	if err != nil {
-		return nil, fmt.Errorf("failed to bootstrap node: %w", err)
-	}
-	stNode := initStoragePeer(t.globalCtx, t, node.Overlay, ax, rl, rand.Int63())
-
-	err = func() error {
+	err := func() error {
 		tm := time.Now()
-		Logger("[DOWNLOADER] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+		Logger("[DOWNLOADER] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
 
 		var res TorrentInfoContainer
 		infCtx, cancel := context.WithTimeout(stNode.globalCtx, 20*time.Second)
-		err = stNode.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
+		err := stNode.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
 		cancel()
 		if err != nil {
-			Logger("[DOWNLOADER] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+			Logger("[DOWNLOADER] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
 			return err
 		}
-		Logger("[DOWNLOADER] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+		Logger("[DOWNLOADER] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
 
 		cl, err := cell.FromBOC(res.Data)
 		if err != nil {
@@ -639,7 +647,6 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 			err = tlb.LoadFromCell(&info, cl.BeginParse())
 			if err != nil {
 				t.mx.Unlock()
-				ax.Close()
 				return fmt.Errorf("invalid torrent info cell")
 			}
 
@@ -663,7 +670,7 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 		stNode.Close()
 	}
 
-	Logger("[DOWNLOADER] PEER PREPARED", hex.EncodeToString(adnlID), addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+	Logger("[DOWNLOADER] PEER PREPARED", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
 
 	return stNode, nil
 }
@@ -705,13 +712,12 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	}
 }
 
-func initStoragePeer(globalCtx context.Context, torrent *Torrent, overlay []byte, ax overlay.ADNL, rl overlay.RLDP, sessionId int64) *storagePeer {
+func initStoragePeer(globalCtx context.Context, torrent *Torrent, overlay []byte, rl overlay.RLDP, sessionId int64) *storagePeer {
 	println("INIT PEER", sessionId)
 	stNode := &storagePeer{
 		torrent:    torrent,
-		nodeAddr:   ax.RemoteAddr(),
-		nodeId:     ax.GetID(),
-		rawAdnl:    ax,
+		nodeAddr:   rl.GetADNL().RemoteAddr(),
+		nodeId:     rl.GetADNL().GetID(),
 		rldp:       rl,
 		sessionId:  sessionId,
 		overlay:    overlay,
