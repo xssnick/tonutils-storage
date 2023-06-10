@@ -263,6 +263,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			t.UpdateUploadedPeer(stPeer, uint64(len(p.Data)))
 		case Ping:
 			if stPeer.sessionId == 0 {
+				println("SET SES ID PEER", q.SessionID)
+
 				stPeer.sessionId = q.SessionID
 			}
 
@@ -697,6 +699,7 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 }
 
 func initStoragePeer(globalCtx context.Context, torrent *Torrent, overlay []byte, ax overlay.ADNL, rl overlay.RLDP, sessionId int64) *storagePeer {
+	println("INIT PEER", sessionId)
 	stNode := &storagePeer{
 		torrent:    torrent,
 		nodeAddr:   ax.RemoteAddr(),
