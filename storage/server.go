@@ -149,7 +149,7 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 
-		println("GOT ADNL ", peer.RemoteAddr(), reflect.ValueOf(req))
+		println("GOT ADNL ", peer.RemoteAddr(), reflect.ValueOf(req).String())
 
 		switch req.(type) {
 		case overlay.GetRandomPeers:
