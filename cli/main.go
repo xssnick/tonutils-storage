@@ -12,7 +12,6 @@ import (
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-storage/config"
 	"github.com/xssnick/tonutils-storage/db"
-	"github.com/xssnick/tonutils-storage/server"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
 	"net"
@@ -109,19 +108,15 @@ func main() {
 		os.Exit(1)
 	}
 
-	Connector = storage.NewConnector(downloadGate, dhtClient)
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
+	Connector = storage.NewConnector(srv)
 
-	Storage, err = db.NewStorage(ldb, Connector)
+	Storage, err = db.NewStorage(ldb, Connector, false)
 	if err != nil {
 		pterm.Error.Println("Failed to init storage:", err.Error())
 		os.Exit(1)
 	}
-
-	err = server.NewServer(Storage, dhtClient, gate, cfg.Key, serverMode)
-	if err != nil {
-		pterm.Error.Println("Failed to start adnl server:", err.Error())
-		os.Exit(1)
-	}
+	srv.SetStorage(Storage)
 
 	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
 	pterm.Info.Println("We also have telegram group if you have some questions.", pterm.LightBlue("https://t.me/tonrh"))

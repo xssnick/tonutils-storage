@@ -70,7 +70,6 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 		return fmt.Errorf("bag is not set")
 	}
 
-	t.mx.Lock()
 	stop := t.stopDownload
 	if stop != nil {
 		// stop current download
@@ -79,7 +78,6 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 	var ctx context.Context
 	ctx, stop = context.WithCancel(t.globalCtx)
 	t.stopDownload = stop
-	t.mx.Unlock()
 
 	go func() {
 		defer func() {
@@ -251,19 +249,6 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 										}
 									}
 
-									if file.FromPiece == piece {
-										err = t.setFileIndex(file.Index, &FileIndex{
-											BlockFrom:       file.FromPiece,
-											BlockTo:         file.ToPiece,
-											BlockFromOffset: file.FromPieceOffset,
-											BlockToOffset:   file.ToPieceOffset,
-											Name:            file.Name,
-										})
-										if err != nil {
-											return fmt.Errorf("failed to write file index for %s: %w", file.Name, err)
-										}
-									}
-
 									return nil
 								}()
 								if err != nil {
@@ -383,17 +368,6 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						return fmt.Errorf("failed to write piece %d for file %s: %w", piece, off.path, err)
 					}
 				}
-			}
-
-			err = t.setFileIndex(off.info.Index, &FileIndex{
-				BlockFrom:       off.info.FromPiece,
-				BlockTo:         off.info.ToPiece,
-				BlockFromOffset: off.info.FromPieceOffset,
-				BlockToOffset:   off.info.ToPieceOffset,
-				Name:            off.info.Name,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to write file index for %s: %w", off.info.Name, err)
 			}
 
 			report(Event{Name: EventFileDownloaded, Value: off.path})

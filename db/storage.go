@@ -13,7 +13,6 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-storage/storage"
 	"io"
-	"log"
 	"os"
 	"sort"
 	"sync"
@@ -36,7 +35,7 @@ type Storage struct {
 	mx sync.RWMutex
 }
 
-func NewStorage(db *leveldb.DB, connector storage.NetConnector) (*Storage, error) {
+func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool) (*Storage, error) {
 	s := &Storage{
 		torrents:        map[string]*storage.Torrent{},
 		torrentsOverlay: map[string]*storage.Torrent{},
@@ -44,7 +43,7 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector) (*Storage, error
 		connector:       connector,
 	}
 
-	err := s.loadTorrents()
+	err := s.loadTorrents(startWithoutActiveFilesToo)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +216,7 @@ type TorrentStored struct {
 	ActiveDownload bool
 }
 
-func (s *Storage) loadTorrents() error {
+func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 	iter := s.db.NewIterator(&util.Range{Start: []byte("bags:")}, nil)
 	for iter.Next() {
 		if !bytes.HasPrefix(iter.Key(), []byte("bags:")) {
@@ -239,18 +238,20 @@ func (s *Storage) loadTorrents() error {
 		if t.Info != nil {
 			t.InitMask()
 			// cache header
-			err = t.BuildCache(int(t.Info.HeaderSize/uint64(t.Info.PieceSize)) + 1)
+			/*err = t.BuildCache(int(t.Info.HeaderSize/uint64(t.Info.PieceSize)) + 1)
 			if err != nil {
 				log.Printf("failed to build cache for %s: %s", hex.EncodeToString(t.BagID), err.Error())
 				continue
-			}
+			}*/
 			_ = t.LoadActiveFilesIDs()
 		}
 
 		if tr.ActiveDownload {
-			err = t.Start(tr.ActiveUpload)
-			if err != nil {
-				return fmt.Errorf("failed to startd download %s: %w", hex.EncodeToString(iter.Key()[5:]), err)
+			if startWithoutActiveFilesToo || len(t.GetActiveFilesIDs()) > 0 {
+				err = t.Start(tr.ActiveUpload)
+				if err != nil {
+					return fmt.Errorf("failed to startd download %s: %w", hex.EncodeToString(iter.Key()[5:]), err)
+				}
 			}
 		}
 

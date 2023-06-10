@@ -97,7 +97,9 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 	}
 	waiter.Success()
 
+	// TODO: change to counter
 	files := make([]*FileIndex, 0, 64)
+
 	hashes := make([][]byte, 0, 256)
 	pieces := make([]*PieceInfo, 0, 256)
 
@@ -228,13 +230,6 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 		err = torrent.setPiece(uint32(i), piece)
 		if err != nil {
 			return nil, fmt.Errorf("failed to store piece %d in db: %w", i, err)
-		}
-	}
-
-	for i, file := range files {
-		err = torrent.setFileIndex(uint32(i), file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to store file index %d in db: %w", i, err)
 		}
 	}
 

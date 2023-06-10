@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"sync"
@@ -25,9 +26,9 @@ type PieceInfo struct {
 }
 
 type Storage interface {
+	GetAll() []*Torrent
+	GetTorrentByOverlay(overlay []byte) *Torrent
 	SetTorrent(torrent *Torrent) error
-	GetFileIndex(bagId []byte, id uint32) (*FileIndex, error)
-	SetFileIndex(bagId []byte, id uint32, fi *FileIndex) error
 	SetActiveFiles(bagId []byte, ids []uint32) error
 	GetActiveFiles(bagId []byte) ([]uint32, error)
 	GetPiece(bagId []byte, id uint32) (*PieceInfo, error)
@@ -44,6 +45,7 @@ type NetConnector interface {
 	ThrottleDownload(ctx context.Context, sz uint64) error
 	ThrottleUpload(ctx context.Context, sz uint64) error
 	CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int) (_ TorrentDownloader, err error)
+	TorrentServer
 }
 
 type Torrent struct {
@@ -59,8 +61,9 @@ type Torrent struct {
 	connector  NetConnector
 	downloader TorrentDownloader
 
-	peers   map[string]*PeerInfo
-	peersMx sync.RWMutex
+	knownNodes map[string]*overlay.Node
+	peers      map[string]*PeerInfo
+	peersMx    sync.RWMutex
 
 	memCache map[uint32]*Piece
 	db       Storage
@@ -87,7 +90,6 @@ func (t *Torrent) GetConnector() NetConnector {
 }
 
 func (t *Torrent) BuildCache(cachePiecesNum int) error {
-	return nil
 	t.memCache = map[uint32]*Piece{}
 
 	num := t.PiecesNum()
@@ -109,12 +111,13 @@ func (t *Torrent) BuildCache(cachePiecesNum int) error {
 
 func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t := &Torrent{
-		Path:      path,
-		CreatedAt: time.Now(),
-		peers:     map[string]*PeerInfo{},
-		memCache:  map[uint32]*Piece{},
-		db:        db,
-		connector: connector,
+		Path:       path,
+		CreatedAt:  time.Now(),
+		peers:      map[string]*PeerInfo{},
+		memCache:   map[uint32]*Piece{},
+		knownNodes: map[string]*overlay.Node{},
+		db:         db,
+		connector:  connector,
 	}
 
 	// create as stopped
@@ -141,12 +144,16 @@ func (t *Torrent) Stop() {
 func (t *Torrent) Start(withUpload bool) (err error) {
 	t.activeUpload = withUpload
 
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
 	if d, _ := t.IsActive(); d {
 		return nil
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
 	go t.runPeersMonitor()
+	go t.connector.StartPeerSearcher(t)
 
 	return t.startDownload(func(event Event) {}, false, false)
 }
@@ -157,14 +164,6 @@ func (t *Torrent) PiecesNum() uint32 {
 		piecesNum++
 	}
 	return uint32(piecesNum)
-}
-
-func (t *Torrent) getFileIndex(id uint32) (*FileIndex, error) {
-	return t.db.GetFileIndex(t.BagID, id)
-}
-
-func (t *Torrent) setFileIndex(id uint32, fi *FileIndex) error {
-	return t.db.SetFileIndex(t.BagID, id, fi)
 }
 
 func (t *Torrent) getPiece(id uint32) (*PieceInfo, error) {
@@ -203,9 +202,13 @@ func (t *Torrent) GetActiveFilesIDs() []uint32 {
 }
 
 func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
 	if err := t.db.SetActiveFiles(t.BagID, ids); err != nil {
 		return fmt.Errorf("failed to store active files in db: %w", err)
 	}
+
 	t.activeFiles = ids
 	return t.startDownload(func(event Event) {}, false, false)
 }
@@ -267,16 +270,13 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 			}
 			offset += copy(block[offset:], headerData[id*t.Info.PieceSize:])
 		} else {
-			f, err := t.getFileIndex(fileFrom)
+			f, err := t.GetFileOffsetsByID(fileFrom)
 			if err != nil {
-				break
+				return nil, fmt.Errorf("offsets for %d %d are not exists (%w)", id, fileFrom, err)
 			}
 
 			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
 			read := func(path string, from int64) error {
-				f.mx.Lock()
-				defer f.mx.Unlock()
-
 				fd, err := fs.Acquire(path)
 				if err != nil {
 					return err
@@ -293,14 +293,19 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 			}
 
 			fileOff := uint32(0)
-			if f.BlockFrom != id {
-				fileOff = (id-f.BlockFrom)*t.Info.PieceSize - f.BlockFromOffset
+			if f.FromPiece != id {
+				fileOff = (id-f.FromPiece)*t.Info.PieceSize - f.FromPieceOffset
 			}
 			err = read(path, int64(fileOff))
 			if err != nil {
 				return nil, err
 			}
 			fileFrom++
+
+			if fileFrom >= uint32(len(t.Header.DataIndex)) {
+				// end reached
+				break
+			}
 		}
 
 		if offset == int(t.Info.PieceSize) {

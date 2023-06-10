@@ -19,6 +19,7 @@ type PeerInfo struct {
 	Uploaded   uint64
 	Downloaded uint64
 
+	peer          *storagePeer
 	uploadSpeed   *speedInfo
 	downloadSpeed *speedInfo
 }
@@ -34,18 +35,18 @@ func (t *Torrent) GetPeers() map[string]PeerInfo {
 	return peers
 }
 
-func (t *Torrent) TouchPeer(id []byte, addr string) {
+func (t *Torrent) TouchPeer(peer *storagePeer) *PeerInfo {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	t.touchPeer(id, addr)
+	return t.touchPeer(peer)
 }
 
-func (t *Torrent) UpdateDownloadedPeer(id []byte, addr string, bytes uint64) {
+func (t *Torrent) UpdateDownloadedPeer(peer *storagePeer, bytes uint64) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	p := t.touchPeer(id, addr)
+	p := t.touchPeer(peer)
 	p.Downloaded += bytes
 }
 
@@ -55,6 +56,13 @@ func (t *Torrent) RemovePeer(id []byte) {
 
 	strId := hex.EncodeToString(id)
 	delete(t.peers, strId)
+}
+
+func (t *Torrent) GetPeer(id []byte) *PeerInfo {
+	t.peersMx.Lock()
+	defer t.peersMx.Unlock()
+
+	return t.peers[hex.EncodeToString(id)]
 }
 
 func (t *Torrent) ResetDownloadPeer(id []byte) {
@@ -71,16 +79,16 @@ func (t *Torrent) ResetDownloadPeer(id []byte) {
 	}
 }
 
-func (t *Torrent) UpdateUploadedPeer(id []byte, addr string, bytes uint64) {
+func (t *Torrent) UpdateUploadedPeer(peer *storagePeer, bytes uint64) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	p := t.touchPeer(id, addr)
+	p := t.touchPeer(peer)
 	p.Uploaded += bytes
 }
 
-func (t *Torrent) touchPeer(id []byte, addr string) *PeerInfo {
-	strId := hex.EncodeToString(id)
+func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
+	strId := hex.EncodeToString(peer.nodeId)
 	p := t.peers[strId]
 	if p == nil {
 		p = &PeerInfo{
@@ -93,7 +101,8 @@ func (t *Torrent) touchPeer(id []byte, addr string) *PeerInfo {
 		}
 		t.peers[strId] = p
 	}
-	p.Addr = addr
+	p.peer = peer
+	p.Addr = peer.nodeAddr
 	p.LastSeenAt = time.Now()
 	return p
 }
