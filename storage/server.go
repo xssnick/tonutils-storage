@@ -262,10 +262,17 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			t.UpdateUploadedPeer(stPeer, uint64(len(p.Data)))
 		case Ping:
+			println("GOT PING", q.SessionID, stPeer.sessionId)
 			if stPeer.sessionId == 0 {
 				println("SET SES ID PEER", q.SessionID)
 
 				stPeer.sessionId = q.SessionID
+			}
+
+			if stPeer.sessionId != q.SessionID {
+				println("DIFF SES", stPeer.sessionId)
+				stPeer.sessionId = q.SessionID
+				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{})
