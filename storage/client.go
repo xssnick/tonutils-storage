@@ -94,8 +94,9 @@ type storagePeer struct {
 
 	pieceQueue chan *pieceRequest
 
-	globalCtx context.Context
-	stop      func()
+	activateOnce sync.Once
+	globalCtx    context.Context
+	stop         func()
 }
 
 type TorrentInfo struct {
@@ -293,12 +294,21 @@ func (s *storagePeer) Close() {
 	s.rawAdnl.Close()
 }
 
+func (s *storagePeer) activate() {
+	s.activateOnce.Do(func() {
+		s.torrent.TouchPeer(s)
+		for i := 0; i < 8; i++ {
+			go s.loop()
+		}
+		println("PEER ACTIVE!", s.nodeAddr, s.sessionId)
+	})
+}
+
 func (s *storagePeer) pinger() {
 	defer func() {
 		s.Close()
 	}()
 
-	once := sync.Once{}
 	fails := 0
 	for {
 		wait := 250 * time.Millisecond
@@ -317,16 +327,7 @@ func (s *storagePeer) pinger() {
 				}
 			} else {
 				fails = 0
-
-				once.Do(func() {
-					println("PEER ACTIVE!", fails, s.nodeAddr, s.sessionId)
-
-					// peer is active
-					s.torrent.TouchPeer(s)
-					for i := 0; i < 8; i++ {
-						go s.loop()
-					}
-				})
+				s.activate()
 			}
 			println("PING DONE", fails, s.nodeAddr, s.sessionId)
 		}

@@ -208,7 +208,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		t.mx.Lock()
 		p := t.GetPeer(adnlId)
 		if p == nil {
-			stPeer = initStoragePeer(t.globalCtx, t, over, peer.GetADNL().(overlay.ADNL), peer, rand.Int63())
+			stPeer = initStoragePeer(t.globalCtx, t, over, peer.GetADNL().(overlay.ADNL), peer, 0)
+			stPeer.activate()
 		} else {
 			stPeer = p.peer
 		}
@@ -265,7 +266,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			println("GOT PING", q.SessionID, stPeer.sessionId)
 			if stPeer.sessionId == 0 {
 				println("SET SES ID PEER", q.SessionID)
-
 				stPeer.sessionId = q.SessionID
 			}
 
@@ -298,7 +298,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 						HavePieces:       stPeer.lastSentPieces,
 						HavePiecesOffset: 0,
 						State: State{
-							WillUpload:   true,
+							WillUpload:   isUpl,
 							WantDownload: true,
 						},
 					},
@@ -606,7 +606,7 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	if err != nil {
 		return nil, fmt.Errorf("failed to bootstrap node: %w", err)
 	}
-	stNode := initStoragePeer(t.globalCtx, t, node.Overlay, ax, rl, 0)
+	stNode := initStoragePeer(t.globalCtx, t, node.Overlay, ax, rl, rand.Int63())
 
 	err = func() error {
 		tm := time.Now()
