@@ -15,6 +15,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/rand"
+	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -148,6 +149,8 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 
+		println("GOT ADNL ", peer.RemoteAddr(), reflect.ValueOf(req))
+
 		switch req.(type) {
 		case overlay.GetRandomPeers:
 			node, err := overlay.NewNode(t.BagID, s.key)
@@ -216,6 +219,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		switch q := req.(type) {
 		case overlay.GetRandomPeers:
+			println("GOT GET PEERS")
+
 			node, err := overlay.NewNode(t.BagID, s.key)
 			if err != nil {
 				return err
@@ -271,6 +276,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			stPeer.piecesMx.RUnlock()
 
 			if atomic.LoadInt64(&stPeer.sessionSeqno) == 0 {
+				println("SEND UPD")
+
 				stPeer.piecesMx.Lock()
 				stPeer.lastSentPieces = t.PiecesMask()
 				stPeer.piecesMx.Unlock()
@@ -358,11 +365,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return err
 			}
 		case UpdateState:
+			println("GOT UPDATE STATE")
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Ok{})
 			if err != nil {
 				return err
 			}
 		case AddUpdate:
+			println("GOT ADD UPDATE")
+
 			switch u := q.Update.(type) {
 			case UpdateInit:
 				Logger("[DOWNLOADER] NODE REPORTED PIECES INFO", hex.EncodeToString(adnlId), q.SessionID, q.Seqno)
