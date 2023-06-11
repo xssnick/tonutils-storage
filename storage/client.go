@@ -82,7 +82,7 @@ type storagePeer struct {
 	nodeId       []byte
 	sessionId    int64
 	sessionSeqno int64
-	rldp         overlay.RLDP
+	conn         *PeerConnection
 
 	lastSentPieces []byte
 	hasPieces      map[uint32]bool
@@ -94,6 +94,7 @@ type storagePeer struct {
 	pieceQueue chan *pieceRequest
 
 	activateOnce sync.Once
+	closeOnce    sync.Once
 	globalCtx    context.Context
 	stop         func()
 }
@@ -287,10 +288,12 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 }
 
 func (s *storagePeer) Close() {
-	Logger("[STORAGE_NODE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
-	s.stop()
-	s.torrent.RemovePeer(s.nodeId)
-	s.rldp.Close()
+	s.closeOnce.Do(func() {
+		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
+		s.stop()
+		s.torrent.RemovePeer(s.nodeId)
+		s.conn.CloseFor(s)
+	})
 }
 
 func (s *storagePeer) activate() {
@@ -316,12 +319,12 @@ func (s *storagePeer) pinger() {
 			// session should be initialised
 			var pong Pong
 			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
-			err := s.rldp.DoQuery(ctx, 1<<25, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
+			err := s.conn.rldp.DoQuery(ctx, 1<<25, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
 			cancel()
 			if err != nil {
 				fails++
 				if fails >= 3 {
-					Logger("[DOWNLOADER] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.nodeAddr, err.Error())
+					Logger("[STORAGE] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.nodeAddr, err.Error())
 					return
 				}
 			} else {
@@ -354,12 +357,12 @@ func (s *storagePeer) loop() {
 		case req = <-s.pieceQueue:
 			select {
 			case <-req.ctx.Done():
-				Logger("[DOWNLOADER] ABANDONED PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rldp.GetADNL().RemoteAddr())
+				Logger("[STORAGE] ABANDONED PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.nodeAddr)
 				continue
 			default:
 			}
 
-			Logger("[DOWNLOADER] PICKED UP PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.rldp.GetADNL().RemoteAddr())
+			Logger("[STORAGE] PICKED UP PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.nodeAddr)
 		}
 
 		resp := pieceResponse{
@@ -371,7 +374,7 @@ func (s *storagePeer) loop() {
 		var piece Piece
 		resp.err = func() error {
 			reqCtx, cancel := context.WithTimeout(req.ctx, 7*time.Second)
-			err := s.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{req.index}), &piece)
+			err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{req.index}), &piece)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("failed to query piece %d. err: %w", req.index, err)
@@ -403,14 +406,14 @@ func (s *storagePeer) loop() {
 			resp.piece = piece
 		} else {
 			println(resp.err.Error())
-			Logger("[DOWNLOADER] LOAD PIECE FROM", s.rldp.GetADNL().RemoteAddr(), "ERR:", resp.err.Error())
+			Logger("[STORAGE] LOAD PIECE FROM", s.nodeAddr, "ERR:", resp.err.Error())
 			atomic.AddInt32(&s.fails, 1)
 		}
 		req.result <- resp
 
 		if resp.err != nil {
 			if atomic.LoadInt32(&s.fails) >= 3*atomic.LoadInt32(&s.loops) || untrusted {
-				Logger("[DOWNLOADER] TOO MANY FAILS FROM", s.rldp.GetADNL().RemoteAddr(), "CLOSING CONNECTION, ERR:", resp.err.Error())
+				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", resp.err.Error())
 				// something wrong, close connection, we should reconnect after it
 				return
 			}
