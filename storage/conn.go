@@ -19,8 +19,8 @@ func (c *PeerConnection) CloseFor(peer *storagePeer) {
 	c.mx.Lock()
 	defer c.mx.Unlock()
 
-	Logger("[STORAGE_PEER] CLOSING", hex.EncodeToString(c.adnl.GetID()), "FOR", hex.EncodeToString(peer.torrent.BagID))
 	delete(c.usedByBags, string(peer.torrent.BagID))
+	Logger("[STORAGE_PEER] CLOSING", hex.EncodeToString(c.adnl.GetID()), "FOR", hex.EncodeToString(peer.torrent.BagID), "LEFT USAGES", len(c.usedByBags))
 
 	if len(c.usedByBags) == 0 {
 		Logger("[STORAGE_PEER] DISCONNECTING, NO MORE USAGES FOR", hex.EncodeToString(c.adnl.GetID()))

@@ -337,7 +337,7 @@ func (s *storagePeer) pinger() {
 		select {
 		case <-s.globalCtx.Done():
 			return
-		case <-time.After(wait * time.Second):
+		case <-time.After(wait):
 		}
 	}
 }
@@ -458,12 +458,11 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 		}
 
 		if len(nodes) == 0 {
-			skip = map[string]*storagePeer{}
-
 			select {
 			case <-ctx.Done():
 				return nil, nil, nil, "", ctx.Err()
 			case <-time.After(250 * time.Millisecond):
+				skip = map[string]*storagePeer{}
 				// no nodes, wait
 			}
 			continue

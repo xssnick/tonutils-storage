@@ -579,8 +579,6 @@ func (s *Server) nodeConnector(adnlID []byte, t *Torrent, node *overlay.Node, at
 
 	go func() {
 		select {
-		case <-t.globalCtx.Done():
-			return
 		case <-stNode.globalCtx.Done():
 			onFail()
 		}
