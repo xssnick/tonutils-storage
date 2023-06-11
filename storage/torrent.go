@@ -141,6 +141,8 @@ func (t *Torrent) Stop() {
 	t.pause()
 }
 
+var FullDownload bool = false
+
 func (t *Torrent) Start(withUpload bool) (err error) {
 	t.activeUpload = withUpload
 
@@ -155,7 +157,7 @@ func (t *Torrent) Start(withUpload bool) (err error) {
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
 
-	return t.startDownload(func(event Event) {}, false, false)
+	return t.startDownload(func(event Event) {}, FullDownload, false)
 }
 
 func (t *Torrent) PiecesNum() uint32 {

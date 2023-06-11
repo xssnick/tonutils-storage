@@ -15,7 +15,6 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/rand"
-	"reflect"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -130,7 +129,6 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	rl.SetOnUnknownOverlayQuery(s.handleRLDPQuery(rl))
 
 	rl.SetOnDisconnect(func() {
-		println("DE BOOTSTRAP", client.RemoteAddr(), hex.EncodeToString(client.GetID()))
 		s.mx.Lock()
 		delete(s.bootstrapped, hex.EncodeToString(client.GetID()))
 		s.mx.Unlock()
@@ -166,8 +164,6 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
-
-		println("GOT ADNL ", peer.RemoteAddr(), reflect.ValueOf(req).String())
 
 		switch req.(type) {
 		case overlay.GetRandomPeers:
@@ -223,25 +219,22 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		p := s.GetPeerIfActive(adnlId)
 		if p == nil {
-			println("PEER DISCONED", p.adnl.RemoteAddr())
 			return fmt.Errorf("peer disconnected")
 		}
 		stPeer := p.GetFor(t.BagID)
 
 		if stPeer == nil {
 			t.mx.Lock()
-			stPeer = t.initStoragePeer(t.globalCtx, over, p, 0)
-			stPeer.activate()
+			stPeer = t.initStoragePeer(t.globalCtx, over, p, 0, false)
 			t.mx.Unlock()
 		}
+		stPeer.touch()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		switch q := req.(type) {
 		case overlay.GetRandomPeers:
-			println("GOT GET PEERS")
-
 			node, err := overlay.NewNode(t.BagID, s.key)
 			if err != nil {
 				return err
@@ -283,14 +276,11 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			t.UpdateUploadedPeer(stPeer, uint64(len(p.Data)))
 		case Ping:
-			println("GOT PING", q.SessionID, stPeer.sessionId)
 			if stPeer.sessionId == 0 {
-				println("SET SES ID PEER", q.SessionID)
 				stPeer.sessionId = q.SessionID
 			}
 
-			if stPeer.sessionId != q.SessionID {
-				println("DIFF SES", stPeer.sessionId)
+			if !stPeer.forceSession && stPeer.sessionId != q.SessionID {
 				stPeer.sessionId = q.SessionID
 				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
 			}
@@ -305,8 +295,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			stPeer.piecesMx.RUnlock()
 
 			if atomic.LoadInt64(&stPeer.sessionSeqno) == 0 {
-				println("SEND UPD")
-
 				stPeer.piecesMx.Lock()
 				stPeer.lastSentPieces = t.PiecesMask()
 				stPeer.piecesMx.Unlock()
@@ -365,11 +353,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return fmt.Errorf("bag is not for upload")
 			}
 
-			println("GET INF RLDP")
-
 			c, err := tlb.ToCell(t.Info)
 			if err != nil {
-				println("GET INF CELL ERR", err.Error())
 				return err
 			}
 
@@ -377,8 +362,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				Data: c.ToBOC(),
 			})
 			if err != nil {
-				println("SEND INF ERR", err.Error())
-
 				return err
 			}
 
@@ -394,14 +377,11 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return err
 			}
 		case UpdateState:
-			println("GOT UPDATE STATE")
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Ok{})
 			if err != nil {
 				return err
 			}
 		case AddUpdate:
-			println("GOT ADD UPDATE")
-
 			switch u := q.Update.(type) {
 			case UpdateInit:
 				Logger("[STORAGE] NODE REPORTED PIECES INFO", hex.EncodeToString(adnlId), q.SessionID, q.Seqno)
@@ -631,7 +611,7 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	addr := peer.adnl.RemoteAddr()
 
 	t.mx.Lock()
-	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, peer, rand.Int63())
+	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, peer, rand.Int63(), true)
 	t.mx.Unlock()
 
 	err := func() error {
@@ -737,23 +717,21 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	}
 }
 
-func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, conn *PeerConnection, sessionId int64) *storagePeer {
+func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, conn *PeerConnection, sessionId int64, forceSession bool) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
-		println("ALREADY PEER", sessionId)
 		return n
 	}
 
-	println("INIT PEER", sessionId)
-
 	stNode := &storagePeer{
-		torrent:    t,
-		nodeAddr:   conn.adnl.RemoteAddr(),
-		nodeId:     conn.adnl.GetID(),
-		conn:       conn,
-		sessionId:  sessionId,
-		overlay:    overlay,
-		hasPieces:  map[uint32]bool{},
-		pieceQueue: make(chan *pieceRequest),
+		torrent:      t,
+		nodeAddr:     conn.adnl.RemoteAddr(),
+		nodeId:       conn.adnl.GetID(),
+		conn:         conn,
+		sessionId:    sessionId,
+		forceSession: forceSession,
+		overlay:      overlay,
+		hasPieces:    map[uint32]bool{},
+		pieceQueue:   make(chan *pieceRequest),
 	}
 
 	conn.UseFor(stNode)

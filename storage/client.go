@@ -81,6 +81,7 @@ type storagePeer struct {
 	overlay      []byte
 	nodeId       []byte
 	sessionId    int64
+	forceSession bool
 	sessionSeqno int64
 	conn         *PeerConnection
 
@@ -288,21 +289,20 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 }
 
 func (s *storagePeer) Close() {
+	s.torrent.RemovePeer(s.nodeId)
 	s.closeOnce.Do(func() {
 		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
 		s.stop()
-		s.torrent.RemovePeer(s.nodeId)
 		s.conn.CloseFor(s)
 	})
 }
 
-func (s *storagePeer) activate() {
+func (s *storagePeer) touch() {
+	s.torrent.TouchPeer(s)
 	s.activateOnce.Do(func() {
-		s.torrent.TouchPeer(s)
 		for i := 0; i < 8; i++ {
 			go s.loop()
 		}
-		println("PEER ACTIVE!", s.nodeAddr, s.sessionId)
 	})
 }
 
@@ -329,9 +329,8 @@ func (s *storagePeer) pinger() {
 				}
 			} else {
 				fails = 0
-				s.activate()
+				s.touch()
 			}
-			println("PING DONE", fails, s.nodeAddr, s.sessionId)
 		}
 
 		select {
@@ -405,7 +404,6 @@ func (s *storagePeer) loop() {
 			atomic.StoreInt32(&s.fails, 0)
 			resp.piece = piece
 		} else {
-			println(resp.err.Error())
 			Logger("[STORAGE] LOAD PIECE FROM", s.nodeAddr, "ERR:", resp.err.Error())
 			atomic.AddInt32(&s.fails, 1)
 		}
