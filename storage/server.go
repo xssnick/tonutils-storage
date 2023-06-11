@@ -52,16 +52,19 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 			for {
 				select {
 				case <-s.closeCtx.Done():
+					Logger("[STORAGE_DHT] STOPPED DHT UPDATER")
 					return
 				case <-time.After(wait):
 				}
+
+				Logger("[STORAGE_DHT] UPDATING OUR ADDRESS RECORD...")
 
 				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
 				err := s.updateDHT(ctx)
 				cancel()
 
 				if err != nil {
-					pterm.Warning.Println("DHT ADNL address record update failed: ", err, ". We will retry in 5 sec")
+					Logger("[STORAGE_DHT] FAILED TO UPDATE OUR ADDRESS RECORD", err.Error())
 
 					// on err, retry sooner
 					wait = 5 * time.Second
@@ -84,7 +87,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
 				err := s.updateTorrents(ctx)
 				if err == nil {
-					wait = 1 * time.Minute
+					wait = 5 * time.Minute
 				} else {
 					wait = 15 * time.Second
 				}
@@ -508,7 +511,7 @@ func (s *Server) updateTorrents(ctx context.Context) error {
 			}
 		}
 
-		ctxStore, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
 		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
 		cancel()
 		if err != nil && stored == 0 {
