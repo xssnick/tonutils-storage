@@ -21,10 +21,8 @@ type fileInfoData struct {
 	Name string
 }
 
-func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
+func CreateTorrent(path, description string, db Storage, connector NetConnector) (*Torrent, error) {
 	const pieceSize = 128 * 1024
-
-	torrent := NewTorrent(path, db, true)
 
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
@@ -41,6 +39,8 @@ func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 	}
 
 	dir := filepath.Base(path) + "/"
+
+	torrent := NewTorrent(filepath.Dir(path), db, connector)
 	torrent.Header = &TorrentHeader{
 		DirNameSize: uint32(len(dir)),
 		DirName:     []byte(dir),
@@ -97,7 +97,9 @@ func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 	}
 	waiter.Success()
 
+	// TODO: change to counter
 	files := make([]*FileIndex, 0, 64)
+
 	hashes := make([][]byte, 0, 256)
 	pieces := make([]*PieceInfo, 0, 256)
 
@@ -136,16 +138,19 @@ func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 				cbOffset = 0
 			}
 		}
-		fi.BlockTo = uint32(len(hashes))
-		fi.BlockToOffset = uint32(cbOffset)
 
-		files = append(files, &fi)
+		if name != "" { // if not header
+			fi.BlockTo = uint32(len(hashes))
+			fi.BlockToOffset = uint32(cbOffset)
+
+			files = append(files, &fi)
+		}
 
 		return nil
 	}
 
 	waiter, _ = pterm.DefaultSpinner.Start("Generating bag header...")
-	headerData, err := tl.Serialize(&torrent.Header, true)
+	headerData, err := tl.Serialize(torrent.Header, true)
 	if err != nil {
 		waiter.Fail(err.Error())
 		return nil, fmt.Errorf("failed to serialize header: %w", err)
@@ -195,20 +200,6 @@ func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 		piece.Proof = proof.ToBOCWithFlags(false)
 	}
 
-	for i, piece := range pieces {
-		err := torrent.setPiece(uint32(i), piece)
-		if err != nil {
-			return nil, fmt.Errorf("failed to store piece %d in db: %w", i, err)
-		}
-	}
-
-	for i, file := range files {
-		err := torrent.setFileIndex(uint32(i), file)
-		if err != nil {
-			return nil, fmt.Errorf("failed to store file index %d in db: %w", i, err)
-		}
-	}
-
 	torrent.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
 		FileSize:   uint64(len(headerData)) + filesSize,
@@ -229,6 +220,26 @@ func CreateTorrent(path, description string, db Storage) (*Torrent, error) {
 	waiter.Success("Merkle tree successfully built")
 
 	torrent.BagID = tCell.Hash()
+	p := len(pieces) / 8
+	if len(pieces)%8 != 0 {
+		p++
+	}
+	torrent.pieceMask = make([]byte, p)
+
+	for i, piece := range pieces {
+		err = torrent.setPiece(uint32(i), piece)
+		if err != nil {
+			return nil, fmt.Errorf("failed to store piece %d in db: %w", i, err)
+		}
+	}
+
+	torrent.activeFiles = make([]uint32, 0, len(filesList))
+	for i := range filesList {
+		torrent.activeFiles = append(torrent.activeFiles, uint32(i))
+	}
+	if err = torrent.db.SetActiveFiles(torrent.BagID, torrent.activeFiles); err != nil {
+		return nil, fmt.Errorf("failed to store active files in db: %w", err)
+	}
 
 	return torrent, nil
 }

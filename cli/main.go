@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"flag"
+	"fmt"
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -12,8 +13,8 @@ import (
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-storage/config"
 	"github.com/xssnick/tonutils-storage/db"
-	"github.com/xssnick/tonutils-storage/server"
 	"github.com/xssnick/tonutils-storage/storage"
+	"log"
 	"math/bits"
 	"net"
 	"os"
@@ -21,18 +22,32 @@ import (
 )
 
 var (
-	DBPath = flag.String("db", "", "Path to db folder")
+	DBPath    = flag.String("db", "", "Path to db folder")
+	Verbosity = flag.Int("debug", 0, "Debug logs")
 )
 
-var Downloader *storage.Downloader
 var Storage *db.Storage
+var Connector storage.NetConnector
 
 func main() {
 	flag.Parse()
 
+	storage.FullDownload = true
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
+
+	switch *Verbosity {
+	case 3:
+		adnl.Logger = log.Println
+		fallthrough
+	case 2:
+		dht.Logger = log.Println
+		fallthrough
+	case 1:
+		storage.Logger = log.Println
+
+	}
 
 	_ = pterm.DefaultBigText.WithLetters(
 		putils.LettersFromStringWithStyle("Ton", pterm.FgBlue.ToStyle()),
@@ -97,22 +112,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	dhtClient, err := dht.NewClientFromConfig(context.Background(), dhtGate, lsCfg)
+	dhtClient, err := dht.NewClientFromConfig(dhtGate, lsCfg)
 	if err != nil {
 		pterm.Error.Println("Failed to init dht client:", err.Error())
-		os.Exit(1)
-	}
-	Downloader = storage.NewDownloader(dhtClient)
-
-	Storage, err = db.NewStorage(ldb)
-	if err != nil {
-		pterm.Error.Println("Failed to init storage:", err.Error())
-		os.Exit(1)
-	}
-
-	err = server.NewServer(Storage, dhtClient, gate, cfg.Key, serverMode)
-	if err != nil {
-		pterm.Error.Println("Failed to start adnl server:", err.Error())
 		os.Exit(1)
 	}
 
@@ -122,10 +124,20 @@ func main() {
 		os.Exit(1)
 	}
 
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
+	Connector = storage.NewConnector(srv)
+
+	Storage, err = db.NewStorage(ldb, Connector, true)
+	if err != nil {
+		pterm.Error.Println("Failed to init storage:", err.Error())
+		os.Exit(1)
+	}
+	srv.SetStorage(Storage)
+
 	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
 	pterm.Info.Println("We also have telegram group if you have some questions.", pterm.LightBlue("https://t.me/tonrh"))
 
-	pterm.Success.Println("Storage started")
+	pterm.Success.Println("Storage started, server mode:", serverMode)
 	list()
 
 	for {
@@ -145,13 +157,15 @@ func main() {
 				pterm.Error.Println("Usage: download [bag_id]")
 				continue
 			}
-			download(parts[1], downloadGate)
+			download(parts[1])
 		case "create":
 			if len(parts) < 3 {
 				pterm.Error.Println("Usage: create [path] [description]")
 				continue
 			}
 			create(parts[1], parts[2])
+		case "list":
+			list()
 		default:
 			fallthrough
 		case "help":
@@ -164,7 +178,7 @@ func main() {
 	}
 }
 
-func download(bagId string, gate *adnl.Gateway) {
+func download(bagId string) {
 	bag, err := hex.DecodeString(bagId)
 	if err != nil {
 		pterm.Error.Println("Invalid bag id:", err.Error())
@@ -178,74 +192,36 @@ func download(bagId string, gate *adnl.Gateway) {
 
 	tor := Storage.GetTorrent(bag)
 	if tor == nil {
-		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, true)
-	}
+		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, Connector)
+		tor.BagID = bag
 
-	//_, priv, err := ed25519.GenerateKey(nil)
-	//	gate = adnl.NewGateway(priv)
-	//	gate.StartClient()
-
-	report := make(chan storage.Event, 100)
-	_ = Downloader.Download(tor, gate, bag, false, report, []string{})
-
-	sp, _ := pterm.DefaultSpinner.WithText("Resolving bag information...").Start()
-
-	var res *storage.DownloadResult
-	var dowProgress *pterm.ProgressbarPrinter
-	for {
-		e := <-report
-
-		switch e.Name {
-		case storage.EventErr:
-			if sp != nil {
-				sp.Fail()
-			}
-			pterm.Error.Println("Failed to download:", e.Value)
-		case storage.EventBagResolved:
-			sp.Success("Bag information resolved")
-			sp = nil
-
-			x := e.Value.(storage.PiecesInfo)
-			dowProgress, _ = pterm.DefaultProgressbar.WithTotal(x.OverallPieces).WithTitle("Downloading bag").Start()
-			for i := 0; i < x.OverallPieces-x.PiecesToDownload; i++ {
-				dowProgress.Increment()
-			}
-
-			err = Storage.SetTorrent(tor)
-			if err != nil {
-				pterm.Error.Println("Failed to add bag:", err.Error())
-				return
-			}
-		case storage.EventDone:
-			v := e.Value.(storage.DownloadResult)
-			res = &v
-		case storage.EventFileDownloaded:
-			pterm.Success.Println("Downloaded", e.Value)
-		case storage.EventPieceDownloaded:
-			dowProgress.Increment()
-		case storage.EventProgress:
-			p := e.Value.(storage.Progress)
-
-			var listPeers []string
-			peers := tor.GetPeers()
-			for s := range peers {
-				listPeers = append(listPeers, s)
-			}
-			dowProgress.UpdateTitle("Downloading " + p.Speed + ". Downloaded " + p.Downloaded + " (" + strings.Join(listPeers, ", ") + ")")
+		if err = tor.Start(true); err != nil {
+			pterm.Error.Println("Failed to start:", err.Error())
+			return
 		}
 
-		if res != nil {
-			break
+		err = Storage.SetTorrent(tor)
+		if err != nil {
+			pterm.Error.Println("Failed to set storage:", err.Error())
+			os.Exit(1)
+		}
+	} else {
+		if err = tor.Start(true); err != nil {
+			pterm.Error.Println("Failed to start:", err.Error())
+			return
 		}
 	}
+
+	pterm.Success.Println("Bag added")
 }
 
 func create(path, name string) {
-	it, err := storage.CreateTorrent(path, name, Storage)
+	it, err := storage.CreateTorrent(path, name, Storage, Connector)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return
 	}
+	it.Start(true)
 
 	err = Storage.SetTorrent(it)
 	if err != nil {
@@ -259,10 +235,13 @@ func create(path, name string) {
 
 func list() {
 	var table = pterm.TableData{
-		{"Bag ID", "Description", "Downloaded", "Size"},
+		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed"},
 	}
 
 	for _, t := range Storage.GetAll() {
+		if t.Info == nil {
+			continue
+		}
 		mask := t.PiecesMask()
 		downloadedPieces := 0
 		for _, b := range mask {
@@ -277,7 +256,16 @@ func list() {
 			downloaded = full
 		}
 
-		table = append(table, []string{hex.EncodeToString(t.BagID), t.Info.Description.Value, storage.ToSz(downloaded), storage.ToSz(full)})
+		var dow, upl, num uint64
+		for _, p := range t.GetPeers() {
+			dow += p.GetDownloadSpeed()
+			upl += p.GetUploadSpeed()
+			num++
+		}
+
+		table = append(table, []string{hex.EncodeToString(t.BagID), t.Info.Description.Value,
+			storage.ToSz(downloaded), storage.ToSz(full), fmt.Sprint(num),
+			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(downloaded == full)})
 	}
 
 	if len(table) > 1 {

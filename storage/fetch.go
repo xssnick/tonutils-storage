@@ -16,20 +16,14 @@ type piecePack struct {
 
 type PreFetcher struct {
 	torrent    *Torrent
-	dn         TorrentDownloader
 	offset     int
 	pieces     map[uint32]*piecePack
 	tasks      chan uint32
 	piecesList []uint32
 	speed      uint64
 
-	limitDownloadedUpdatedAt time.Time
-	limitDownloaded          uint64
-	bytesLimitPerSec         uint64
-	limitMx                  sync.Mutex
-
 	downloaded uint64
-	report     chan<- Event
+	report     func(Event)
 
 	mx    sync.RWMutex
 	ctx   context.Context
@@ -41,21 +35,19 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, dn TorrentDownloader, report chan<- Event, downloaded uint64, threads, prefetch int, speedLimit uint64, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), downloaded uint64, threads, prefetch int, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
 
 	ff := &PreFetcher{
-		dn:               dn,
-		torrent:          torrent,
-		report:           report,
-		piecesList:       pieces,
-		downloaded:       downloaded,
-		offset:           prefetch - 1,
-		bytesLimitPerSec: speedLimit,
-		pieces:           map[uint32]*piecePack{},
-		tasks:            make(chan uint32, prefetch),
+		torrent:    torrent,
+		report:     report,
+		piecesList: pieces,
+		downloaded: downloaded,
+		offset:     prefetch - 1,
+		pieces:     map[uint32]*piecePack{},
+		tasks:      make(chan uint32, prefetch),
 	}
 	ff.ctx, ff.close = context.WithCancel(ctx)
 
@@ -128,26 +120,14 @@ func (f *PreFetcher) worker() {
 		case <-f.ctx.Done():
 			return
 		case task = <-f.tasks:
-			if f.bytesLimitPerSec > 0 {
-				f.limitMx.Lock()
-				if f.limitDownloaded > f.bytesLimitPerSec {
-					wait := time.Duration(float64(f.limitDownloaded) / float64(f.bytesLimitPerSec) * float64(time.Second))
-					select {
-					case <-f.ctx.Done():
-						f.limitMx.Unlock()
-						return
-					case <-time.After(wait):
-						f.limitDownloaded = 0
-					}
-				}
-				f.limitDownloadedUpdatedAt = time.Now()
-				f.limitDownloaded += uint64(f.torrent.Info.PieceSize)
-				f.limitMx.Unlock()
+			err := f.torrent.connector.ThrottleDownload(f.ctx, uint64(f.torrent.Info.PieceSize))
+			if err != nil {
+				return
 			}
 		}
 
 		for {
-			data, proof, peer, err := f.dn.DownloadPieceDetailed(f.ctx, task)
+			data, proof, _, _, err := f.torrent.downloader.DownloadPieceDetailed(f.ctx, task)
 			if err == nil {
 				f.mx.Lock()
 				f.pieces[task] = &piecePack{
@@ -156,10 +136,8 @@ func (f *PreFetcher) worker() {
 				}
 				f.mx.Unlock()
 
-				f.torrent.UpdateDownloadedPeer(peer, uint64(len(data)))
-
 				atomic.AddUint64(&f.downloaded, 1)
-				f.report <- Event{Name: EventPieceDownloaded, Value: task}
+				f.report(Event{Name: EventPieceDownloaded, Value: task})
 
 				break
 			}
@@ -202,10 +180,10 @@ func (f *PreFetcher) speedometer() {
 
 		f.speed = downloaded / period
 
-		f.report <- Event{Name: EventProgress, Value: Progress{
+		f.report(Event{Name: EventProgress, Value: Progress{
 			Downloaded: ToSz(atomic.LoadUint64(&f.downloaded) * uint64(f.torrent.Info.PieceSize)),
 			Speed:      ToSpeed(f.speed),
-		}}
+		}})
 	}
 }
 
