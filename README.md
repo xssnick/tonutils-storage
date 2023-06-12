@@ -36,7 +36,9 @@ When running with flag `--api ip:port`, you could access storage using HTTP API 
 
 If you want to enable HTTP Basic Auth you could use additional flags `--api-login [login] --api-password [password]`
 
-Example: `--api 127.0.0.1:8192 --api-login admin --api-password 123456`
+Example: `./tonutils-storage --api 127.0.0.1:8192 --api-login admin --api-password 123456`
+
+You could [download Postman collection](https://github.com/xssnick/tonutils-storage/blob/master/Tonutils%20Storage.postman_collection.json) or check examples below.
 
 #### POST /api/v1/add
 
