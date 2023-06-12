@@ -1,7 +1,7 @@
 # Tonutils Storage
 [![Based on TON][ton-svg]][ton] [![Join our group][join-svg]][tg]
 
-Alternative TON Storage implementation based on tonutils-go, with [HTTP API](#http-api).
+Alternative TON Storage implementation based on [tonutils-go](https://github.com/xssnick/tonutils-go), with [HTTP API](#http-api).
 
 You could freely use this storage in any type of projects, 
 but if you are using it for commercial purposes, please consider donation, it will help us to develop and maintain projects like this 100% free and open source.
