@@ -1,0 +1,496 @@
+{
+	"info": {
+		"_postman_id": "ebbdc51e-67b9-4d8c-a042-6464b527de2c",
+		"name": "Tonutils Storage",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+		"_exporter_id": "14189790"
+	},
+	"item": [
+		{
+			"name": "/api/v1/add",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"path\": \"./db/files\",\n    \"files\": [1]\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/add",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"add"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/add",
+					"originalRequest": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"bag_id\": \"85D0998DCF325B6FEE4F529D4DCF66FB253FC39C59687C82A0EF7FC96FED4C9F\",\n    \"path\": \"./db/files\",\n    \"files\": [2]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/add",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"add"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:02:33 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "12"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"ok\": true\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/stop",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/stop",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"stop"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/stop",
+					"originalRequest": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"bag_id\": \"85D0998DCF325B6FEE4F529D4DCF66FB253FC39C59687C82A0EF7FC96FED4C9F\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/stop",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"stop"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:03:06 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "12"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"ok\": true\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/remove",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"with_files\": false\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/remove",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"remove"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/remove",
+					"originalRequest": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"with_files\": false\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/remove",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"remove"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:12:45 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "12"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"ok\": true\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/list",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/list",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"list"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/list",
+					"originalRequest": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/list",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"list"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:05:58 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "642"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"bags\": [\n        {\n            \"bag_id\": \"6d791040957b5efa0311ef14f4278d92143b4c8369ad55d969ae6c1a6840ade8\",\n            \"description\": \"Some Stuff\",\n            \"downloaded\": 150126947,\n            \"size\": 150126947,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 17,\n            \"dir_name\": \"torrent/\",\n            \"completed\": true,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": true,\n            \"seeding\": true\n        },\n        {\n            \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n            \"description\": \"FunnyPack\",\n            \"downloaded\": 188350328,\n            \"size\": 188249739,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 3,\n            \"dir_name\": \"video/\",\n            \"completed\": false,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": false,\n            \"seeding\": false\n        }\n    ]\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/details",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/details?bag_id=85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"details"
+					],
+					"query": [
+						{
+							"key": "bag_id",
+							"value": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f"
+						}
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/details",
+					"originalRequest": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/details?bag_id=85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"details"
+							],
+							"query": [
+								{
+									"key": "bag_id",
+									"value": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f"
+								}
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:11:30 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "896"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"description\": \"FunnyPack\",\n    \"downloaded\": 188350328,\n    \"size\": 188249739,\n    \"download_speed\": 0,\n    \"upload_speed\": 0,\n    \"files_count\": 3,\n    \"dir_name\": \"video/\",\n    \"completed\": false,\n    \"header_loaded\": true,\n    \"info_loaded\": true,\n    \"active\": true,\n    \"seeding\": true,\n    \"files\": [\n        {\n            \"index\": 1,\n            \"name\": \"kek/1.txt\",\n            \"size\": 22\n        },\n        {\n            \"index\": 2,\n            \"name\": \"videoplayback.mp4\",\n            \"size\": 188235949\n        },\n        {\n            \"index\": 0,\n            \"name\": \"200px-Feels_good_man.jpg\",\n            \"size\": 13768\n        }\n    ],\n    \"peers\": [\n        {\n            \"addr\": \"185.195.69.60:13333\",\n            \"id\": \"04e7276cc1d3d480c70c83b0fb66d88412e34a5734b15a412155b1e9b5ff17a7\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"31.172.68.159:17555\",\n            \"id\": \"bec28d6ff140884d7304b2698630cf84b9b4d14f1c55b3b504205bebf1c37133\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"185.18.52.220:17555\",\n            \"id\": \"f546878e8e4bd3885cc623ab0440f05abb12138d4701cee998e4f073ec9ade7f\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        }\n    ]\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/create",
+			"request": {
+				"method": "POST",
+				"header": [],
+				"body": {
+					"mode": "raw",
+					"raw": "{\n    \"description\": \"Some Stuff\",\n    \"path\": \"/Users/admin/some-dir\"\n}",
+					"options": {
+						"raw": {
+							"language": "json"
+						}
+					}
+				},
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/create",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"create"
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/create",
+					"originalRequest": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n    \"description\": \"Some Stuff\",\n    \"path\": \"/Users/admin/some-dir\"\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/create",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"create"
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Mon, 12 Jun 2023 12:05:46 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "78"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"bag_id\": \"6d791040957b5efa0311ef14f4278d92143b4c8369ad55d969ae6c1a6840ade8\"\n}"
+				}
+			]
+		}
+	]
+}

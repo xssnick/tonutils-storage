@@ -57,6 +57,7 @@ type Torrent struct {
 
 	activeFiles  []uint32
 	activeUpload bool
+	downloadAll  bool
 
 	connector  NetConnector
 	downloader TorrentDownloader
@@ -127,6 +128,10 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	return t
 }
 
+func (t *Torrent) IsDownloadAll() bool {
+	return t.downloadAll
+}
+
 func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	select {
 	case <-t.globalCtx.Done():
@@ -141,13 +146,13 @@ func (t *Torrent) Stop() {
 	t.pause()
 }
 
-var FullDownload bool = false
-
-func (t *Torrent) Start(withUpload bool) (err error) {
+func (t *Torrent) Start(withUpload, downloadAll bool) (err error) {
 	t.activeUpload = withUpload
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
+
+	t.downloadAll = downloadAll
 
 	if d, _ := t.IsActive(); d {
 		return nil
@@ -157,7 +162,7 @@ func (t *Torrent) Start(withUpload bool) (err error) {
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
 
-	return t.startDownload(func(event Event) {}, FullDownload, false)
+	return t.startDownload(func(event Event) {}, false)
 }
 
 func (t *Torrent) PiecesNum() uint32 {
@@ -211,8 +216,9 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 		return fmt.Errorf("failed to store active files in db: %w", err)
 	}
 
+	t.downloadAll = false
 	t.activeFiles = ids
-	return t.startDownload(func(event Event) {}, false, false)
+	return t.startDownload(func(event Event) {}, false)
 }
 
 func (t *Torrent) SetActiveFiles(names []string) error {

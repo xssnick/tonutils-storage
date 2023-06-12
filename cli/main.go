@@ -11,6 +11,7 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
+	"github.com/xssnick/tonutils-storage/api"
 	"github.com/xssnick/tonutils-storage/config"
 	"github.com/xssnick/tonutils-storage/db"
 	"github.com/xssnick/tonutils-storage/storage"
@@ -22,8 +23,11 @@ import (
 )
 
 var (
-	DBPath    = flag.String("db", "", "Path to db folder")
-	Verbosity = flag.Int("debug", 0, "Debug logs")
+	API                 = flag.String("api", "", "HTTP API listen address")
+	CredentialsLogin    = flag.String("api-login", "", "HTTP API credentials login")
+	CredentialsPassword = flag.String("api-password", "", "HTTP API credentials password")
+	DBPath              = flag.String("db", "tonutils-storage-db", "Path to db folder")
+	Verbosity           = flag.Int("debug", 0, "Debug logs")
 )
 
 var Storage *db.Storage
@@ -32,7 +36,6 @@ var Connector storage.NetConnector
 func main() {
 	flag.Parse()
 
-	storage.FullDownload = true
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
@@ -46,7 +49,6 @@ func main() {
 		fallthrough
 	case 1:
 		storage.Logger = log.Println
-
 	}
 
 	_ = pterm.DefaultBigText.WithLetters(
@@ -135,9 +137,33 @@ func main() {
 	srv.SetStorage(Storage)
 
 	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
-	pterm.Info.Println("We also have telegram group if you have some questions.", pterm.LightBlue("https://t.me/tonrh"))
+	pterm.Info.Println("We also have telegram group, subscribe to stay updated or ask some questions.", pterm.LightBlue("https://t.me/tonrh"))
 
-	pterm.Success.Println("Storage started, server mode:", serverMode)
+	pterm.Success.Println("Storage started, seed mode:", serverMode)
+
+	if *API != "" {
+		a := api.NewServer(Connector, Storage)
+
+		if *CredentialsLogin != "" && *CredentialsPassword != "" {
+			a.SetCredentials(&api.Credentials{
+				Login:    *CredentialsLogin,
+				Password: *CredentialsPassword,
+			})
+		} else if *CredentialsLogin == "" && *CredentialsPassword != "" ||
+			*CredentialsLogin != "" && *CredentialsPassword == "" {
+			pterm.Error.Println("Both login and password for API should be set or not set")
+			os.Exit(1)
+		}
+
+		go func() {
+			if err := a.Start(*API); err != nil {
+				pterm.Error.Println("Failed to start API on", *API, "err:", err.Error())
+				os.Exit(1)
+			}
+		}()
+		pterm.Success.Println("Storage HTTP API on", *API)
+	}
+
 	list()
 
 	for {
@@ -195,7 +221,7 @@ func download(bagId string) {
 		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, Connector)
 		tor.BagID = bag
 
-		if err = tor.Start(true); err != nil {
+		if err = tor.Start(true, true); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			return
 		}
@@ -206,7 +232,7 @@ func download(bagId string) {
 			os.Exit(1)
 		}
 	} else {
-		if err = tor.Start(true); err != nil {
+		if err = tor.Start(true, true); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			return
 		}
@@ -221,7 +247,7 @@ func create(path, name string) {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return
 	}
-	it.Start(true)
+	it.Start(true, true)
 
 	err = Storage.SetTorrent(it)
 	if err != nil {
