@@ -1,4 +1,5 @@
 # Tonutils Storage
+[![Based on TON][ton-svg]][ton] [![Join our group][join-svg]][tg]
 
 Alternative TON Storage implementation based on tonutils-go, with [HTTP API](#http-api).
 
@@ -210,3 +211,9 @@ Response:
    "ok": true
 }
 ```
+
+<!-- Badges -->
+[ton-svg]: https://img.shields.io/badge/Based%20on-TON-blue
+[join-svg]: https://img.shields.io/badge/Join%20-Telegram-blue
+[ton]: https://ton.org
+[tg]: https://t.me/tonrh
