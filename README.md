@@ -20,13 +20,15 @@ If you want to support this project you could donate any amount of TON or Jetton
 2. Run
 `./tonutils-storage`
 3. Try `download 85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f`
+4. Use `list` command to check progress
 
 ## CLI
 
-At this moment 3 commands are available:
+At this moment 4 commands are available:
 
 * Create bag: `create [path] [description]`
 * Download bag: `download [bag_id]`
+* List bags: `list`
 * Display help: `help`
 
 On the first start you will see something like `Using port checker tonutils.com at 31.172.68.159`. 
