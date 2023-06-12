@@ -12,7 +12,6 @@ import (
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-storage/storage"
-	"io"
 	"os"
 	"sort"
 	"sync"
@@ -133,14 +132,7 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 					_ = os.Remove(t.Path + "/" + string(t.Header.DirName) + "/" + f)
 				}
 			}
-
-			if yes, _ := isDirEmpty(t.Path + "/" + string(t.Header.DirName)); yes {
-				_ = os.Remove(t.Path + "/" + string(t.Header.DirName))
-			}
-		}
-
-		for i := uint32(0); i < t.Header.FilesCount; i++ {
-			_ = s.RemoveFileIndex(t.BagID, i)
+			recursiveEmptyDelete(buildTreeFromDir(t.Path + "/" + string(t.Header.DirName)))
 		}
 	}
 
@@ -150,20 +142,6 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 		}
 	}
 	return nil
-}
-
-func isDirEmpty(name string) (bool, error) {
-	f, err := os.Open(name)
-	if err != nil {
-		return false, err
-	}
-	defer f.Close()
-
-	_, err = f.Readdirnames(1)
-	if err == io.EOF {
-		return true, nil
-	}
-	return false, err
 }
 
 func (s *Storage) SetTorrent(t *storage.Torrent) error {
