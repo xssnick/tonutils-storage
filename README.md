@@ -47,14 +47,17 @@ You could [download Postman collection](https://github.com/xssnick/tonutils-stor
 
 #### POST /api/v1/add
 
-Download bag by id
+Download bag by id. If `download_all` is false and files are empty, only header will be downloaded.
+
+After adding, you could call `GET /api/v1/details?bag_id=[id]`, when header will be available you will see the list of files, call `add` again, now with required files ids.
 
 Request:
 ```json
 {
     "bag_id": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f",
     "path": "/root/downloads",
-    "files": [0,1,2]
+    "files": [0,1,2],
+    "download_all": false
 }
 ```
 Response:
