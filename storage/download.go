@@ -174,7 +174,7 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 			}
 
 			if downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, report, downloaded, 12, 200, pieces)
+				fetch := NewPreFetcher(ctx, t, report, downloaded, 24, 200, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -194,7 +194,7 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 						ready <- event.Value.(uint32)
 					}
 					report(event)
-				}, downloaded, 12, 200, pieces)
+				}, downloaded, 24, 200, pieces)
 				defer fetch.Stop()
 
 				for i := 0; i < left; i++ {
