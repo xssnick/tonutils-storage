@@ -2,10 +2,12 @@
 
 Alternative TON Storage implementation based on tonutils-go.
 
-This implementation also contains HTTP API, you could freely use it in any type of projects, 
-but please consider donation, it will help us to develop and maintain projects like this 100% free.
+This implementation also contains [HTTP API](#http-api), you could freely use it in any type of projects, 
+but if you are using it for commercial purposes, please consider donation, it will help us to develop and maintain projects like this 100% free.
 
 If you want to support this project you could donate any amount of TON or Jettons to `EQBx6tZZWa2Tbv6BvgcvegoOQxkRrVaBVwBOoW85nbP37_Go` ☺️
+
+<img width="1082" alt="Screen Shot 2023-06-12 at 20 22 54" src="https://github.com/xssnick/tonutils-storage/assets/9332353/c321230b-0a6c-462d-946d-66d31bdb588a">
 
 ## Quick start
 
@@ -36,7 +38,7 @@ If you want to enable HTTP Basic Auth you could use additional flags `--api-logi
 
 Example: `--api 127.0.0.1:8192 --api-login admin --api-password 123456`
 
-##### POST /api/v1/add
+#### POST /api/v1/add
 
 Download bag by id
 
@@ -55,7 +57,7 @@ Response:
 }
 ```
 
-##### GET /api/v1/list
+#### GET /api/v1/list
 
 Response:
 ```json
@@ -99,7 +101,7 @@ Response:
 
 * Size in bytes and speed in bytes per second
 
-##### GET /api/v1/details?bag_id=[id]
+#### GET /api/v1/details?bag_id=[id]
 Response:
 ```json
 {
@@ -156,7 +158,7 @@ Response:
 }
 ```
 
-##### POST /api/v1/create
+#### POST /api/v1/create
 Request:
 ```json
 {
@@ -172,7 +174,7 @@ Response:
 }
 ```
 
-##### POST /api/v1/remove
+#### POST /api/v1/remove
 Request:
 ```json
 {
@@ -188,7 +190,7 @@ Response:
 }
 ```
 
-##### POST /api/v1/stop
+#### POST /api/v1/stop
 Request:
 ```json
 {
