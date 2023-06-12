@@ -65,7 +65,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered bool) error {
+func (t *Torrent) startDownload(report func(Event), downloadOrdered bool) error {
 	if t.BagID == nil {
 		return fmt.Errorf("bag is not set")
 	}
@@ -106,7 +106,7 @@ func (t *Torrent) startDownload(report func(Event), downloadAll, downloadOrdered
 		rootPath := t.Path + "/" + string(t.Header.DirName)
 
 		var files []uint32
-		if downloadAll {
+		if t.downloadAll {
 			for i := uint32(0); i < t.Header.FilesCount; i++ {
 				files = append(files, i)
 			}

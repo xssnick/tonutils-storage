@@ -154,6 +154,7 @@ func (s *Storage) SetTorrent(t *storage.Torrent) error {
 		CreatedAt:      t.CreatedAt,
 		ActiveUpload:   activeUpload,
 		ActiveDownload: activeDownload,
+		DownloadAll:    t.IsDownloadAll(),
 	})
 	if err != nil {
 		return err
@@ -192,6 +193,7 @@ type TorrentStored struct {
 
 	ActiveUpload   bool
 	ActiveDownload bool
+	DownloadAll    bool
 }
 
 func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
@@ -226,7 +228,7 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 
 		if tr.ActiveDownload {
 			if startWithoutActiveFilesToo || len(t.GetActiveFilesIDs()) > 0 {
-				err = t.Start(tr.ActiveUpload)
+				err = t.Start(tr.ActiveUpload, tr.DownloadAll)
 				if err != nil {
 					return fmt.Errorf("failed to startd download %s: %w", hex.EncodeToString(iter.Key()[5:]), err)
 				}
