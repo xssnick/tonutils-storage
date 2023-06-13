@@ -37,8 +37,8 @@ Storage will try to resolve your external ip address, in case if it fails, to se
 
 ### Minimum requirements
 
-* RAM: 512 MB
-* CPU: 2 Cores
+* RAM: **512 MB**
+* CPU: **2 Cores**
 * Enough disk space to host your files
 * Internet connection
 
