@@ -35,7 +35,14 @@ At this moment 4 commands are available:
 On the first start you will see something like `Using port checker tonutils.com at 31.172.68.159`. 
 Storage will try to resolve your external ip address, in case if it fails, to seed bags you will need to manually specify it in config.json inside db folder.
 
-## HTTP API
+### Minimum requirements
+
+* RAM: 512 MB
+* CPU: 2 Cores
+* Enough disk space to host your files
+* Internet connection
+
+### HTTP API
 
 When running with flag `--api ip:port`, you could access storage using HTTP API and control it.
 
