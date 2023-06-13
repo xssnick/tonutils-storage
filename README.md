@@ -3,10 +3,9 @@
 
 Alternative TON Storage implementation based on [tonutils-go](https://github.com/xssnick/tonutils-go), with [HTTP API](#http-api).
 
-You could freely use this storage in any type of projects, 
-but if you are using it for commercial purposes, please consider donation, it will help us to develop and maintain projects like this 100% free and open source.
+You could freely use this storage in any type of projects.
 
-If you want to support this project you could donate any amount of TON or Jettons to `EQBx6tZZWa2Tbv6BvgcvegoOQxkRrVaBVwBOoW85nbP37_Go` ☺️
+If you want to support this project and help us to develop projects like this 100% free and open source, we would be grateful if you donate any amount of TON or Jettons to `EQBx6tZZWa2Tbv6BvgcvegoOQxkRrVaBVwBOoW85nbP37_Go` ☺️
 
 <img width="1082" alt="Screen Shot 2023-06-12 at 20 22 54" src="https://github.com/xssnick/tonutils-storage/assets/9332353/c321230b-0a6c-462d-946d-66d31bdb588a">
 
@@ -32,8 +31,8 @@ At this moment 4 commands are available:
 * List bags: `list`
 * Display help: `help`
 
-On the first start you will see something like `Using port checker tonutils.com at 31.172.68.159`. 
-Storage will try to resolve your external ip address, in case if it fails, to seed bags you will need to manually specify it in config.json inside db folder.
+At the first start you will see something like `Using port checker tonutils.com at 31.172.68.159`. 
+Storage will try to resolve your external ip address. In case if it fails, to seed bags you will need to manually specify ip in config.json inside db folder  .
 
 ### Minimum requirements
 
@@ -56,7 +55,7 @@ You could [download Postman collection](https://github.com/xssnick/tonutils-stor
 
 Download bag by id. If `download_all` is false and files are empty, only header will be downloaded.
 
-After adding, you could call `GET /api/v1/details?bag_id=[id]`, when header will be available you will see the list of files, call `add` again, now with required files ids.
+After adding, you could call `GET /api/v1/details?bag_id=[id]`, when header is available you will see the list of files. Call `add` again with required files ids.
 
 Request:
 ```json
