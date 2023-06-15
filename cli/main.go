@@ -30,6 +30,8 @@ var (
 	Verbosity           = flag.Int("debug", 0, "Debug logs")
 )
 
+var GitCommit string
+
 var Storage *db.Storage
 var Connector storage.NetConnector
 
@@ -57,6 +59,7 @@ func main() {
 		Render()
 
 	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgLightBlue)).Println(pterm.LightWhite("   Storage   "))
+	pterm.Info.Println("Version:", GitCommit)
 
 	if *DBPath == "" {
 		pterm.Error.Println("DB path should be specified with -db flag")
@@ -139,7 +142,7 @@ func main() {
 	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
 	pterm.Info.Println("We also have telegram group, subscribe to stay updated or ask some questions.", pterm.LightBlue("https://t.me/tonrh"))
 
-	pterm.Success.Println("Storage started, seed mode:", serverMode)
+	pterm.Success.Println("Storage started, server mode:", serverMode)
 
 	if *API != "" {
 		a := api.NewServer(Connector, Storage)
