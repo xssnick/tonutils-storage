@@ -92,8 +92,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 
 				list := s.store.GetAll()
 				for _, torrent := range list {
-					_, activeUpl := torrent.IsActive()
-					if !activeUpl {
+					if !torrent.activeUpload {
 						continue
 					}
 
