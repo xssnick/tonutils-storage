@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -214,6 +215,11 @@ func (t *Torrent) startDownload(report func(Event)) error {
 									continue
 								}
 
+								if strings.Contains(file.Name, "..") {
+									Logger("Malicious file with path traversal was skipped: " + file.Name)
+									continue
+								}
+
 								err = func() error {
 									f, err := t.db.GetFS().Open(rootPath+"/"+file.Name, OpenModeWrite)
 									if err != nil {
@@ -297,6 +303,11 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 	var currentPiece, currentProof []byte
 	for _, off := range list {
 		err := func() error {
+			if strings.Contains(off.path, "..") {
+				Logger("Malicious file with path traversal was skipped: " + off.path)
+				return fmt.Errorf("malicious file")
+			}
+
 			f, err := t.db.GetFS().Open(rootPath+"/"+off.path, OpenModeWrite)
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %w", off.path, err)
