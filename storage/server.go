@@ -240,6 +240,9 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			t.mx.Lock()
 			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, 0, false)
 			t.mx.Unlock()
+
+			// prepare torrent info if needed
+			go stPeer.prepareTorrentInfo(t)
 		}
 		stPeer.touch()
 
@@ -612,63 +615,64 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, s, peer, rand.Int63(), true)
 	t.mx.Unlock()
 
-	err := func() error {
-		t.mx.Lock()
-		defer t.mx.Unlock()
-
-		if t.Info == nil {
-			tm := time.Now()
-			Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-
-			var res TorrentInfoContainer
-			infCtx, cancel := context.WithTimeout(stNode.globalCtx, 20*time.Second)
-			err := stNode.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
-			cancel()
-			if err != nil {
-				Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-				return err
-			}
-			Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-
-			cl, err := cell.FromBOC(res.Data)
-			if err != nil {
-				return fmt.Errorf("failed to parse torrent info boc: %w", err)
-			}
-
-			if !bytes.Equal(cl.Hash(), t.BagID) {
-				return fmt.Errorf("incorrect torrent info")
-			}
-
-			var info TorrentInfo
-			err = tlb.LoadFromCell(&info, cl.BeginParse())
-			if err != nil {
-				t.mx.Unlock()
-				return fmt.Errorf("invalid torrent info cell")
-			}
-
-			if info.PieceSize == 0 || info.HeaderSize == 0 {
-				err = fmt.Errorf("incorrect torrent info sizes")
-				return err
-			}
-			if info.HeaderSize > 20*1024*1024 {
-				err = fmt.Errorf("too big header > 20 MB, looks dangerous")
-				return err
-			}
-			if info.PieceSize > 64*1024*1024 {
-				err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
-				return err
-			}
-			t.Info = &info
-		}
-		return nil
-	}()
-	if err != nil {
+	if err := stNode.prepareTorrentInfo(t); err != nil {
 		stNode.Close()
 	}
 
 	Logger("[STORAGE] PEER PREPARED", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
 
 	return stNode, nil
+}
+
+func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
+	t.mx.Lock()
+	defer t.mx.Unlock()
+
+	if t.Info == nil {
+		tm := time.Now()
+		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+
+		var res TorrentInfoContainer
+		infCtx, cancel := context.WithTimeout(s.globalCtx, 20*time.Second)
+		err := s.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(s.overlay, &GetTorrentInfo{}), &res)
+		cancel()
+		if err != nil {
+			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+			return err
+		}
+		Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+
+		cl, err := cell.FromBOC(res.Data)
+		if err != nil {
+			return fmt.Errorf("failed to parse torrent info boc: %w", err)
+		}
+
+		if !bytes.Equal(cl.Hash(), t.BagID) {
+			return fmt.Errorf("incorrect torrent info")
+		}
+
+		var info TorrentInfo
+		err = tlb.LoadFromCell(&info, cl.BeginParse())
+		if err != nil {
+			t.mx.Unlock()
+			return fmt.Errorf("invalid torrent info cell")
+		}
+
+		if info.PieceSize == 0 || info.HeaderSize == 0 {
+			err = fmt.Errorf("incorrect torrent info sizes")
+			return err
+		}
+		if info.HeaderSize > 20*1024*1024 {
+			err = fmt.Errorf("too big header > 20 MB, looks dangerous")
+			return err
+		}
+		if info.PieceSize > 64*1024*1024 {
+			err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
+			return err
+		}
+		t.Info = &info
+	}
+	return nil
 }
 
 func (s *Server) StartPeerSearcher(t *Torrent) {
