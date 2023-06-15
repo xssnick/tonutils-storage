@@ -285,7 +285,7 @@ func create(path, name string) {
 		return
 	}
 
-	it, err := storage.CreateTorrent(rootPath, dirName, name, Storage, Connector, files)
+	it, err := storage.CreateTorrent(context.Background(), rootPath, dirName, name, Storage, Connector, files)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return

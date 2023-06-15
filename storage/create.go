@@ -2,7 +2,9 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/pterm/pterm"
@@ -12,6 +14,8 @@ import (
 	"io"
 	"math"
 	"path/filepath"
+	"runtime"
+	"sync"
 )
 
 type fileInfoData struct {
@@ -25,7 +29,7 @@ type FileRef interface {
 	CreateReader() (io.ReadCloser, error)
 }
 
-func CreateTorrent(filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef) (*Torrent, error) {
+func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef) (*Torrent, error) {
 	const pieceSize = 128 * 1024
 
 	cb := make([]byte, pieceSize)
@@ -55,7 +59,7 @@ func CreateTorrent(filesRootPath, dirName, description string, db Storage, conne
 	filesProcessed := uint32(0)
 
 	hashes := make([][]byte, 0, 256)
-	pieces := make([]*PieceInfo, 0, 256)
+	piecesStartIndexes := make([]uint32, 0, 256)
 
 	pieceStartFileIndex := uint32(0)
 
@@ -79,9 +83,7 @@ func CreateTorrent(filesRootPath, dirName, description string, db Storage, conne
 				hashes = append(hashes, hash)
 
 				// save index of file where block starts
-				pieces = append(pieces, &PieceInfo{
-					StartFileIndex: pieceStartFileIndex,
-				})
+				piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
 
 				cbOffset = 0
 			}
@@ -111,6 +113,12 @@ func CreateTorrent(filesRootPath, dirName, description string, db Storage, conne
 
 	// add files
 	for _, f := range files {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		rd, err := f.CreateReader()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read file %s: %w", f.GetName(), err)
@@ -124,26 +132,28 @@ func CreateTorrent(filesRootPath, dirName, description string, db Storage, conne
 		progress.Increment()
 	}
 
-	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
 	if cbOffset != 0 {
 		// last data hash
 		hash := calcHash(cb[:cbOffset])
 		hashes = append(hashes, hash)
 
 		// save index of file where block starts
-		pieces = append(pieces, &PieceInfo{
-			StartFileIndex: pieceStartFileIndex,
-		})
+		piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
 	}
 
+	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
 	hashTree := buildHashTree(hashes)
-	for i, piece := range pieces {
-		proof, err := hashTree.CreateProof([][]byte{cell.BeginCell().MustStoreSlice(hashes[i], 256).EndCell().Hash()})
-		if err != nil {
-			return nil, fmt.Errorf("failed to calc proof for piece %d: %w", i, err)
-		}
-		piece.Proof = proof.ToBOCWithFlags(false)
+	waiter.Success("Merkle tree successfully built")
+
+	hashTree.Hash()
+	progress, _ = pterm.DefaultProgressbar.WithTotal(len(piecesStartIndexes)).WithTitle("Calculating proofs...").Start()
+
+	piecesNum := uint32(len(piecesStartIndexes))
+	pcNumBytes := len(piecesStartIndexes) / 8
+	if len(piecesStartIndexes)%8 != 0 {
+		pcNumBytes++
 	}
+	torrent.pieceMask = make([]byte, pcNumBytes)
 
 	torrent.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
@@ -162,21 +172,61 @@ func CreateTorrent(filesRootPath, dirName, description string, db Storage, conne
 		waiter.Fail(err.Error())
 		return nil, err
 	}
-	waiter.Success("Merkle tree successfully built")
-
 	torrent.BagID = tCell.Hash()
-	p := len(pieces) / 8
-	if len(pieces)%8 != 0 {
-		p++
-	}
-	torrent.pieceMask = make([]byte, p)
 
-	for i, piece := range pieces {
-		err = torrent.setPiece(uint32(i), piece)
-		if err != nil {
-			return nil, fmt.Errorf("failed to store piece %d in db: %w", i, err)
+	wg := sync.WaitGroup{}
+	threads := runtime.NumCPU()
+	toCalcErr := make(chan error, threads)
+	wg.Add(threads)
+
+	type calcReq struct {
+		id         uint32
+		startIndex uint32
+	}
+	toCalc := make(chan *calcReq, threads)
+	for i := 0; i < threads; i++ {
+		go func() {
+			defer func() {
+				wg.Done()
+			}()
+
+			for {
+				var p *calcReq
+				select {
+				case <-ctx.Done():
+					return
+				case p = <-toCalc:
+					if p == nil {
+						return
+					}
+				}
+
+				err = torrent.setPiece(p.id, &PieceInfo{
+					StartFileIndex: p.startIndex,
+					Proof:          torrent.fastProof(hashTree, p.id, piecesNum).ToBOCWithFlags(false),
+				})
+				if err != nil {
+					toCalcErr <- err
+					return
+				}
+			}
+		}()
+	}
+
+	for i, idx := range piecesStartIndexes {
+		select {
+		case <-ctx.Done():
+			_, _ = progress.Stop()
+			return nil, ctx.Err()
+		case err = <-toCalcErr:
+			return nil, fmt.Errorf("failed to calc proof for piece: %w", err)
+		case toCalc <- &calcReq{id: uint32(i), startIndex: idx}:
+			progress.Increment()
 		}
 	}
+	close(toCalc)
+
+	wg.Wait()
 
 	torrent.activeFiles = make([]uint32, 0, len(files))
 	for i := range files {
@@ -244,4 +294,108 @@ func calcHash(cb []byte) []byte {
 	hash := sha256.New()
 	hash.Write(cb)
 	return hash.Sum(nil)
+}
+
+func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell {
+	// calc tree depth
+	depth := int(math.Log2(float64(piecesNum)))
+	if piecesNum > uint32(math.Pow(2, float64(depth))) {
+		// add 1 if pieces num is not exact log2
+		depth++
+	}
+
+	data := make([]byte, 1+32+2)
+	data[0] = 0x03 // merkle proof
+	copy(data[1:], root.Hash())
+	binary.BigEndian.PutUint16(data[1+32:], uint16(depth))
+
+	proof := cell.BeginCell().MustStoreSlice(data, uint(len(data)*8))
+
+	if depth == 0 {
+		// nothing to prune
+		proofCell := proof.MustStoreRef(root).EndCell()
+		proofCell.UnsafeModify(cell.LevelMask{Mask: 0}, true)
+		return proofCell
+	}
+
+	type pair struct {
+		leftPruned bool
+		left       *cell.Builder
+		right      *cell.Builder
+	}
+
+	var pairs = make([]pair, 0, depth)
+
+	// check bits from left to right and load branches
+	for i := depth - 1; i >= 0; i-- {
+		isLeft := piece&(1<<i) == 0
+		if i == 0 {
+			pairs = append(pairs, pair{
+				leftPruned: false,
+				left:       root.MustPeekRef(0).ToBuilder(),
+				right:      root.MustPeekRef(1).ToBuilder(),
+			})
+			break
+		}
+
+		if isLeft {
+			pairs = append(pairs, pair{
+				leftPruned: false,
+				left:       cell.BeginCell(),
+				right:      fastPrune(root.MustPeekRef(1), uint16(i)),
+			})
+			root = root.MustPeekRef(0)
+		} else {
+			pairs = append(pairs, pair{
+				leftPruned: true,
+				left:       fastPrune(root.MustPeekRef(0), uint16(i)),
+				right:      cell.BeginCell(),
+			})
+			root = root.MustPeekRef(1)
+		}
+	}
+
+	newRoot := cell.BeginCell()
+	for i := len(pairs) - 1; i >= 0; i-- {
+		nextRoot := newRoot
+		if i > 0 {
+			p := pairs[i-1]
+			if !p.leftPruned {
+				nextRoot = p.left
+			} else {
+				nextRoot = p.right
+			}
+		}
+
+		cll := pairs[i].left.EndCell()
+		if i < len(pairs)-2 || (i == len(pairs)-2 && cll.RefsNum() == 0) { // set level only for parents of pruned
+			cll.UnsafeModify(cell.LevelMask{Mask: 1}, pairs[i].leftPruned)
+		}
+		nextRoot.MustStoreRef(cll)
+
+		cll = pairs[i].right.EndCell()
+		if i < len(pairs)-2 || (i == len(pairs)-2 && cll.RefsNum() == 0) {
+			cll.UnsafeModify(cell.LevelMask{Mask: 1}, !pairs[i].leftPruned)
+		}
+		nextRoot.MustStoreRef(cll)
+	}
+
+	newRootCell := newRoot.EndCell()
+	if len(pairs) > 1 {
+		newRootCell.UnsafeModify(cell.LevelMask{Mask: 1}, false)
+	}
+
+	proofCell := proof.MustStoreRef(newRootCell).EndCell()
+	proofCell.UnsafeModify(cell.LevelMask{Mask: 0}, true)
+
+	return proofCell
+}
+
+func fastPrune(toPrune *cell.Cell, depth uint16) *cell.Builder {
+	prunedData := make([]byte, 2+32+2)
+	prunedData[0] = 0x01 // pruned type
+	prunedData[1] = 1    // level
+	copy(prunedData[2:], toPrune.Hash())
+	binary.BigEndian.PutUint16(prunedData[2+32:], depth) //depth
+	return cell.BeginCell().MustStoreSlice(prunedData, uint(len(prunedData)*8))
 }

@@ -76,7 +76,8 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 
 	if serverMode || seedMode {
 		go func() {
-			wait := 3 * time.Second
+			lastUpdate := map[string]int64{}
+			wait := 5 * time.Second
 			// refresh dht records
 			for {
 				select {
@@ -85,14 +86,25 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 				case <-time.After(wait):
 				}
 
-				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
-				err := s.updateTorrents(ctx, serverMode)
-				if err == nil {
-					wait = 10 * time.Minute
-				} else {
-					wait = 15 * time.Second
+				if s.store == nil {
+					continue
 				}
-				cancel()
+
+				list := s.store.GetAll()
+				for _, torrent := range list {
+					_, activeUpl := torrent.IsActive()
+					if !activeUpl {
+						continue
+					}
+
+					lastAt := lastUpdate[hex.EncodeToString(torrent.BagID)]
+					if lastAt+180 <= time.Now().Unix() {
+						ctx, cancel := context.WithTimeout(s.closeCtx, 45*time.Second)
+						_ = s.updateTorrent(ctx, torrent, serverMode)
+						cancel()
+						lastUpdate[hex.EncodeToString(torrent.BagID)] = time.Now().Unix()
+					}
+				}
 			}
 		}()
 	}
@@ -437,80 +449,73 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) updateTorrents(ctx context.Context, isServer bool) error {
-	if s.store == nil {
-		return fmt.Errorf("storage is not yet initialized")
+func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer bool) error {
+	Logger("[STORAGE_DHT] CHECKING BAG OVERLAY FOR", hex.EncodeToString(torrent.BagID))
+
+	nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
+	if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
+		println(err.Error())
+		return err
 	}
 
-	list := s.store.GetAll()
+	if nodesList == nil {
+		nodesList = &overlay.NodesList{}
+	}
 
-	for _, torrent := range list {
-		nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
-		if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
-			continue
+	node, err := overlay.NewNode(torrent.BagID, s.key)
+	if err != nil {
+		pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+		return err
+	}
+
+	refreshed := false
+	// refresh if already exists
+	for i := range nodesList.List {
+		id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
+		if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
+			nodesList.List[i] = *node
+			refreshed = true
+			break
 		}
+	}
 
-		if nodesList == nil {
-			nodesList = &overlay.NodesList{}
-		}
-
-		node, err := overlay.NewNode(torrent.BagID, s.key)
-		if err != nil {
-			pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
-			continue
-		}
-
-		refreshed := false
-		// refresh if already exists
-		for i := range nodesList.List {
-			id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
-			if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
-				nodesList.List[i] = *node
-				refreshed = true
-				break
+	if !refreshed {
+		// create if no records
+		if len(nodesList.List) == 0 {
+			nodesList = &overlay.NodesList{
+				List: []overlay.Node{*node},
 			}
-		}
+			refreshed = true
+		} else {
+			if len(nodesList.List) >= 5 {
+				// only allowed to replace when have public ip
+				if isServer {
+					sort.Slice(nodesList.List, func(i, j int) bool {
+						return nodesList.List[i].Version < nodesList.List[j].Version
+					})
 
-		if !refreshed {
-			// create if no records
-			if len(nodesList.List) == 0 {
-				nodesList = &overlay.NodesList{
-					List: []overlay.Node{*node},
-				}
-				refreshed = true
-			} else {
-				if len(nodesList.List) >= 5 {
-					// only allowed to replace when have public ip
-					if isServer {
-						sort.Slice(nodesList.List, func(i, j int) bool {
-							return nodesList.List[i].Version < nodesList.List[j].Version
-						})
-
-						// TODO: store in diff dht node instead
-						// replace oldest
-						nodesList.List[0] = *node
-						refreshed = true
-					}
-				} else {
-					// add our node if < 5 in list
-					nodesList.List = append(nodesList.List, *node)
+					// TODO: store in diff dht node instead
+					// replace oldest
+					nodesList.List[0] = *node
 					refreshed = true
 				}
+			} else {
+				// add our node if < 5 in list
+				nodesList.List = append(nodesList.List, *node)
+				refreshed = true
 			}
 		}
+	}
 
-		if refreshed {
-			ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
-			stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
-			cancel()
-			if err != nil && stored == 0 {
-				pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
-				continue
-			}
-			Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))
+	if refreshed {
+		ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
+		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
+		cancel()
+		if err != nil && stored == 0 {
+			pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+			return err
 		}
-
-		//	log.Println("DHT ADNL address record for bag was refreshed successfully")
+		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))
 	}
 	return nil
 }
