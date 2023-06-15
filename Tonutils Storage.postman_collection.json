@@ -324,7 +324,7 @@
 						}
 					],
 					"cookie": [],
-					"body": "{\n    \"bags\": [\n        {\n            \"bag_id\": \"6d791040957b5efa0311ef14f4278d92143b4c8369ad55d969ae6c1a6840ade8\",\n            \"description\": \"Some Stuff\",\n            \"downloaded\": 150126947,\n            \"size\": 150126947,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 17,\n            \"dir_name\": \"torrent/\",\n            \"completed\": true,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": true,\n            \"seeding\": true\n        },\n        {\n            \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n            \"description\": \"FunnyPack\",\n            \"downloaded\": 188350328,\n            \"size\": 188249739,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 3,\n            \"dir_name\": \"video/\",\n            \"completed\": false,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": false,\n            \"seeding\": false\n        }\n    ]\n}"
+					"body": "{\n    \"Bags\": [\n        {\n            \"bag_id\": \"6d791040957b5efa0311ef14f4278d92143b4c8369ad55d969ae6c1a6840ade8\",\n            \"description\": \"Some Stuff\",\n            \"downloaded\": 150126947,\n            \"size\": 150126947,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 17,\n            \"dir_name\": \"torrent/\",\n            \"completed\": true,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": true,\n            \"seeding\": true\n        },\n        {\n            \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n            \"description\": \"FunnyPack\",\n            \"downloaded\": 188350328,\n            \"size\": 188249739,\n            \"peers\": 0,\n            \"download_speed\": 0,\n            \"upload_speed\": 0,\n            \"files_count\": 3,\n            \"dir_name\": \"video/\",\n            \"completed\": false,\n            \"header_loaded\": true,\n            \"info_loaded\": true,\n            \"active\": false,\n            \"seeding\": false\n        }\n    ]\n}"
 				}
 			]
 		},
@@ -395,15 +395,104 @@
 						},
 						{
 							"key": "Date",
-							"value": "Mon, 12 Jun 2023 12:11:30 GMT"
+							"value": "Thu, 15 Jun 2023 06:29:58 GMT"
 						},
 						{
 							"key": "Content-Length",
-							"value": "896"
+							"value": "1178"
 						}
 					],
 					"cookie": [],
-					"body": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"description\": \"FunnyPack\",\n    \"downloaded\": 188350328,\n    \"size\": 188249739,\n    \"download_speed\": 0,\n    \"upload_speed\": 0,\n    \"files_count\": 3,\n    \"dir_name\": \"video/\",\n    \"completed\": false,\n    \"header_loaded\": true,\n    \"info_loaded\": true,\n    \"active\": true,\n    \"seeding\": true,\n    \"files\": [\n        {\n            \"index\": 1,\n            \"name\": \"kek/1.txt\",\n            \"size\": 22\n        },\n        {\n            \"index\": 2,\n            \"name\": \"videoplayback.mp4\",\n            \"size\": 188235949\n        },\n        {\n            \"index\": 0,\n            \"name\": \"200px-Feels_good_man.jpg\",\n            \"size\": 13768\n        }\n    ],\n    \"peers\": [\n        {\n            \"addr\": \"185.195.69.60:13333\",\n            \"id\": \"04e7276cc1d3d480c70c83b0fb66d88412e34a5734b15a412155b1e9b5ff17a7\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"31.172.68.159:17555\",\n            \"id\": \"bec28d6ff140884d7304b2698630cf84b9b4d14f1c55b3b504205bebf1c37133\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"185.18.52.220:17555\",\n            \"id\": \"f546878e8e4bd3885cc623ab0440f05abb12138d4701cee998e4f073ec9ade7f\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        }\n    ]\n}"
+					"body": "{\n    \"bag_id\": \"85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f\",\n    \"description\": \"FunnyPack\",\n    \"downloaded\": 188249739,\n    \"size\": 188249739,\n    \"download_speed\": 0,\n    \"upload_speed\": 0,\n    \"files_count\": 3,\n    \"dir_name\": \"video/\",\n    \"completed\": true,\n    \"header_loaded\": true,\n    \"info_loaded\": true,\n    \"active\": true,\n    \"seeding\": true,\n    \"bag_pieces_num\": 1437,\n    \"has_pieces_mask\": \"//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////8f\",\n    \"files\": [\n        {\n            \"index\": 0,\n            \"name\": \"200px-Feels_good_man.jpg\",\n            \"size\": 13768\n        },\n        {\n            \"index\": 1,\n            \"name\": \"kek/1.txt\",\n            \"size\": 22\n        },\n        {\n            \"index\": 2,\n            \"name\": \"videoplayback.mp4\",\n            \"size\": 188235949\n        }\n    ],\n    \"peers\": [\n        {\n            \"addr\": \"185.195.69.60:13333\",\n            \"id\": \"04e7276cc1d3d480c70c83b0fb66d88412e34a5734b15a412155b1e9b5ff17a7\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"31.172.68.159:17555\",\n            \"id\": \"bec28d6ff140884d7304b2698630cf84b9b4d14f1c55b3b504205bebf1c37133\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        },\n        {\n            \"addr\": \"185.18.52.220:17555\",\n            \"id\": \"f546878e8e4bd3885cc623ab0440f05abb12138d4701cee998e4f073ec9ade7f\",\n            \"upload_speed\": 0,\n            \"download_speed\": 0\n        }\n    ]\n}"
+				}
+			]
+		},
+		{
+			"name": "/api/v1/piece/proof",
+			"request": {
+				"method": "GET",
+				"header": [],
+				"url": {
+					"raw": "http://127.0.0.1:8192/api/v1/piece/proof?bag_id=85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f&piece=0",
+					"protocol": "http",
+					"host": [
+						"127",
+						"0",
+						"0",
+						"1"
+					],
+					"port": "8192",
+					"path": [
+						"api",
+						"v1",
+						"piece",
+						"proof"
+					],
+					"query": [
+						{
+							"key": "bag_id",
+							"value": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f"
+						},
+						{
+							"key": "piece",
+							"value": "0"
+						}
+					]
+				}
+			},
+			"response": [
+				{
+					"name": "/api/v1/piece/proof",
+					"originalRequest": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://127.0.0.1:8192/api/v1/piece/proof?bag_id=85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f&piece=0",
+							"protocol": "http",
+							"host": [
+								"127",
+								"0",
+								"0",
+								"1"
+							],
+							"port": "8192",
+							"path": [
+								"api",
+								"v1",
+								"piece",
+								"proof"
+							],
+							"query": [
+								{
+									"key": "bag_id",
+									"value": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f"
+								},
+								{
+									"key": "piece",
+									"value": "0"
+								}
+							]
+						}
+					},
+					"status": "OK",
+					"code": 200,
+					"_postman_previewlanguage": "json",
+					"header": [
+						{
+							"key": "Content-Type",
+							"value": "application/json"
+						},
+						{
+							"key": "Date",
+							"value": "Thu, 15 Jun 2023 06:31:41 GMT"
+						},
+						{
+							"key": "Content-Length",
+							"value": "737"
+						}
+					],
+					"cookie": [],
+					"body": "{\n    \"proof\": \"te6ccgECGAEAAhIACUYDHTW6QVztpEzC31WcBwM8yBMvSGXQd3MD+wAhTsHW0xIACwEiAAMCKEgBAc7bhbyT2s90nYhAtDWBlX9L8/vk1RRSnBoStVbcYP9yAAoiAAUEKEgBAU3BESCG4LO5vLWDqEeHHaVoNfsW4uB6ulW98Ig+0F14AAkiAAcGKEgBAUTJbcOij+kzzAfzGdAVE+dqUkVeEh8k0Fa4Er17mqv0AAgiAAkIKEgBAem7eQT+47rVFPOw2xTXStiPmmvp8qnTRoJU4ytEVjKBAAciAAsKKEgBARYLz8mwWc5C7/m2pxPyuvHyHCJxYYERZpIVLFOfeQ+QAAYiAA0MKEgBAWPbB3lTLu3TmzksGONbNpq0B9ZzIkIngurqakszU2VOAAUiAA8OKEgBAZ1yE9s5xTNpnnPznOY9ec7CoWth9ss7zx+BpPooewEeAAQiABEQKEgBAXZvDBuAa212EubKLPaSX62+k36vechsm9D50Qo2cTDiAAMiABMSKEgBAbhbC8Eeb4JXZSowetpDFDnu6kiV98PUmtc1LnTvY5JXAAIiABUUKEgBAUzzpEPNmZLfP8J+90j7cniw7f3eiKvvJWTGx3sX82yvAAECABcWAED6S6nWCQpkeziAkJwbLPvFX6hjRdFFPlXF6dQXqauQOwBAixDSw4tIVZgM4DvkN6Juu2Mu5FA3yuTtitTe60WOzVE=\"\n}"
 				}
 			]
 		},

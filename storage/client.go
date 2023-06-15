@@ -15,6 +15,7 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -262,6 +263,14 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 			return nil, err
 		}
 
+		if len(header.DirName) > 256 {
+			return nil, fmt.Errorf("too big dir name > 256")
+		}
+
+		if strings.Contains(string(header.DirName), "..") {
+			return nil, fmt.Errorf("path traversal in dir name, malicious bag")
+		}
+
 		if header.FilesCount > 1_000_000 {
 			return nil, fmt.Errorf("bag has > 1_000_000 files, looks dangerous")
 		}
@@ -306,10 +315,12 @@ func (s *storagePeer) touch() {
 	})
 }
 
-func (s *storagePeer) pinger() {
+func (s *storagePeer) pinger(srv *Server) {
 	defer func() {
 		s.Close()
 	}()
+
+	var lastPeersReq time.Time
 
 	fails := 0
 	for {
@@ -330,6 +341,21 @@ func (s *storagePeer) pinger() {
 			} else {
 				fails = 0
 				s.touch()
+			}
+		}
+
+		if fails == 0 && time.Since(lastPeersReq) > 30*time.Second {
+			Logger("[STORAGE] REQUESTING NODES LIST OF PEER", hex.EncodeToString(s.nodeId), "FOR", hex.EncodeToString(s.torrent.BagID))
+			var al overlay.NodesList
+			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
+			err := s.conn.adnl.Query(ctx, overlay.WrapQuery(s.overlay, &overlay.GetRandomPeers{}), &al)
+			cancel()
+			if err == nil {
+				for _, n := range al.List {
+					// add known nodes in case we will need them in future to scale
+					srv.addTorrentNode(&n, s.torrent)
+				}
+				lastPeersReq = time.Now()
 			}
 		}
 

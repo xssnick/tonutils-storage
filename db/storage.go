@@ -29,6 +29,7 @@ type Storage struct {
 	torrents        map[string]*storage.Torrent
 	torrentsOverlay map[string]*storage.Torrent
 	connector       storage.NetConnector
+	fs              OsFs
 
 	db *leveldb.DB
 	mx sync.RWMutex
@@ -40,6 +41,7 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActi
 		torrentsOverlay: map[string]*storage.Torrent{},
 		db:              db,
 		connector:       connector,
+		fs:              OsFs{},
 	}
 
 	err := s.loadTorrents(startWithoutActiveFilesToo)
@@ -147,14 +149,15 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 func (s *Storage) SetTorrent(t *storage.Torrent) error {
 	activeDownload, activeUpload := t.IsActive()
 	data, err := json.Marshal(&TorrentStored{
-		BagID:          t.BagID,
-		Path:           t.Path,
-		Info:           t.Info,
-		Header:         t.Header,
-		CreatedAt:      t.CreatedAt,
-		ActiveUpload:   activeUpload,
-		ActiveDownload: activeDownload,
-		DownloadAll:    t.IsDownloadAll(),
+		BagID:           t.BagID,
+		Path:            t.Path,
+		Info:            t.Info,
+		Header:          t.Header,
+		CreatedAt:       t.CreatedAt,
+		ActiveUpload:    activeUpload,
+		ActiveDownload:  activeDownload,
+		DownloadAll:     t.IsDownloadAll(),
+		DownloadOrdered: t.IsDownloadOrdered(),
 	})
 	if err != nil {
 		return err
@@ -191,9 +194,10 @@ type TorrentStored struct {
 	Header    *storage.TorrentHeader
 	CreatedAt time.Time
 
-	ActiveUpload   bool
-	ActiveDownload bool
-	DownloadAll    bool
+	ActiveUpload    bool
+	ActiveDownload  bool
+	DownloadAll     bool
+	DownloadOrdered bool
 }
 
 func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
@@ -228,7 +232,7 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 
 		if tr.ActiveDownload {
 			if startWithoutActiveFilesToo || len(t.GetActiveFilesIDs()) > 0 {
-				err = t.Start(tr.ActiveUpload, tr.DownloadAll)
+				err = t.Start(tr.ActiveUpload, tr.DownloadAll, tr.DownloadOrdered)
 				if err != nil {
 					return fmt.Errorf("failed to startd download %s: %w", hex.EncodeToString(iter.Key()[5:]), err)
 				}
