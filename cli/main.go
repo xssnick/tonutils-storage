@@ -126,7 +126,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, true)
 	Connector = storage.NewConnector(srv)
 
 	Storage, err = db.NewStorage(ldb, Connector, true)
@@ -190,6 +190,12 @@ func main() {
 				continue
 			}
 			create(parts[1], parts[2])
+		case "remove":
+			if len(parts) < 3 {
+				pterm.Error.Println("Usage: remove [bag_id] [with files? (true/false)]")
+				continue
+			}
+			remove(parts[1], strings.ToLower(parts[2]) == "true")
 		case "list":
 			list()
 		default:
@@ -198,6 +204,8 @@ func main() {
 			pterm.Info.Println("Commands:\n"+
 				"create [path] [description]\n",
 				"download [bag_id]\n",
+				"remove [bag_id] [with files? (true/false)]\n",
+				"list\n",
 				"help\n",
 			)
 		}
@@ -221,7 +229,7 @@ func download(bagId string) {
 		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, Connector)
 		tor.BagID = bag
 
-		if err = tor.Start(true, true); err != nil {
+		if err = tor.Start(true, true, false); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			return
 		}
@@ -232,7 +240,7 @@ func download(bagId string) {
 			os.Exit(1)
 		}
 	} else {
-		if err = tor.Start(true, true); err != nil {
+		if err = tor.Start(true, true, false); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			return
 		}
@@ -241,13 +249,45 @@ func download(bagId string) {
 	pterm.Success.Println("Bag added")
 }
 
+func remove(bagId string, withFiles bool) {
+	bag, err := hex.DecodeString(bagId)
+	if err != nil {
+		pterm.Error.Println("Invalid bag id:", err.Error())
+		return
+	}
+
+	if len(bag) != 32 {
+		pterm.Error.Println("Invalid bag id: should be 32 bytes hex")
+		return
+	}
+
+	tor := Storage.GetTorrent(bag)
+	if tor == nil {
+		pterm.Error.Println("Bag not found")
+		return
+	}
+
+	err = Storage.RemoveTorrent(tor, withFiles)
+	if err != nil {
+		pterm.Error.Println("Failed to remove:", err.Error())
+		return
+	}
+	pterm.Success.Println("Bag removed")
+}
+
 func create(path, name string) {
-	it, err := storage.CreateTorrent(path, name, Storage, Connector)
+	rootPath, dirName, files, err := Storage.DetectFileRefs(path)
+	if err != nil {
+		pterm.Error.Println("Failed to read file refs:", err.Error())
+		return
+	}
+
+	it, err := storage.CreateTorrent(rootPath, dirName, name, Storage, Connector, files)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return
 	}
-	it.Start(true, true)
+	it.Start(true, true, false)
 
 	err = Storage.SetTorrent(it)
 	if err != nil {

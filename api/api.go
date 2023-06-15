@@ -8,6 +8,7 @@ import (
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
 	"net/http"
+	"strconv"
 )
 
 type Error struct {
@@ -16,6 +17,10 @@ type Error struct {
 
 type Ok struct {
 	Ok bool `json:"ok"`
+}
+
+type ProofResponse struct {
+	Proof []byte `json:"proof"`
 }
 
 type File struct {
@@ -33,8 +38,10 @@ type Peer struct {
 
 type BagDetailed struct {
 	Bag
-	Files []File `json:"files"`
-	Peers []Peer `json:"peers"`
+	BagPiecesNum  uint32 `json:"bag_pieces_num"`
+	HasPiecesMask []byte `json:"has_pieces_mask"`
+	Files         []File `json:"files"`
+	Peers         []Peer `json:"peers"`
 }
 
 type Bag struct {
@@ -92,6 +99,7 @@ func (s *Server) Start(addr string) error {
 	m.HandleFunc("/api/v1/remove", s.withAuth(s.handleRemove))
 	m.HandleFunc("/api/v1/stop", s.withAuth(s.handleStop))
 	m.HandleFunc("/api/v1/list", s.withAuth(s.handleList))
+	m.HandleFunc("/api/v1/piece/proof", s.withAuth(s.handlePieceProof))
 	return http.ListenAndServe(addr, m)
 }
 
@@ -122,7 +130,7 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		tor = storage.NewTorrent(req.Path+"/"+hex.EncodeToString(bag), s.store, s.connector)
 		tor.BagID = bag
 
-		if err = tor.Start(true, req.DownloadAll); err != nil {
+		if err = tor.Start(true, req.DownloadAll, false); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			response(w, http.StatusInternalServerError, Error{"Failed to start download:" + err.Error()})
 			return
@@ -136,7 +144,7 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		}
 		pterm.Success.Println("Bag added", hex.EncodeToString(bag))
 	} else {
-		if err = tor.Start(true, req.DownloadAll); err != nil {
+		if err = tor.Start(true, req.DownloadAll, false); err != nil {
 			pterm.Error.Println("Failed to start:", err.Error())
 			response(w, http.StatusInternalServerError, Error{"Failed to start download:" + err.Error()})
 			return
@@ -166,14 +174,21 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	it, err := storage.CreateTorrent(req.Path, req.Description, s.store, s.connector)
+	rootPath, dirName, files, err := s.store.DetectFileRefs(req.Path)
+	if err != nil {
+		pterm.Error.Println("Failed to read file refs:", err.Error())
+		response(w, http.StatusInternalServerError, Error{err.Error()})
+		return
+	}
+
+	it, err := storage.CreateTorrent(rootPath, dirName, req.Description, s.store, s.connector, files)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		response(w, http.StatusInternalServerError, Error{err.Error()})
 		return
 	}
 
-	if err = it.Start(true, true); err != nil {
+	if err = it.Start(true, true, false); err != nil {
 		pterm.Error.Println("Failed to start bag:", err.Error())
 		response(w, http.StatusInternalServerError, Error{err.Error()})
 		return
@@ -187,6 +202,33 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	pterm.Success.Println("Bag created", hex.EncodeToString(it.BagID))
 	response(w, http.StatusOK, Created{BagID: hex.EncodeToString(it.BagID)})
+}
+
+func (s *Server) handlePieceProof(w http.ResponseWriter, r *http.Request) {
+	bag, err := hex.DecodeString(r.URL.Query().Get("bag_id"))
+	if err != nil {
+		response(w, http.StatusBadRequest, Error{"Invalid bag id"})
+		return
+	}
+	if len(bag) != 32 {
+		response(w, http.StatusBadRequest, Error{"Invalid bag id"})
+		return
+	}
+
+	piece, err := strconv.ParseUint(r.URL.Query().Get("piece"), 10, 32)
+	if err != nil {
+		response(w, http.StatusBadRequest, Error{"Invalid piece"})
+		return
+	}
+
+	if tor := s.store.GetTorrent(bag); tor != nil {
+		proof, err := tor.GetPieceProof(uint32(piece))
+		if err == nil {
+			response(w, http.StatusOK, ProofResponse{proof})
+			return
+		}
+	}
+	response(w, http.StatusNotFound, Ok{Ok: false})
 }
 
 func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
@@ -336,13 +378,30 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		}
 
 		full = t.Info.FileSize - t.Info.HeaderSize
-		if t.IsDownloadAll() {
-			if downloaded > full { // cut not full last piece
-				downloaded = full
-			}
-			completed = downloaded == full
-		} else {
+		if downloaded > full { // cut not full last piece
+			downloaded = full
+		}
+		completed = downloaded == full
 
+		if !completed && !t.IsDownloadAll() {
+			var wantSz uint64
+			files := t.GetActiveFilesIDs()
+			for _, f := range files {
+				off, err := t.GetFileOffsetsByID(f)
+				if err == nil {
+					wantSz += off.Size
+				}
+			}
+
+			if downloaded > wantSz { // cut not full last piece
+				downloaded = wantSz
+			}
+			completed = downloaded == wantSz
+		}
+
+		if !short {
+			res.BagPiecesNum = t.PiecesNum()
+			res.HasPiecesMask = t.PiecesMask()
 		}
 
 		desc = t.Info.Description.Value

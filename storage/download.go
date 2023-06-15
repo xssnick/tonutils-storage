@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"time"
 )
@@ -65,7 +63,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) startDownload(report func(Event), downloadOrdered bool) error {
+func (t *Torrent) startDownload(report func(Event)) error {
 	if t.BagID == nil {
 		return fmt.Errorf("bag is not set")
 	}
@@ -128,8 +126,7 @@ func (t *Torrent) startDownload(report func(Event), downloadOrdered bool) error 
 
 			needFile := false
 
-			_, err = os.Stat(rootPath + "/" + info.Name)
-			if err != nil {
+			if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
 				needFile = true
 				for i := info.FromPiece; i <= info.ToPiece; i++ {
 					piecesMap[i] = true
@@ -173,7 +170,7 @@ func (t *Torrent) startDownload(report func(Event), downloadOrdered bool) error 
 				return
 			}
 
-			if downloadOrdered {
+			if t.downloadOrdered {
 				fetch := NewPreFetcher(ctx, t, report, downloaded, 24, 200, pieces)
 				defer fetch.Stop()
 
@@ -218,11 +215,7 @@ func (t *Torrent) startDownload(report func(Event), downloadOrdered bool) error 
 								}
 
 								err = func() error {
-									if err := os.MkdirAll(filepath.Dir(rootPath+"/"+file.Name), os.ModePerm); err != nil {
-										return err
-									}
-
-									f, err := os.OpenFile(rootPath+"/"+file.Name, os.O_RDWR|os.O_CREATE, 0666)
+									f, err := t.db.GetFS().Open(rootPath+"/"+file.Name, OpenModeWrite)
 									if err != nil {
 										return fmt.Errorf("failed to create file %s: %w", file.Name, err)
 									}
@@ -304,11 +297,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 	var currentPiece, currentProof []byte
 	for _, off := range list {
 		err := func() error {
-			if err := os.MkdirAll(filepath.Dir(rootPath+"/"+off.path), os.ModePerm); err != nil {
-				return err
-			}
-
-			f, err := os.OpenFile(rootPath+"/"+off.path, os.O_RDWR|os.O_CREATE, 0666)
+			f, err := t.db.GetFS().Open(rootPath+"/"+off.path, OpenModeWrite)
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %w", off.path, err)
 			}
@@ -324,10 +313,6 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 					if piece != currentPieceId || currentPiece == nil {
 						if currentPiece != nil {
 							fetch.Free(currentPieceId)
-
-							if err = f.Sync(); err != nil {
-								return fmt.Errorf("failed to sync file for piece %d: %w", currentPieceId, err)
-							}
 
 							err = t.setPiece(currentPieceId, &PieceInfo{
 								StartFileIndex: pieceStartFileIndex,

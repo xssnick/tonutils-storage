@@ -11,9 +11,7 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"io"
 	"math"
-	"os"
 	"path/filepath"
-	"strings"
 )
 
 type fileInfoData struct {
@@ -21,100 +19,50 @@ type fileInfoData struct {
 	Name string
 }
 
-func CreateTorrent(path, description string, db Storage, connector NetConnector) (*Torrent, error) {
+type FileRef interface {
+	GetName() string
+	GetSize() uint64
+	CreateReader() (io.ReadCloser, error)
+}
+
+func CreateTorrent(filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef) (*Torrent, error) {
 	const pieceSize = 128 * 1024
 
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 
-	// strip last slash
-	if path[len(path)-1] == '/' || path[len(path)-1] == '\\' {
-		path = path[:len(path)-1]
-	}
-
-	var err error
-	path, err = filepath.Abs(path)
-	if err != nil {
-		return nil, err
-	}
-
-	dir := filepath.Base(path) + "/"
-
-	torrent := NewTorrent(filepath.Dir(path), db, connector)
+	torrent := NewTorrent(filepath.Dir(filesRootPath), db, connector)
 	torrent.Header = &TorrentHeader{
-		DirNameSize: uint32(len(dir)),
-		DirName:     []byte(dir),
+		DirNameSize: uint32(len(dirName)),
+		DirName:     []byte(dirName),
 	}
 
 	waiter, _ := pterm.DefaultSpinner.Start("Scanning files...")
 
-	var filesSize uint64
-	filesList := make([]fileInfoData, 0, 64)
-	err = filepath.Walk(path, func(filePath string, f os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if f.IsDir() {
-			return nil
-		}
-
-		name := filePath[len(path)+1:]
-		name = strings.ReplaceAll(name, "\\", "/") // to unix style
-
+	var dataSize uint64
+	for _, file := range files {
+		name := file.GetName()
 		torrent.Header.FilesCount++
 		torrent.Header.TotalNameSize += uint64(len(name))
 		torrent.Header.Names = append(torrent.Header.Names, name...)
 		torrent.Header.NameIndex = append(torrent.Header.NameIndex, torrent.Header.TotalNameSize)
 
-		// TODO: optimize
-		// stat is not always gives the right file size, so we open file and find the end
-		fl, err := os.Open(filePath)
-		if err != nil {
-			return fmt.Errorf("failed to open file %s: %w", filePath, err)
-		}
+		dataSize += file.GetSize()
 
-		sz, err := fl.Seek(0, io.SeekEnd)
-		fl.Close()
-		if err != nil {
-			return fmt.Errorf("failed to seek file end %s: %w", filePath, err)
-		}
-		filesSize += uint64(sz)
-
-		torrent.Header.DataIndex = append(torrent.Header.DataIndex, filesSize)
-
-		// log.Println("Added file ", name, "at", filePath)
-		filesList = append(filesList, fileInfoData{
-			Path: filePath,
-			Name: name,
-		})
-		return nil
-	})
-	if err != nil {
-		err = fmt.Errorf("failed to scan directory '%s': %w", path, err)
-		waiter.Fail(err.Error())
-		return nil, err
+		torrent.Header.DataIndex = append(torrent.Header.DataIndex, dataSize)
 	}
-	waiter.Success()
 
-	// TODO: change to counter
-	files := make([]*FileIndex, 0, 64)
+	filesProcessed := uint32(0)
 
 	hashes := make([][]byte, 0, 256)
 	pieces := make([]*PieceInfo, 0, 256)
 
 	pieceStartFileIndex := uint32(0)
 
-	process := func(name string, rd io.Reader) error {
-		fi := FileIndex{
-			Name:            name, // relative path
-			BlockFrom:       uint32(len(hashes)),
-			BlockFromOffset: uint32(cbOffset),
-		}
-
+	process := func(name string, isHeader bool, rd io.Reader) error {
 		for {
 			if cbOffset == 0 {
-				pieceStartFileIndex = uint32(len(files))
+				pieceStartFileIndex = filesProcessed
 			}
 
 			n, err := rd.Read(cb[cbOffset:])
@@ -139,15 +87,12 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 			}
 		}
 
-		if name != "" { // if not header
-			fi.BlockTo = uint32(len(hashes))
-			fi.BlockToOffset = uint32(cbOffset)
-
-			files = append(files, &fi)
+		if !isHeader { // if not header
+			filesProcessed++
 		}
-
 		return nil
 	}
+	waiter.Success()
 
 	waiter, _ = pterm.DefaultSpinner.Start("Generating bag header...")
 	headerData, err := tl.Serialize(torrent.Header, true)
@@ -155,26 +100,26 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 		waiter.Fail(err.Error())
 		return nil, fmt.Errorf("failed to serialize header: %w", err)
 	}
-	err = process("", bytes.NewBuffer(headerData))
+	err = process("", true, bytes.NewBuffer(headerData))
 	if err != nil {
 		waiter.Fail(err.Error())
 		return nil, fmt.Errorf("failed to process header piece: %w", err)
 	}
 	waiter.Success()
 
-	progress, _ := pterm.DefaultProgressbar.WithTotal(len(filesList)).WithTitle("Validating files...").Start()
+	progress, _ := pterm.DefaultProgressbar.WithTotal(len(files)).WithTitle("Validating files...").Start()
 
 	// add files
-	for _, f := range filesList {
-		fl, err := os.Open(f.Path)
+	for _, f := range files {
+		rd, err := f.CreateReader()
 		if err != nil {
-			return nil, fmt.Errorf("failed to open file %s: %w", f.Path, err)
+			return nil, fmt.Errorf("failed to read file %s: %w", f.GetName(), err)
 		}
 
-		err = process(f.Name, fl)
-		_ = fl.Close()
+		err = process(f.GetName(), false, rd)
+		_ = rd.Close()
 		if err != nil {
-			return nil, fmt.Errorf("failed to process file %s: %w", f.Path, err)
+			return nil, fmt.Errorf("failed to process file %s: %w", f.GetName(), err)
 		}
 		progress.Increment()
 	}
@@ -202,7 +147,7 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 
 	torrent.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
-		FileSize:   uint64(len(headerData)) + filesSize,
+		FileSize:   uint64(len(headerData)) + dataSize,
 		RootHash:   hashTree.Hash(),
 		HeaderSize: uint64(len(headerData)),
 		HeaderHash: calcHash(headerData),
@@ -233,8 +178,8 @@ func CreateTorrent(path, description string, db Storage, connector NetConnector)
 		}
 	}
 
-	torrent.activeFiles = make([]uint32, 0, len(filesList))
-	for i := range filesList {
+	torrent.activeFiles = make([]uint32, 0, len(files))
+	for i := range files {
 		torrent.activeFiles = append(torrent.activeFiles, uint32(i))
 	}
 	if err = torrent.db.SetActiveFiles(torrent.BagID, torrent.activeFiles); err != nil {

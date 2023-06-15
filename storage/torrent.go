@@ -20,12 +20,31 @@ type FileIndex struct {
 	mx sync.Mutex
 }
 
+type OpenMode int
+
+const (
+	OpenModeRead OpenMode = iota
+	OpenModeWrite
+)
+
+type FSFile interface {
+	io.ReaderAt
+	io.WriterAt
+	io.Closer
+}
+
+type FS interface {
+	Open(name string, mode OpenMode) (FSFile, error)
+	Exists(name string) bool
+}
+
 type PieceInfo struct {
 	StartFileIndex uint32
 	Proof          []byte
 }
 
 type Storage interface {
+	GetFS() FS
 	GetAll() []*Torrent
 	GetTorrentByOverlay(overlay []byte) *Torrent
 	SetTorrent(torrent *Torrent) error
@@ -55,9 +74,10 @@ type Torrent struct {
 	Header    *TorrentHeader
 	CreatedAt time.Time
 
-	activeFiles  []uint32
-	activeUpload bool
-	downloadAll  bool
+	activeFiles     []uint32
+	activeUpload    bool
+	downloadAll     bool
+	downloadOrdered bool
 
 	connector  NetConnector
 	downloader TorrentDownloader
@@ -132,6 +152,10 @@ func (t *Torrent) IsDownloadAll() bool {
 	return t.downloadAll
 }
 
+func (t *Torrent) IsDownloadOrdered() bool {
+	return t.downloadOrdered
+}
+
 func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	select {
 	case <-t.globalCtx.Done():
@@ -146,13 +170,14 @@ func (t *Torrent) Stop() {
 	t.pause()
 }
 
-func (t *Torrent) Start(withUpload, downloadAll bool) (err error) {
+func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
 	t.activeUpload = withUpload
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
 	t.downloadAll = downloadAll
+	t.downloadOrdered = downloadOrdered
 
 	if d, _ := t.IsActive(); d {
 		return nil
@@ -162,7 +187,7 @@ func (t *Torrent) Start(withUpload, downloadAll bool) (err error) {
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
 
-	return t.startDownload(func(event Event) {}, false)
+	return t.startDownload(func(event Event) {})
 }
 
 func (t *Torrent) PiecesNum() uint32 {
@@ -218,7 +243,7 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 
 	t.downloadAll = false
 	t.activeFiles = ids
-	return t.startDownload(func(event Event) {}, false)
+	return t.startDownload(func(event Event) {})
 }
 
 func (t *Torrent) SetActiveFiles(names []string) error {
@@ -329,4 +354,17 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 		Proof: piece.Proof,
 		Data:  block,
 	}, nil
+}
+
+func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
+	if id >= t.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
+	}
+
+	piece, err := t.getPiece(id)
+	if err != nil {
+		return nil, fmt.Errorf("piece %d is not downlaoded (%w)", id, err)
+	}
+
+	return piece.Proof, nil
 }
