@@ -613,32 +613,32 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	t.mx.Unlock()
 
 	err := func() error {
-		tm := time.Now()
-		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-
-		var res TorrentInfoContainer
-		infCtx, cancel := context.WithTimeout(stNode.globalCtx, 20*time.Second)
-		err := stNode.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
-		cancel()
-		if err != nil {
-			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-			return err
-		}
-		Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-
-		cl, err := cell.FromBOC(res.Data)
-		if err != nil {
-			return fmt.Errorf("failed to parse torrent info boc: %w", err)
-		}
-
-		if !bytes.Equal(cl.Hash(), t.BagID) {
-			return fmt.Errorf("incorrect torrent info")
-		}
-
 		t.mx.Lock()
 		defer t.mx.Unlock()
 
 		if t.Info == nil {
+			tm := time.Now()
+			Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+
+			var res TorrentInfoContainer
+			infCtx, cancel := context.WithTimeout(stNode.globalCtx, 20*time.Second)
+			err := stNode.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
+			cancel()
+			if err != nil {
+				Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+				return err
+			}
+			Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+
+			cl, err := cell.FromBOC(res.Data)
+			if err != nil {
+				return fmt.Errorf("failed to parse torrent info boc: %w", err)
+			}
+
+			if !bytes.Equal(cl.Hash(), t.BagID) {
+				return fmt.Errorf("incorrect torrent info")
+			}
+
 			var info TorrentInfo
 			err = tlb.LoadFromCell(&info, cl.BeginParse())
 			if err != nil {
