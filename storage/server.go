@@ -186,14 +186,14 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 			}
 
 			peers := []overlay.Node{*node}
-			t.peersMx.Lock()
+			t.peersMx.RLock()
 			for _, nd := range t.knownNodes {
 				peers = append(peers, *nd)
 				if len(peers) == 8 {
 					break
 				}
 			}
-			t.peersMx.Unlock()
+			t.peersMx.RUnlock()
 
 			err = peer.Answer(ctx, query.ID, overlay.NodesList{List: peers})
 			if err != nil {
@@ -238,7 +238,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		if stPeer == nil {
 			t.mx.Lock()
-			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, 0, false)
+			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, 0)
 			t.mx.Unlock()
 
 			// prepare torrent info if needed
@@ -257,14 +257,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 
 			peers := []overlay.Node{*node}
-			t.peersMx.Lock()
+			t.peersMx.RLock()
 			for _, nd := range t.knownNodes {
 				peers = append(peers, *nd)
 				if len(peers) == 8 {
 					break
 				}
 			}
-			t.peersMx.Unlock()
+			t.peersMx.RUnlock()
 
 			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, overlay.NodesList{List: peers})
 			if err != nil {
@@ -292,13 +292,10 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			t.UpdateUploadedPeer(stPeer, uint64(len(p.Data)))
 		case Ping:
-			if stPeer.sessionId == 0 {
-				stPeer.sessionId = q.SessionID
-			}
-
-			if !stPeer.forceSession && stPeer.sessionId != q.SessionID {
-				stPeer.sessionId = q.SessionID
+			if atomic.LoadInt64(&stPeer.sessionId) != q.SessionID {
+				atomic.StoreInt64(&stPeer.sessionId, q.SessionID)
 				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
+				Logger("[STORAGE] NEW SESSION WITH", hex.EncodeToString(adnlId), q.SessionID)
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{})
@@ -316,7 +313,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				stPeer.piecesMx.Unlock()
 
 				up := AddUpdate{
-					SessionID: stPeer.sessionId,
+					SessionID: atomic.LoadInt64(&stPeer.sessionId),
 					Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
 					Update: UpdateInit{
 						HavePieces:       stPeer.lastSentPieces,
@@ -377,18 +374,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, TorrentInfoContainer{
 				Data: c.ToBOC(),
 			})
-			if err != nil {
-				return err
-			}
-
-			// TODO: reinit on adnl reinit with new session
-			// reset seqno, consider it as reinit flow for now
-			atomic.StoreInt64(&stPeer.sessionSeqno, 0)
-
-			var res Pong
-			err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, Ping{
-				SessionID: stPeer.sessionId,
-			}), &res)
 			if err != nil {
 				return err
 			}
@@ -612,7 +597,7 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	addr := peer.adnl.RemoteAddr()
 
 	t.mx.Lock()
-	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, s, peer, rand.Int63(), true)
+	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, s, peer, rand.Int63())
 	t.mx.Unlock()
 
 	if err := stNode.prepareTorrentInfo(t); err != nil {
@@ -625,9 +610,6 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 }
 
 func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
-	t.mx.Lock()
-	defer t.mx.Unlock()
-
 	if t.Info == nil {
 		tm := time.Now()
 		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
@@ -654,7 +636,6 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 		var info TorrentInfo
 		err = tlb.LoadFromCell(&info, cl.BeginParse())
 		if err != nil {
-			t.mx.Unlock()
 			return fmt.Errorf("invalid torrent info cell")
 		}
 
@@ -670,7 +651,10 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 			err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
 			return err
 		}
+
+		t.mx.Lock()
 		t.Info = &info
+		t.mx.Unlock()
 	}
 	return nil
 }
@@ -719,21 +703,20 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	}
 }
 
-func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64, forceSession bool) *storagePeer {
+func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
 		return n
 	}
 
 	stNode := &storagePeer{
-		torrent:      t,
-		nodeAddr:     conn.adnl.RemoteAddr(),
-		nodeId:       conn.adnl.GetID(),
-		conn:         conn,
-		sessionId:    sessionId,
-		forceSession: forceSession,
-		overlay:      overlay,
-		hasPieces:    map[uint32]bool{},
-		pieceQueue:   make(chan *pieceRequest),
+		torrent:    t,
+		nodeAddr:   conn.adnl.RemoteAddr(),
+		nodeId:     conn.adnl.GetID(),
+		conn:       conn,
+		sessionId:  sessionId,
+		overlay:    overlay,
+		hasPieces:  map[uint32]bool{},
+		pieceQueue: make(chan *pieceRequest),
 	}
 
 	conn.UseFor(stNode)

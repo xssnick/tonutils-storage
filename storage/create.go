@@ -13,7 +13,6 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"io"
 	"math"
-	"path/filepath"
 	"runtime"
 	"sync"
 )
@@ -30,12 +29,15 @@ type FileRef interface {
 }
 
 func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef) (*Torrent, error) {
+	if len(files) == 0 {
+		return nil, fmt.Errorf("0 files in torrent")
+	}
 	const pieceSize = 128 * 1024
 
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 
-	torrent := NewTorrent(filepath.Dir(filesRootPath), db, connector)
+	torrent := NewTorrent(filesRootPath, db, connector)
 	torrent.Header = &TorrentHeader{
 		DirNameSize: uint32(len(dirName)),
 		DirName:     []byte(dirName),

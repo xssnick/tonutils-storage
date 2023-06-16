@@ -82,7 +82,6 @@ type storagePeer struct {
 	overlay      []byte
 	nodeId       []byte
 	sessionId    int64
-	forceSession bool
 	sessionSeqno int64
 	conn         *PeerConnection
 
