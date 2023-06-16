@@ -237,8 +237,15 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		stPeer := p.GetFor(t.BagID)
 
 		if stPeer == nil {
+			var sesId = rand.Int63()
+			switch q := req.(type) {
+			case Ping:
+				sesId = q.SessionID
+			}
+
 			t.mx.Lock()
-			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, 0)
+			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, sesId)
+			atomic.StoreInt64(&stPeer.sessionSeqno, 0)
 			t.mx.Unlock()
 
 			// prepare torrent info if needed
