@@ -73,7 +73,7 @@ func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, 
 		if err != nil {
 			return "", "", nil, err
 		}
-		return path, filepath.Base(path) + "/", files, nil
+		return filepath.Dir(path), filepath.Base(path) + "/", files, nil
 	}
 
 	file, err := s.GetSingleFileRef(path)

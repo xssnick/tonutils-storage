@@ -76,7 +76,8 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 
 	if serverMode || seedMode {
 		go func() {
-			wait := 3 * time.Second
+			lastUpdate := map[string]int64{}
+			wait := 5 * time.Second
 			// refresh dht records
 			for {
 				select {
@@ -85,14 +86,24 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 				case <-time.After(wait):
 				}
 
-				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
-				err := s.updateTorrents(ctx, serverMode)
-				if err == nil {
-					wait = 10 * time.Minute
-				} else {
-					wait = 15 * time.Second
+				if s.store == nil {
+					continue
 				}
-				cancel()
+
+				list := s.store.GetAll()
+				for _, torrent := range list {
+					if !torrent.activeUpload {
+						continue
+					}
+
+					lastAt := lastUpdate[hex.EncodeToString(torrent.BagID)]
+					if lastAt+180 <= time.Now().Unix() {
+						ctx, cancel := context.WithTimeout(s.closeCtx, 45*time.Second)
+						_ = s.updateTorrent(ctx, torrent, serverMode)
+						cancel()
+						lastUpdate[hex.EncodeToString(torrent.BagID)] = time.Now().Unix()
+					}
+				}
 			}
 		}()
 	}
@@ -175,14 +186,14 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 			}
 
 			peers := []overlay.Node{*node}
-			t.peersMx.Lock()
+			t.peersMx.RLock()
 			for _, nd := range t.knownNodes {
 				peers = append(peers, *nd)
 				if len(peers) == 8 {
 					break
 				}
 			}
-			t.peersMx.Unlock()
+			t.peersMx.RUnlock()
 
 			err = peer.Answer(ctx, query.ID, overlay.NodesList{List: peers})
 			if err != nil {
@@ -226,9 +237,19 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		stPeer := p.GetFor(t.BagID)
 
 		if stPeer == nil {
+			var sesId = rand.Int63()
+			switch q := req.(type) {
+			case Ping:
+				sesId = q.SessionID
+			}
+
 			t.mx.Lock()
-			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, 0, false)
+			stPeer = t.initStoragePeer(t.globalCtx, over, s, p, sesId)
+			atomic.StoreInt64(&stPeer.sessionSeqno, 0)
 			t.mx.Unlock()
+
+			// prepare torrent info if needed
+			go stPeer.prepareTorrentInfo(t)
 		}
 		stPeer.touch()
 
@@ -243,14 +264,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 
 			peers := []overlay.Node{*node}
-			t.peersMx.Lock()
+			t.peersMx.RLock()
 			for _, nd := range t.knownNodes {
 				peers = append(peers, *nd)
 				if len(peers) == 8 {
 					break
 				}
 			}
-			t.peersMx.Unlock()
+			t.peersMx.RUnlock()
 
 			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, overlay.NodesList{List: peers})
 			if err != nil {
@@ -278,13 +299,10 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			t.UpdateUploadedPeer(stPeer, uint64(len(p.Data)))
 		case Ping:
-			if stPeer.sessionId == 0 {
-				stPeer.sessionId = q.SessionID
-			}
-
-			if !stPeer.forceSession && stPeer.sessionId != q.SessionID {
-				stPeer.sessionId = q.SessionID
+			if atomic.LoadInt64(&stPeer.sessionId) != q.SessionID {
+				atomic.StoreInt64(&stPeer.sessionId, q.SessionID)
 				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
+				Logger("[STORAGE] NEW SESSION WITH", hex.EncodeToString(adnlId), q.SessionID)
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{})
@@ -302,7 +320,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				stPeer.piecesMx.Unlock()
 
 				up := AddUpdate{
-					SessionID: stPeer.sessionId,
+					SessionID: atomic.LoadInt64(&stPeer.sessionId),
 					Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
 					Update: UpdateInit{
 						HavePieces:       stPeer.lastSentPieces,
@@ -366,18 +384,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			if err != nil {
 				return err
 			}
-
-			// TODO: reinit on adnl reinit with new session
-			// reset seqno, consider it as reinit flow for now
-			atomic.StoreInt64(&stPeer.sessionSeqno, 0)
-
-			var res Pong
-			err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, Ping{
-				SessionID: stPeer.sessionId,
-			}), &res)
-			if err != nil {
-				return err
-			}
 		case UpdateState:
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Ok{})
 			if err != nil {
@@ -437,80 +443,73 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) updateTorrents(ctx context.Context, isServer bool) error {
-	if s.store == nil {
-		return fmt.Errorf("storage is not yet initialized")
+func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer bool) error {
+	Logger("[STORAGE_DHT] CHECKING BAG OVERLAY FOR", hex.EncodeToString(torrent.BagID))
+
+	nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
+	if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
+		println(err.Error())
+		return err
 	}
 
-	list := s.store.GetAll()
+	if nodesList == nil {
+		nodesList = &overlay.NodesList{}
+	}
 
-	for _, torrent := range list {
-		nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
-		if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
-			continue
+	node, err := overlay.NewNode(torrent.BagID, s.key)
+	if err != nil {
+		pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+		return err
+	}
+
+	refreshed := false
+	// refresh if already exists
+	for i := range nodesList.List {
+		id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
+		if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
+			nodesList.List[i] = *node
+			refreshed = true
+			break
 		}
+	}
 
-		if nodesList == nil {
-			nodesList = &overlay.NodesList{}
-		}
-
-		node, err := overlay.NewNode(torrent.BagID, s.key)
-		if err != nil {
-			pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
-			continue
-		}
-
-		refreshed := false
-		// refresh if already exists
-		for i := range nodesList.List {
-			id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
-			if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
-				nodesList.List[i] = *node
-				refreshed = true
-				break
+	if !refreshed {
+		// create if no records
+		if len(nodesList.List) == 0 {
+			nodesList = &overlay.NodesList{
+				List: []overlay.Node{*node},
 			}
-		}
+			refreshed = true
+		} else {
+			if len(nodesList.List) >= 5 {
+				// only allowed to replace when have public ip
+				if isServer {
+					sort.Slice(nodesList.List, func(i, j int) bool {
+						return nodesList.List[i].Version < nodesList.List[j].Version
+					})
 
-		if !refreshed {
-			// create if no records
-			if len(nodesList.List) == 0 {
-				nodesList = &overlay.NodesList{
-					List: []overlay.Node{*node},
-				}
-				refreshed = true
-			} else {
-				if len(nodesList.List) >= 5 {
-					// only allowed to replace when have public ip
-					if isServer {
-						sort.Slice(nodesList.List, func(i, j int) bool {
-							return nodesList.List[i].Version < nodesList.List[j].Version
-						})
-
-						// TODO: store in diff dht node instead
-						// replace oldest
-						nodesList.List[0] = *node
-						refreshed = true
-					}
-				} else {
-					// add our node if < 5 in list
-					nodesList.List = append(nodesList.List, *node)
+					// TODO: store in diff dht node instead
+					// replace oldest
+					nodesList.List[0] = *node
 					refreshed = true
 				}
+			} else {
+				// add our node if < 5 in list
+				nodesList.List = append(nodesList.List, *node)
+				refreshed = true
 			}
 		}
+	}
 
-		if refreshed {
-			ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
-			stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
-			cancel()
-			if err != nil && stored == 0 {
-				pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
-				continue
-			}
-			Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))
+	if refreshed {
+		ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
+		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
+		cancel()
+		if err != nil && stored == 0 {
+			pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+			return err
 		}
-
-		//	log.Println("DHT ADNL address record for bag was refreshed successfully")
+		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))
 	}
 	return nil
 }
@@ -605,22 +604,32 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 	addr := peer.adnl.RemoteAddr()
 
 	t.mx.Lock()
-	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, s, peer, rand.Int63(), true)
+	stNode := t.initStoragePeer(t.globalCtx, node.Overlay, s, peer, rand.Int63())
 	t.mx.Unlock()
 
-	err := func() error {
+	if err := stNode.prepareTorrentInfo(t); err != nil {
+		stNode.Close()
+	}
+
+	Logger("[STORAGE] PEER PREPARED", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+
+	return stNode, nil
+}
+
+func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
+	if t.Info == nil {
 		tm := time.Now()
-		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 
 		var res TorrentInfoContainer
-		infCtx, cancel := context.WithTimeout(stNode.globalCtx, 20*time.Second)
-		err := stNode.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(stNode.overlay, &GetTorrentInfo{}), &res)
+		infCtx, cancel := context.WithTimeout(s.globalCtx, 20*time.Second)
+		err := s.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(s.overlay, &GetTorrentInfo{}), &res)
 		cancel()
 		if err != nil {
-			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 			return err
 		}
-		Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
+		Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 
 		cl, err := cell.FromBOC(res.Data)
 		if err != nil {
@@ -631,40 +640,30 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 			return fmt.Errorf("incorrect torrent info")
 		}
 
-		t.mx.Lock()
-		defer t.mx.Unlock()
-
-		if t.Info == nil {
-			var info TorrentInfo
-			err = tlb.LoadFromCell(&info, cl.BeginParse())
-			if err != nil {
-				t.mx.Unlock()
-				return fmt.Errorf("invalid torrent info cell")
-			}
-
-			if info.PieceSize == 0 || info.HeaderSize == 0 {
-				err = fmt.Errorf("incorrect torrent info sizes")
-				return err
-			}
-			if info.HeaderSize > 20*1024*1024 {
-				err = fmt.Errorf("too big header > 20 MB, looks dangerous")
-				return err
-			}
-			if info.PieceSize > 64*1024*1024 {
-				err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
-				return err
-			}
-			t.Info = &info
+		var info TorrentInfo
+		err = tlb.LoadFromCell(&info, cl.BeginParse())
+		if err != nil {
+			return fmt.Errorf("invalid torrent info cell")
 		}
-		return nil
-	}()
-	if err != nil {
-		stNode.Close()
+
+		if info.PieceSize == 0 || info.HeaderSize == 0 {
+			err = fmt.Errorf("incorrect torrent info sizes")
+			return err
+		}
+		if info.HeaderSize > 20*1024*1024 {
+			err = fmt.Errorf("too big header > 20 MB, looks dangerous")
+			return err
+		}
+		if info.PieceSize > 64*1024*1024 {
+			err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
+			return err
+		}
+
+		t.mx.Lock()
+		t.Info = &info
+		t.mx.Unlock()
 	}
-
-	Logger("[STORAGE] PEER PREPARED", hex.EncodeToString(adnlID), addr, "FOR", hex.EncodeToString(t.BagID))
-
-	return stNode, nil
+	return nil
 }
 
 func (s *Server) StartPeerSearcher(t *Torrent) {
@@ -711,21 +710,20 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	}
 }
 
-func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64, forceSession bool) *storagePeer {
+func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
 		return n
 	}
 
 	stNode := &storagePeer{
-		torrent:      t,
-		nodeAddr:     conn.adnl.RemoteAddr(),
-		nodeId:       conn.adnl.GetID(),
-		conn:         conn,
-		sessionId:    sessionId,
-		forceSession: forceSession,
-		overlay:      overlay,
-		hasPieces:    map[uint32]bool{},
-		pieceQueue:   make(chan *pieceRequest),
+		torrent:    t,
+		nodeAddr:   conn.adnl.RemoteAddr(),
+		nodeId:     conn.adnl.GetID(),
+		conn:       conn,
+		sessionId:  sessionId,
+		overlay:    overlay,
+		hasPieces:  map[uint32]bool{},
+		pieceQueue: make(chan *pieceRequest),
 	}
 
 	conn.UseFor(stNode)

@@ -181,7 +181,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	it, err := storage.CreateTorrent(rootPath, dirName, req.Description, s.store, s.connector, files)
+	it, err := storage.CreateTorrent(r.Context(), rootPath, dirName, req.Description, s.store, s.connector, files)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		response(w, http.StatusInternalServerError, Error{err.Error()})
