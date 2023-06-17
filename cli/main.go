@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/pterm/pterm"
@@ -87,10 +89,14 @@ func main() {
 		}
 	}
 
-	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton-blockchain.github.io/global.config.json")
+	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
 	if err != nil {
-		pterm.Error.Println("Failed to download ton config:", err.Error())
-		os.Exit(1)
+		pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
+		lsCfg = &liteclient.GlobalConfig{}
+		if err = json.NewDecoder(bytes.NewBufferString(config.FallbackNetworkConfig)).Decode(lsCfg); err != nil {
+			pterm.Error.Println("Failed to parse fallback ton config:", err.Error())
+			os.Exit(1)
+		}
 	}
 
 	gate := adnl.NewGateway(cfg.Key)

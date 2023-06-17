@@ -215,8 +215,8 @@ func (t *Torrent) startDownload(report func(Event)) error {
 									continue
 								}
 
-								if strings.Contains(file.Name, "..") {
-									Logger("Malicious file with path traversal was skipped: " + file.Name)
+								if err := validateFileName(file.Name, true); err != nil {
+									Logger(fmt.Sprintf("Malicious file '%s' was skipped: %v", file.Name, err))
 									continue
 								}
 
@@ -306,6 +306,10 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 			if strings.Contains(off.path, "..") {
 				Logger("Malicious file with path traversal was skipped: " + off.path)
 				return fmt.Errorf("malicious file")
+			}
+			if err := validateFileName(off.path, true); err != nil {
+				Logger(fmt.Sprintf("Malicious file '%s' was skipped: %v", off.path, err))
+				return fmt.Errorf("malicious file %q", off.path)
 			}
 
 			f, err := t.db.GetFS().Open(rootPath+"/"+off.path, OpenModeWrite)

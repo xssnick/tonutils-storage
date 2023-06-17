@@ -14,6 +14,7 @@ import (
 	"io"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
 )
 
@@ -37,6 +38,10 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 
+	if err := validateFileName(dirName, false); err != nil {
+		return nil, err
+	}
+
 	torrent := NewTorrent(filesRootPath, db, connector)
 	torrent.Header = &TorrentHeader{
 		DirNameSize: uint32(len(dirName)),
@@ -48,6 +53,11 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	var dataSize uint64
 	for _, file := range files {
 		name := file.GetName()
+
+		if err := validateFileName(name, true); err != nil {
+			return nil, fmt.Errorf("malicious file name %q: %w", name, err)
+		}
+
 		torrent.Header.FilesCount++
 		torrent.Header.TotalNameSize += uint64(len(name))
 		torrent.Header.Names = append(torrent.Header.Names, name...)
@@ -400,4 +410,22 @@ func fastPrune(toPrune *cell.Cell, depth uint16) *cell.Builder {
 	copy(prunedData[2:], toPrune.Hash())
 	binary.BigEndian.PutUint16(prunedData[2+32:], depth) //depth
 	return cell.BeginCell().MustStoreSlice(prunedData, uint(len(prunedData)*8))
+}
+
+func validateFileName(name string, isFile bool) error {
+	if strings.HasPrefix(name, "/") {
+		return fmt.Errorf("name cannot strat with '/'")
+	}
+	if strings.Contains(name, "./") {
+		return fmt.Errorf("name cannot contain traversal './'")
+	}
+	if isFile {
+		if name == "" {
+			return fmt.Errorf("file name cannot be empty")
+		}
+		if strings.HasSuffix(name, "/") {
+			return fmt.Errorf("file name cannot end with /")
+		}
+	}
+	return nil
 }
