@@ -15,7 +15,6 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -266,8 +265,8 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 			return nil, fmt.Errorf("too big dir name > 256")
 		}
 
-		if strings.Contains(string(header.DirName), "..") {
-			return nil, fmt.Errorf("path traversal in dir name, malicious bag")
+		if err := validateFileName(string(header.DirName), false); err != nil {
+			return nil, fmt.Errorf("malicious bag: %w", err)
 		}
 
 		if header.FilesCount > 1_000_000 {
