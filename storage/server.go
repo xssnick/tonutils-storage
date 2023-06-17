@@ -340,9 +340,9 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			} else if len(lastPieces) > 0 {
 				mask := t.PiecesMask()
 				var newPieces []int32
-				for i := 0; i < len(lastPieces); i++ {
+				for i := 0; i < len(mask); i++ {
 					for j := 0; j < 8; j++ {
-						if mask[i]&(1<<j) > 0 && lastPieces[i]&(1<<j) == 0 {
+						if mask[i]&(1<<j) > 0 && (i >= len(lastPieces) || lastPieces[i]&(1<<j) == 0) {
 							newPieces = append(newPieces, int32(i*8+j))
 						}
 					}
