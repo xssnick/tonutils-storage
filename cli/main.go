@@ -314,21 +314,27 @@ func list() {
 	}
 
 	for _, t := range Storage.GetAll() {
-		if t.Info == nil {
-			continue
-		}
-		mask := t.PiecesMask()
-		downloadedPieces := 0
-		for _, b := range mask {
-			downloadedPieces += bits.OnesCount8(b)
-		}
-		full := t.Info.FileSize - t.Info.HeaderSize
-		downloaded := uint64(downloadedPieces*int(t.Info.PieceSize)) - t.Info.HeaderSize
-		if uint64(downloadedPieces*int(t.Info.PieceSize)) < t.Info.HeaderSize { // 0 if header not fully downloaded
-			downloaded = 0
-		}
-		if downloaded > full { // cut not full last piece
-			downloaded = full
+		var strDownloaded, strFull, description = "0 Bytes", "???", "???"
+		completed := false
+		if t.Info != nil {
+			mask := t.PiecesMask()
+			downloadedPieces := 0
+			for _, b := range mask {
+				downloadedPieces += bits.OnesCount8(b)
+			}
+			full := t.Info.FileSize - t.Info.HeaderSize
+			downloaded := uint64(downloadedPieces*int(t.Info.PieceSize)) - t.Info.HeaderSize
+			if uint64(downloadedPieces*int(t.Info.PieceSize)) < t.Info.HeaderSize { // 0 if header not fully downloaded
+				downloaded = 0
+			}
+			if downloaded > full { // cut not full last piece
+				downloaded = full
+			}
+			completed = downloaded == full
+
+			strDownloaded = storage.ToSz(downloaded)
+			strFull = storage.ToSz(full)
+			description = t.Info.Description.Value
 		}
 
 		var dow, upl, num uint64
@@ -338,9 +344,9 @@ func list() {
 			num++
 		}
 
-		table = append(table, []string{hex.EncodeToString(t.BagID), t.Info.Description.Value,
-			storage.ToSz(downloaded), storage.ToSz(full), fmt.Sprint(num),
-			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(downloaded == full)})
+		table = append(table, []string{hex.EncodeToString(t.BagID), description,
+			strDownloaded, strFull, fmt.Sprint(num),
+			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed)})
 	}
 
 	if len(table) > 1 {
