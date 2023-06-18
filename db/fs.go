@@ -74,13 +74,13 @@ func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, 
 			return "", "", nil, err
 		}
 
-		base := filepath.Base(path)
-		if strings.HasPrefix(base, ".") || strings.HasPrefix(base, "/") {
-			// fallback to virtual name
-			base = "data"
+		dir := filepath.Base(path) + "/"
+		if strings.HasPrefix(dir, ".") || strings.HasPrefix(dir, "/") {
+			// fallback to empty name
+			dir = ""
 		}
 
-		return filepath.Dir(path), base + "/", files, nil
+		return filepath.Dir(path), dir, files, nil
 	}
 
 	file, err := s.GetSingleFileRef(path)
@@ -88,7 +88,7 @@ func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, 
 		return "", "", nil, err
 	}
 
-	return filepath.Dir(path), "data/", []storage.FileRef{file}, nil
+	return filepath.Dir(path), "", []storage.FileRef{file}, nil
 }
 
 func (s *Storage) GetSingleFileRef(path string) (storage.FileRef, error) {

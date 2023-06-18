@@ -38,6 +38,10 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 
+	if dirName == "/" {
+		dirName = ""
+	}
+
 	if err := validateFileName(dirName, false); err != nil {
 		return nil, err
 	}
