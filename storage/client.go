@@ -325,7 +325,7 @@ func (s *storagePeer) pinger(srv *Server) {
 	fails := 0
 	for {
 		wait := 250 * time.Millisecond
-		if s.sessionId > 0 {
+		if s.sessionId != 0 {
 			wait = 7 * time.Second
 			// session should be initialised
 			var pong Pong
