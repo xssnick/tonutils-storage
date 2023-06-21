@@ -14,6 +14,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
+	"math/rand"
 	"reflect"
 	"sync"
 	"sync/atomic"
@@ -320,6 +321,7 @@ func (s *storagePeer) pinger(srv *Server) {
 
 	var lastPeersReq time.Time
 
+	startedAt := time.Now()
 	fails := 0
 	for {
 		wait := 250 * time.Millisecond
@@ -340,6 +342,13 @@ func (s *storagePeer) pinger(srv *Server) {
 				fails = 0
 				s.touch()
 			}
+		} else {
+			if time.Since(startedAt) > 30*time.Second {
+				sesId := rand.Int63()
+				atomic.StoreInt64(&s.sessionId, sesId)
+				atomic.StoreInt64(&s.sessionSeqno, 0)
+				Logger("[STORAGE] FORCE NEW SESSION WITH", hex.EncodeToString(s.nodeId), sesId)
+			}
 		}
 
 		if fails == 0 && time.Since(lastPeersReq) > 30*time.Second {
@@ -353,8 +362,11 @@ func (s *storagePeer) pinger(srv *Server) {
 					// add known nodes in case we will need them in future to scale
 					srv.addTorrentNode(&n, s.torrent)
 				}
-				lastPeersReq = time.Now()
+			} else {
+				Logger("[STORAGE] FAILED REQUEST NODES LIST OF PEER", hex.EncodeToString(s.nodeId),
+					"FOR", hex.EncodeToString(s.torrent.BagID), "ERR:", err.Error())
 			}
+			lastPeersReq = time.Now()
 		}
 
 		select {
