@@ -15,6 +15,7 @@ type piecePack struct {
 }
 
 type PreFetcher struct {
+	downloader TorrentDownloader
 	torrent    *Torrent
 	offset     int
 	pieces     map[uint32]*piecePack
@@ -35,12 +36,13 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), downloaded uint64, threads, prefetch int, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, downloader TorrentDownloader, report func(Event), downloaded uint64, threads, prefetch int, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
 
 	ff := &PreFetcher{
+		downloader: downloader,
 		torrent:    torrent,
 		report:     report,
 		piecesList: pieces,
@@ -55,7 +57,7 @@ func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), do
 		go ff.worker()
 	}
 
-	go ff.speedometer()
+	// go ff.speedometer()
 
 	for _, piece := range pieces {
 		// mark pieces as existing
@@ -127,7 +129,7 @@ func (f *PreFetcher) worker() {
 		}
 
 		for {
-			data, proof, _, _, err := f.torrent.downloader.DownloadPieceDetailed(f.ctx, task)
+			data, proof, _, _, err := f.downloader.DownloadPieceDetailed(f.ctx, task)
 			if err == nil {
 				f.mx.Lock()
 				f.pieces[task] = &piecePack{
@@ -150,40 +152,6 @@ func (f *PreFetcher) worker() {
 				pterm.Warning.Println("Piece", task, "download error (", err.Error(), "), will retry in 300ms")
 			}
 		}
-	}
-}
-
-func (f *PreFetcher) speedometer() {
-	first := f.downloaded
-	next := first
-	calcFrom := time.Now()
-	for {
-		select {
-		case <-f.ctx.Done():
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
-
-		downloaded := (atomic.LoadUint64(&f.downloaded) - first) * uint64(f.torrent.Info.PieceSize)
-
-		period := uint64(time.Since(calcFrom) / (1000 * time.Millisecond))
-		if period == 0 {
-			period = 1
-		}
-
-		if time.Since(calcFrom) > 20*time.Second {
-			first = next
-			calcFrom = time.Now() //.Add(-5 * time.Second)
-		} else if time.Since(calcFrom) >= 10*time.Second {
-			next = atomic.LoadUint64(&f.downloaded)
-		}
-
-		f.speed = downloaded / period
-
-		f.report(Event{Name: EventProgress, Value: Progress{
-			Downloaded: ToSz(atomic.LoadUint64(&f.downloaded) * uint64(f.torrent.Info.PieceSize)),
-			Speed:      ToSpeed(f.speed),
-		}})
 	}
 }
 
