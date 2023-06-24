@@ -172,7 +172,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, report, downloaded, 24, 200, pieces)
+				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 24, 200, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -187,7 +187,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 				left := len(pieces)
 				ready := make(chan uint32, 200)
-				fetch := NewPreFetcher(ctx, t, func(event Event) {
+				fetch := NewPreFetcher(ctx, t, t.downloader, func(event Event) {
 					if event.Name == EventPieceDownloaded {
 						ready <- event.Value.(uint32)
 					}
