@@ -21,7 +21,9 @@ import (
 	"math/bits"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 var (
@@ -30,6 +32,7 @@ var (
 	CredentialsPassword = flag.String("api-password", "", "HTTP API credentials password")
 	DBPath              = flag.String("db", "tonutils-storage-db", "Path to db folder")
 	Verbosity           = flag.Int("debug", 0, "Debug logs")
+	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
 )
 
 var GitCommit string
@@ -43,6 +46,10 @@ func main() {
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
+
+	if *Verbosity > 3 {
+		*Verbosity = 3
+	}
 
 	switch *Verbosity {
 	case 3:
@@ -173,52 +180,65 @@ func main() {
 		pterm.Success.Println("Storage HTTP API on", *API)
 	}
 
-	list()
-
-	for {
-		cmd, err := pterm.DefaultInteractiveTextInput.Show("Command:")
-		if err != nil {
-			panic(err)
-		}
-
-		parts := strings.Split(cmd, " ")
-		if len(parts) == 0 {
-			continue
-		}
-
-		switch parts[0] {
-		case "download":
-			if len(parts) < 2 {
-				pterm.Error.Println("Usage: download [bag_id]")
-				continue
-			}
-			download(parts[1])
-		case "create":
-			if len(parts) < 3 {
-				pterm.Error.Println("Usage: create [path] [description]")
-				continue
-			}
-			create(parts[1], parts[2])
-		case "remove":
-			if len(parts) < 3 {
-				pterm.Error.Println("Usage: remove [bag_id] [with files? (true/false)]")
-				continue
-			}
-			remove(parts[1], strings.ToLower(parts[2]) == "true")
-		case "list":
+	if !*IsDaemon {
+		go func() {
 			list()
-		default:
-			fallthrough
-		case "help":
-			pterm.Info.Println("Commands:\n"+
-				"create [path] [description]\n",
-				"download [bag_id]\n",
-				"remove [bag_id] [with files? (true/false)]\n",
-				"list\n",
-				"help\n",
-			)
-		}
+
+			for {
+				cmd, err := pterm.DefaultInteractiveTextInput.Show("Command:")
+				if err != nil {
+					panic(err)
+				}
+
+				parts := strings.Split(cmd, " ")
+				if len(parts) == 0 {
+					continue
+				}
+
+				switch parts[0] {
+				case "download":
+					if len(parts) < 2 {
+						pterm.Error.Println("Usage: download [bag_id]")
+						continue
+					}
+					download(parts[1])
+				case "create":
+					if len(parts) < 3 {
+						pterm.Error.Println("Usage: create [path] [description]")
+						continue
+					}
+					create(parts[1], parts[2])
+				case "remove":
+					if len(parts) < 3 {
+						pterm.Error.Println("Usage: remove [bag_id] [with files? (true/false)]")
+						continue
+					}
+					remove(parts[1], strings.ToLower(parts[2]) == "true")
+				case "list":
+					list()
+				default:
+					fallthrough
+				case "help":
+					pterm.Info.Println("Commands:\n"+
+						"create [path] [description]\n",
+						"download [bag_id]\n",
+						"remove [bag_id] [with files? (true/false)]\n",
+						"list\n",
+						"help\n",
+					)
+				}
+			}
+		}()
 	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig,
+		syscall.SIGHUP,
+		syscall.SIGINT,
+		syscall.SIGTERM,
+		syscall.SIGQUIT)
+
+	<-sig
 }
 
 func download(bagId string) {
