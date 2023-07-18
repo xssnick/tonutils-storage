@@ -31,6 +31,7 @@ type FSFile interface {
 	io.ReaderAt
 	io.WriterAt
 	io.Closer
+	Sync() error
 }
 
 type FS interface {
@@ -96,8 +97,10 @@ type Torrent struct {
 
 	pieceMask []byte
 
-	mx           sync.Mutex
-	stopDownload func()
+	mx sync.Mutex
+
+	currentDownloadFlag *bool
+	stopDownload        func()
 }
 
 var fs = NewFSController()
@@ -187,7 +190,13 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
 
-	return t.startDownload(func(event Event) {})
+	currFlag := t.currentDownloadFlag
+	currPause := t.pause
+	return t.startDownload(func(event Event) {
+		if event.Name == EventErr && currFlag == t.currentDownloadFlag {
+			currPause()
+		}
+	})
 }
 
 func (t *Torrent) PiecesNum() uint32 {
@@ -243,7 +252,13 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 
 	t.downloadAll = false
 	t.activeFiles = ids
-	return t.startDownload(func(event Event) {})
+	currFlag := t.currentDownloadFlag
+	currPause := t.pause
+	return t.startDownload(func(event Event) {
+		if event.Name == EventErr && currFlag == t.currentDownloadFlag {
+			currPause()
+		}
+	})
 }
 
 func (t *Torrent) SetActiveFiles(names []string) error {

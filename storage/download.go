@@ -69,6 +69,10 @@ func (t *Torrent) startDownload(report func(Event)) error {
 		return fmt.Errorf("bag is not set")
 	}
 
+	// we use flag pointer to know is download was replaced
+	var flag = false
+	t.currentDownloadFlag = &flag
+
 	stop := t.stopDownload
 	if stop != nil {
 		// stop current download
@@ -195,6 +199,15 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				}, downloaded, 24, 200, pieces)
 				defer fetch.Stop()
 
+				var currentFile FSFile
+				var currentFileId uint32
+
+				defer func() {
+					if currentFile != nil {
+						currentFile.Close()
+					}
+				}()
+
 				for i := 0; i < left; i++ {
 					select {
 					case e := <-ready:
@@ -221,11 +234,27 @@ func (t *Torrent) startDownload(report func(Event)) error {
 								}
 
 								err = func() error {
-									f, err := t.db.GetFS().Open(rootPath+"/"+file.Name, OpenModeWrite)
-									if err != nil {
-										return fmt.Errorf("failed to create file %s: %w", file.Name, err)
+									if currentFile == nil || currentFileId != file.Index {
+										if currentFile != nil {
+											currentFile.Close()
+										}
+
+										for x := 1; x <= 5; x++ {
+											// we retry because on Windows close file behaves
+											// like async, and it may throw that file still opened
+											currentFile, err = t.db.GetFS().Open(rootPath+"/"+file.Name, OpenModeWrite)
+											if err != nil {
+												Logger(fmt.Errorf("failed to create or open file %s: %w", file.Name, err).Error())
+												time.Sleep(time.Duration(x*50) * time.Millisecond)
+												continue
+											}
+											currentFileId = file.Index
+											break
+										}
+										if err != nil {
+											return fmt.Errorf("failed to create or open file %s: %w", file.Name, err)
+										}
 									}
-									defer f.Close()
 
 									notEmptyFile := file.FromPiece != file.ToPiece || file.FromPieceOffset != file.ToPieceOffset
 									if notEmptyFile {
@@ -242,13 +271,13 @@ func (t *Torrent) startDownload(report func(Event)) error {
 											data = data[file.FromPieceOffset:]
 										}
 
-										_, err = f.WriteAt(data, int64(fileOff))
+										_, err = currentFile.WriteAt(data, int64(fileOff))
 										if err != nil {
 											return fmt.Errorf("failed to write file %s: %w", file.Name, err)
 										}
 									}
 
-									return nil
+									return currentFile.Sync()
 								}()
 								if err != nil {
 									return err
