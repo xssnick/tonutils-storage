@@ -97,7 +97,8 @@ type Torrent struct {
 
 	pieceMask []byte
 
-	mx sync.Mutex
+	mx     sync.Mutex
+	maskMx sync.RWMutex
 
 	currentDownloadFlag *bool
 	stopDownload        func()
@@ -106,7 +107,9 @@ type Torrent struct {
 var fs = NewFSController()
 
 func (t *Torrent) InitMask() {
+	t.maskMx.Lock()
 	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
+	t.maskMx.Unlock()
 }
 
 func (t *Torrent) GetConnector() NetConnector {
@@ -212,20 +215,29 @@ func (t *Torrent) getPiece(id uint32) (*PieceInfo, error) {
 }
 
 func (t *Torrent) removePiece(id uint32) error {
+	t.maskMx.Lock()
 	i := id / 8
 	y := id % 8
 	t.pieceMask[i] &= ^(1 << y)
+	t.maskMx.Unlock()
+
 	return t.db.RemovePiece(t.BagID, id)
 }
 
 func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
+	t.maskMx.Lock()
 	i := id / 8
 	y := id % 8
 	t.pieceMask[i] |= 1 << y
+	t.maskMx.Unlock()
+
 	return t.db.SetPiece(t.BagID, id, p)
 }
 
 func (t *Torrent) PiecesMask() []byte {
+	t.maskMx.RLock()
+	defer t.maskMx.RUnlock()
+
 	return t.pieceMask
 }
 
