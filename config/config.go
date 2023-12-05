@@ -117,10 +117,15 @@ func LoadConfig(dir string) (*db.Config, error) {
 		}
 
 		cfg := &db.Config{
-			Key:           priv,
-			ListenAddr:    "0.0.0.0:17555",
-			ExternalIP:    "",
-			DownloadsPath: "./downloads/",
+			NetworkConfigUrl:       "https://ton.org/global.config.json",
+			WalletPrivateKey:       nil,
+			PaymentNodeKey:         nil,
+			PricePerUploadedByte:   0,
+			PricePerDownloadedByte: 0,
+			Key:                    priv,
+			ListenAddr:             "0.0.0.0:17555",
+			ExternalIP:             "",
+			DownloadsPath:          "./downloads/",
 		}
 
 		ip, seed := checkCanSeed()
@@ -145,6 +150,11 @@ func LoadConfig(dir string) (*db.Config, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		if cfg.NetworkConfigUrl == "" {
+			cfg.NetworkConfigUrl = "https://ton.org/global.config.json"
+		}
+
 		return &cfg, nil
 	}
 

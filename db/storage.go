@@ -19,6 +19,12 @@ import (
 )
 
 type Config struct {
+	NetworkConfigUrl       string
+	WalletPrivateKey       []byte
+	PaymentNodeKey         ed25519.PublicKey
+	PricePerUploadedByte   uint64
+	PricePerDownloadedByte uint64
+
 	Key           ed25519.PrivateKey
 	ListenAddr    string
 	ExternalIP    string
@@ -228,6 +234,10 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 				continue
 			}*/
 			_ = t.LoadActiveFilesIDs()
+
+			if err = t.LoadStats(); err != nil {
+				return fmt.Errorf("failed to load %s stats from db: %w", hex.EncodeToString(iter.Key()[5:]), err)
+			}
 		}
 
 		if tr.ActiveDownload {

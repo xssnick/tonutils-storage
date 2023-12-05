@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/pterm/pterm"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"math/big"
 	"math/rand"
 	"sort"
 	"sync"
@@ -31,14 +33,17 @@ type Server struct {
 	bootstrapped map[string]*PeerConnection
 	mx           sync.RWMutex
 
+	ps *PaymentEngine
+
 	closer func()
 }
 
-func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode, seedMode bool) *Server {
+func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode, seedMode bool, ps *PaymentEngine) *Server {
 	s := &Server{
 		key:          key,
 		dht:          dht,
 		gate:         gate,
+		ps:           ps,
 		bootstrapped: map[string]*PeerConnection{},
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
@@ -112,6 +117,9 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 }
 
 func (s *Server) SetStorage(store Storage) {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
 	s.store = store
 }
 
@@ -277,9 +285,42 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			if err != nil {
 				return err
 			}
+		case GetPieceV2:
+			pc, err := t.GetPiece(uint32(q.PieceID))
+			if err != nil {
+				return err
+			}
+
+			if s.ps != nil && s.ps.uploadPricePerByte.Sign() > 0 {
+				if q.Payment == nil {
+					return fmt.Errorf("no payment received")
+				}
+
+				var payment payments.Payment
+				if err = tlb.LoadFromCell(&payment, q.Payment.BeginParse()); err != nil {
+					return fmt.Errorf("failed to parse payment: %w", err)
+				}
+
+				amount := new(big.Int).Mul(big.NewInt(int64(len(pc.Data))), s.ps.uploadPricePerByte)
+				if err = s.ps.Charge(ctx, amount, payment.Key, payment.State); err != nil {
+					return fmt.Errorf("failed to parse payment: %w", err)
+				}
+				_ = t.addEarned(amount)
+			}
+
+			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, pc)
+			if err != nil {
+				return err
+			}
+
+			t.UpdateUploadedPeer(stPeer, uint64(len(pc.Data)))
 		case GetPiece:
 			if !isUpl {
 				return fmt.Errorf("bag is not for upload")
+			}
+
+			if s.ps != nil && s.ps.uploadPricePerByte.Sign() > 0 {
+				return fmt.Errorf("this is paid bag")
 			}
 
 			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
@@ -367,6 +408,33 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 						return err
 					}
 				}
+			}
+		case GetTorrentInfoV2:
+			if !isUpl {
+				return fmt.Errorf("bag is not for upload")
+			}
+
+			c, err := tlb.ToCell(t.Info)
+			if err != nil {
+				return err
+			}
+
+			var pricePerByte uint64 = 0
+			var channelKey []byte
+			if s.ps != nil {
+				pricePerByte = s.ps.uploadPricePerByte.Uint64()
+				channelKey = s.ps.wallet.PrivateKey().Public().(ed25519.PublicKey)
+			} else {
+				channelKey = make([]byte, 32)
+			}
+
+			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, TorrentInfoContainerV2{
+				Data:         c.ToBOC(),
+				ChannelKey:   channelKey,
+				PricePerByte: pricePerByte,
+			})
+			if err != nil {
+				return err
 			}
 		case GetTorrentInfo:
 			if !isUpl {
@@ -617,20 +685,32 @@ func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, n
 }
 
 func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
-	if t.Info == nil {
-		tm := time.Now()
-		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+	tm := time.Now()
+	Logger("[STORAGE] REQUESTING TORRENT INFO V2 FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 
-		var res TorrentInfoContainer
-		infCtx, cancel := context.WithTimeout(s.globalCtx, 20*time.Second)
-		err := s.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(s.overlay, &GetTorrentInfo{}), &res)
+	var res TorrentInfoContainer
+	var resV2 TorrentInfoContainerV2
+
+	infCtx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
+	err := s.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(s.overlay, &GetTorrentInfoV2{}), &resV2)
+	cancel()
+	if err != nil {
+		Logger("[STORAGE] FALLBACK, REQUESTING TORRENT INFO V1 FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+
+		infCtx, cancel = context.WithTimeout(s.globalCtx, 7*time.Second)
+		err = s.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(s.overlay, &GetTorrentInfo{}), &res)
 		cancel()
 		if err != nil {
 			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 			return err
 		}
-		Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+	} else {
+		s.supportsV2 = true
+		res.Data = resV2.Data
+	}
+	Logger("[STORAGE] GOT TORRENT INFO TOOK", time.Since(tm).String(), "FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
 
+	if t.Info == nil {
 		cl, err := cell.FromBOC(res.Data)
 		if err != nil {
 			return fmt.Errorf("failed to parse torrent info boc: %w", err)
@@ -663,6 +743,36 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 		t.Info = &info
 		t.mx.Unlock()
 	}
+
+	if resV2.PricePerByte > 0 {
+		capacity := new(big.Int).Mul(new(big.Int).SetUint64(t.Info.FileSize), new(big.Int).SetUint64(resV2.PricePerByte))
+
+		if resV2.PricePerByte > s.ps.downloadMaxPricePerByte.Uint64() {
+			err = fmt.Errorf("too high price per byte %d, max allowed %s", resV2.PricePerByte, s.ps.downloadMaxPricePerByte.String())
+			Logger("[PAYMENTS] FAILED TO OPEN VIRTUAL CHANNEL:", err.Error(), ", FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+			return err
+		}
+
+		s.vpc = &virtualPaymentChannel{
+			// increase planned capacity by 10% in case of network issues
+			capacity:     new(big.Int).Add(capacity, new(big.Int).Div(capacity, big.NewInt(10))),
+			used:         big.NewInt(0),
+			pricePerByte: new(big.Int).SetUint64(resV2.PricePerByte),
+		}
+
+		var fee *big.Int
+		tmPc := time.Now()
+		s.vpc.key, fee, err = s.ps.OpenVirtualChannel(context.Background(), s.vpc.capacity, resV2.ChannelKey)
+		if err != nil {
+			Logger("[PAYMENTS] FAILED TO OPEN VIRTUAL CHANNEL:", err.Error(), ", CAPACITY", tlb.FromNanoTON(s.vpc.capacity).String(), "TON", ", FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+			err = fmt.Errorf("failed to open virtual channel: %w", err)
+			return err
+		}
+		_ = s.torrent.addPaid(fee)
+
+		Logger("[PAYMENTS] OPENED VIRTUAL CHANNEL, TOOK", time.Since(tmPc).String(), "FROM", hex.EncodeToString(s.nodeId), s.nodeAddr, "FOR", hex.EncodeToString(t.BagID))
+	}
+
 	return nil
 }
 
@@ -717,6 +827,7 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv
 
 	stNode := &storagePeer{
 		torrent:    t,
+		ps:         srv.ps,
 		nodeAddr:   conn.adnl.RemoteAddr(),
 		nodeId:     conn.adnl.GetID(),
 		conn:       conn,

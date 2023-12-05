@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
@@ -14,6 +15,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
+	"math/big"
 	"math/rand"
 	"reflect"
 	"sync"
@@ -76,6 +78,13 @@ type pieceRequest struct {
 	result chan<- pieceResponse
 }
 
+type virtualPaymentChannel struct {
+	pricePerByte *big.Int
+	capacity     *big.Int
+	used         *big.Int
+	key          ed25519.PrivateKey
+}
+
 type storagePeer struct {
 	torrent      *Torrent
 	nodeAddr     string
@@ -84,6 +93,10 @@ type storagePeer struct {
 	sessionId    int64
 	sessionSeqno int64
 	conn         *PeerConnection
+
+	ps         *PaymentEngine
+	vpc        *virtualPaymentChannel
+	supportsV2 bool
 
 	lastSentPieces []byte
 	hasPieces      map[uint32]bool
@@ -408,8 +421,52 @@ func (s *storagePeer) loop() {
 		untrusted := false
 		var piece Piece
 		resp.err = func() error {
+			var reqData any
+			if s.supportsV2 {
+				pc := &GetPieceV2{
+					PieceID: req.index,
+					Payment: nil,
+				}
+
+				if s.vpc != nil {
+					s.piecesMx.Lock()
+					amount := new(big.Int).Mul(big.NewInt(int64(s.torrent.Info.PieceSize)), s.vpc.pricePerByte)
+					newUsed := new(big.Int).Add(s.vpc.used, amount)
+
+					if newUsed.Cmp(s.vpc.capacity) == 1 {
+						s.piecesMx.Unlock()
+						// TODO: open new channel in case of overflow and continue
+						return fmt.Errorf("failed to build payment for piece %d. err: channel capacity is over", req.index)
+					}
+
+					pm := payments.VirtualChannelState{
+						Amount: tlb.FromNanoTON(newUsed),
+					}
+					pm.Sign(s.vpc.key)
+					// println("AMT", len(pm.Signature), tlb.FromNanoTON(newUsed).String(), "/", tlb.FromNanoTON(s.vpc.capacity).String(), tlb.FromNanoTON(amount).String())
+
+					var err error
+					if pc.Payment, err = tlb.ToCell(payments.Payment{
+						Key:   s.vpc.key.Public().(ed25519.PublicKey),
+						State: pm,
+					}); err != nil {
+						s.piecesMx.Unlock()
+						return fmt.Errorf("failed to build payment for piece %d. err: %w", req.index, err)
+					}
+
+					s.vpc.used = newUsed
+					s.piecesMx.Unlock()
+
+					_ = s.torrent.addPaid(amount)
+					// TODO: check success rate and drop peer if low
+				}
+				reqData = pc
+			} else {
+				reqData = &GetPiece{req.index}
+			}
+
 			reqCtx, cancel := context.WithTimeout(req.ctx, 7*time.Second)
-			err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{req.index}), &piece)
+			err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, reqData), &piece)
 			cancel()
 			if err != nil {
 				return fmt.Errorf("failed to query piece %d. err: %w", req.index, err)

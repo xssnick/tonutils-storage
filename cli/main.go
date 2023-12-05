@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -13,6 +14,9 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
+	"github.com/xssnick/tonutils-go/tlb"
+	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-storage/api"
 	"github.com/xssnick/tonutils-storage/config"
 	"github.com/xssnick/tonutils-storage/db"
@@ -96,7 +100,7 @@ func main() {
 		}
 	}
 
-	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
+	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), cfg.NetworkConfigUrl)
 	if err != nil {
 		pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
 		lsCfg = &liteclient.GlobalConfig{}
@@ -142,7 +146,43 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, true)
+	var pe *storage.PaymentEngine
+	if cfg.WalletPrivateKey != nil && cfg.PaymentNodeKey != nil {
+		paymentGate := adnl.NewGateway(cfg.Key)
+		if err = paymentGate.StartClient(); err != nil {
+			pterm.Error.Println("Failed to init payment gateway:", err.Error())
+			os.Exit(1)
+		}
+
+		lsClient := liteclient.NewConnectionPool()
+		// connect to mainnet lite servers
+		if err = lsClient.AddConnectionsFromConfig(context.Background(), lsCfg); err != nil {
+			log.Fatalln("connection err: ", err.Error())
+			return
+		}
+
+		// initialize ton api lite connection wrapper
+		lsApi := ton.NewAPIClient(lsClient, ton.ProofCheckPolicyFast).WithRetry()
+		wKey := ed25519.NewKeyFromSeed(cfg.WalletPrivateKey)
+
+		wl, err := wallet.FromPrivateKey(lsApi, wKey, wallet.V4R2)
+		if err != nil {
+			pterm.Error.Println("Failed to init wallet:", err.Error())
+			os.Exit(1)
+		}
+		pterm.Info.Println("Initialized wallet, address:", pterm.Cyan(wl.WalletAddress().String()))
+
+		pe, err = storage.NewPaymentService(lsApi, paymentGate, dhtClient, wl, cfg.PaymentNodeKey, tlb.MustFromTON("0.01").Nano())
+		if err != nil {
+			pterm.Error.Println("Failed to init payment engine:", err.Error())
+			os.Exit(1)
+		}
+		pe.SetPricePerByte(cfg.PricePerUploadedByte, cfg.PricePerDownloadedByte)
+
+		pterm.Success.Println("Payment engine has been initialized. Connected with payment node", pterm.LightGreen(hex.EncodeToString(cfg.PaymentNodeKey)))
+	}
+
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, true, pe)
 	Connector = storage.NewConnector(srv)
 
 	Storage, err = db.NewStorage(ldb, Connector, true)
@@ -330,7 +370,7 @@ func create(path, name string) {
 
 func list() {
 	var table = pterm.TableData{
-		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed"},
+		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed", "Earned", "Paid"},
 	}
 
 	for _, t := range Storage.GetAll() {
@@ -364,9 +404,11 @@ func list() {
 			num++
 		}
 
+		stats := t.GetStats()
 		table = append(table, []string{hex.EncodeToString(t.BagID), description,
 			strDownloaded, strFull, fmt.Sprint(num),
-			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed)})
+			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed),
+			tlb.FromNanoTON(stats.Earned).String(), tlb.FromNanoTON(stats.Paid).String()})
 	}
 
 	if len(table) > 1 {

@@ -3,8 +3,11 @@ package db
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-storage/storage"
+	"math/big"
 )
 
 func (s *Storage) SetActiveFiles(bagId []byte, ids []uint32) error {
@@ -119,4 +122,51 @@ func (s *Storage) PiecesMask(bagId []byte, num uint32) []byte {
 		mask[id/8] |= 1 << (id % 8)
 	}
 	return mask
+}
+
+func (s *Storage) UpdateStats(bagId []byte, stats *storage.TorrentStats) error {
+	if len(bagId) != 32 {
+		panic("invalid bag id len, should be 32")
+	}
+
+	k := make([]byte, 3+32)
+	copy(k, "st:")
+	copy(k[3:3+32], bagId)
+
+	e := stats.Earned.Bytes()
+	p := stats.Paid.Bytes()
+
+	v := make([]byte, 2+len(e)+len(p))
+	v[0] = byte(len(e))
+	copy(v[1:], e)
+	v[1+len(e)] = byte(len(p))
+	copy(v[2+len(e):], p)
+
+	return s.db.Put(k, v, nil)
+}
+
+func (s *Storage) LoadStats(bagId []byte) (*storage.TorrentStats, error) {
+	if len(bagId) != 32 {
+		panic("invalid bag id len, should be 32")
+	}
+
+	k := make([]byte, 3+32)
+	copy(k, "st:")
+	copy(k[3:3+32], bagId)
+
+	v, err := s.db.Get(k, nil)
+	if err != nil {
+		if errors.Is(err, leveldb.ErrNotFound) {
+			return &storage.TorrentStats{
+				Paid:   big.NewInt(0),
+				Earned: big.NewInt(0),
+			}, nil
+		}
+		return nil, err
+	}
+
+	return &storage.TorrentStats{
+		Earned: new(big.Int).SetBytes(v[1 : 1+v[0]]),
+		Paid:   new(big.Int).SetBytes(v[1+v[0] : 2+v[0]+v[1+v[0]]]),
+	}, nil
 }

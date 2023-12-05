@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
 func init() {
@@ -28,6 +29,10 @@ func init() {
 		"name_index:(files_count * [uint64]) data_index:(files_count * [uint64]) "+
 		"names:(file_names_size * [uint8]) data:(tot_data_size * [uint8]) "+
 		"= TorrentHeader")
+
+	tl.Register(TorrentInfoContainerV2{}, "storage.torrentInfoV2 data:bytes price_per_byte:long = storage.TorrentInfo")
+	tl.Register(GetTorrentInfoV2{}, "storage.getTorrentInfoV2 = storage.TorrentInfo")
+	tl.Register(GetPieceV2{}, "storage.getPieceV2 piece_id:int payment:bytes = storage.Piece")
 }
 
 type AddUpdate struct {
@@ -40,7 +45,15 @@ type TorrentInfoContainer struct {
 	Data []byte `tl:"bytes"`
 }
 
+type TorrentInfoContainerV2 struct {
+	Data         []byte `tl:"bytes"`
+	ChannelKey   []byte `tl:"int256"`
+	PricePerByte uint64 `tl:"long"`
+}
+
 type GetTorrentInfo struct{}
+
+type GetTorrentInfoV2 struct{}
 
 type Piece struct {
 	Proof []byte `tl:"bytes"`
@@ -49,6 +62,16 @@ type Piece struct {
 
 type GetPiece struct {
 	PieceID int32 `tl:"int"`
+}
+
+type GetPieceV2 struct {
+	PieceID int32      `tl:"int"`
+	Payment *cell.Cell `tl:"cell optional"`
+}
+
+type ProcessingError struct {
+	Code int32  `tl:"int"`
+	Text string `tl:"string"`
 }
 
 type Ping struct {

@@ -6,6 +6,7 @@ import (
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
+	"math/big"
 	"sync"
 	"time"
 )
@@ -55,6 +56,9 @@ type Storage interface {
 	RemovePiece(bagId []byte, id uint32) error
 	SetPiece(bagId []byte, id uint32, p *PieceInfo) error
 	PiecesMask(bagId []byte, num uint32) []byte
+
+	UpdateStats(bagId []byte, stats *TorrentStats) error
+	LoadStats(bagId []byte) (*TorrentStats, error)
 }
 
 type NetConnector interface {
@@ -68,6 +72,13 @@ type NetConnector interface {
 	TorrentServer
 }
 
+type TorrentStats struct {
+	Paid   *big.Int
+	Earned *big.Int
+
+	mx sync.RWMutex
+}
+
 type Torrent struct {
 	BagID     []byte
 	Path      string
@@ -79,6 +90,7 @@ type Torrent struct {
 	activeUpload    bool
 	downloadAll     bool
 	downloadOrdered bool
+	stats           TorrentStats
 
 	connector  NetConnector
 	downloader TorrentDownloader
@@ -110,6 +122,21 @@ func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
 	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
 	t.maskMx.Unlock()
+}
+
+func (t *Torrent) LoadStats() error {
+	t.stats.mx.Lock()
+	defer t.stats.mx.Unlock()
+
+	stats, err := t.db.LoadStats(t.BagID)
+	if err != nil {
+		return err
+	}
+
+	t.stats.Earned = stats.Earned
+	t.stats.Paid = stats.Paid
+
+	return nil
 }
 
 func (t *Torrent) GetConnector() NetConnector {
@@ -145,6 +172,10 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 		knownNodes: map[string]*overlay.Node{},
 		db:         db,
 		connector:  connector,
+		stats: TorrentStats{
+			Paid:   big.NewInt(0),
+			Earned: big.NewInt(0),
+		},
 	}
 
 	// create as stopped
@@ -232,6 +263,34 @@ func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
 	t.maskMx.Unlock()
 
 	return t.db.SetPiece(t.BagID, id, p)
+}
+
+func (t *Torrent) addEarned(amount *big.Int) error {
+	t.stats.mx.Lock()
+	defer t.stats.mx.Unlock()
+
+	t.stats.Earned = t.stats.Earned.Add(t.stats.Earned, amount)
+
+	return t.db.UpdateStats(t.BagID, &t.stats)
+}
+
+func (t *Torrent) GetStats() *TorrentStats {
+	t.stats.mx.RLock()
+	defer t.stats.mx.RUnlock()
+
+	return &TorrentStats{
+		Paid:   new(big.Int).Set(t.stats.Paid),
+		Earned: new(big.Int).Set(t.stats.Earned),
+	}
+}
+
+func (t *Torrent) addPaid(amount *big.Int) error {
+	t.stats.mx.Lock()
+	defer t.stats.mx.Unlock()
+
+	t.stats.Paid = t.stats.Paid.Add(t.stats.Paid, amount)
+
+	return t.db.UpdateStats(t.BagID, &t.stats)
 }
 
 func (t *Torrent) PiecesMask() []byte {
