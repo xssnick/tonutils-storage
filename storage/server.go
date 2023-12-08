@@ -681,6 +681,8 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	var nodesDhtCont *dht.Continuation
 	var sameContTries int
 	for {
+		wait := 5
+
 		sameContTries++
 
 		var err error
@@ -695,7 +697,7 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 			case <-t.globalCtx.Done():
 				Logger("[STORAGE] DHT CONTEXT CANCEL", hex.EncodeToString(t.BagID))
 				return
-			case <-time.After(3 * time.Second):
+			case <-time.After(time.Duration(wait) * time.Second):
 				sameContTries = 0
 				nodesDhtCont = nil
 				Logger("[STORAGE] DHT RETRY", hex.EncodeToString(t.BagID))
@@ -708,14 +710,23 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 			s.addTorrentNode(&nodes.List[i], t)
 		}
 
-		wait := 5
-
 		t.peersMx.RLock()
-		if len(t.knownNodes) > 1 {
-			// found nodes, long sleep
-			wait = 180
-		}
+		peersNum := len(t.peers)
 		t.peersMx.RUnlock()
+
+		if peersNum > 0 {
+			// found nodes, long sleep
+			wait = peersNum * 60
+			if wait > 300 {
+				wait = 300
+			}
+
+			sameContTries = 0
+			nodesDhtCont = nil
+		} else if sameContTries >= 3 {
+			sameContTries = 0
+			nodesDhtCont = nil
+		}
 
 		Logger("[STORAGE] OVERLAY CHECKED HAS NODES", len(nodes.List), hex.EncodeToString(t.BagID))
 
@@ -723,10 +734,6 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 		case <-t.globalCtx.Done():
 			return
 		case <-time.After(time.Duration(wait) * time.Second):
-			if sameContTries >= 3 {
-				sameContTries = 0
-				nodesDhtCont = nil
-			}
 		}
 	}
 }
