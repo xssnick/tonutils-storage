@@ -25,7 +25,3 @@ require (
 	golang.org/x/term v0.6.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
 )
-
-replace (
-	github.com/xssnick/tonutils-go v1.8.8-0.20231207120654-6860e0ce8447 => ../tonutils-go
-)
