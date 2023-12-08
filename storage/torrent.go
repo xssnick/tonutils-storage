@@ -286,8 +286,15 @@ func (t *Torrent) IsCompleted() bool {
 		return false
 	}
 
-	for _, b := range mask {
-		if bits.OnesCount8(b) != 8 {
+	for i, b := range mask {
+		ones := 8
+		if i == len(mask)-1 {
+			if ones = int(t.PiecesNum() % 8); ones == 0 {
+				ones = 8
+			}
+		}
+
+		if bits.OnesCount8(b) != ones {
 			return false
 		}
 	}
