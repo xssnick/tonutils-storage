@@ -29,7 +29,7 @@ type FileRef interface {
 	CreateReader() (io.ReadCloser, error)
 }
 
-func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef) (*Torrent, error) {
+func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("0 files in torrent")
 	}
@@ -50,6 +50,14 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	torrent.Header = &TorrentHeader{
 		DirNameSize: uint32(len(dirName)),
 		DirName:     []byte(dirName),
+	}
+
+	var maxProgress, doneProgress uint64
+	incProgress := func() {
+		doneProgress++
+		if progressCallback != nil {
+			progressCallback(doneProgress, maxProgress)
+		}
 	}
 
 	waiter, _ := pterm.DefaultSpinner.Start("Scanning files...")
@@ -103,6 +111,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 
 				cbOffset = 0
 				progress.Increment()
+				incProgress()
 			}
 		}
 
@@ -125,6 +134,8 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	if fullSz%pieceSize != 0 {
 		piecesNum++
 	}
+
+	maxProgress = piecesNum * 2
 
 	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating pieces...").Start()
 
@@ -163,6 +174,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		// save index of file where block starts
 		piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
 		progress.Increment()
+		incProgress()
 	}
 	_, _ = progress.Stop()
 
@@ -247,6 +259,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 			return nil, fmt.Errorf("failed to calc proof for piece: %w", err)
 		case toCalc <- &calcReq{id: uint32(i), startIndex: idx}:
 			progress.Increment()
+			incProgress()
 		}
 	}
 	close(toCalc)
