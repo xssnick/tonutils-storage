@@ -142,7 +142,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, true)
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
 	Connector = storage.NewConnector(srv)
 
 	Storage, err = db.NewStorage(ldb, Connector, true)
@@ -330,11 +330,11 @@ func create(path, name string) {
 
 func list() {
 	var table = pterm.TableData{
-		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed"},
+		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed", "Uploaded"},
 	}
 
 	for _, t := range Storage.GetAll() {
-		var strDownloaded, strFull, description = "0 Bytes", "???", "???"
+		var strDownloaded, uploaded, strFull, description = "0 Bytes", "0 Bytes", "???", "???"
 		completed := false
 		if t.Info != nil {
 			mask := t.PiecesMask()
@@ -355,6 +355,8 @@ func list() {
 			strDownloaded = storage.ToSz(downloaded)
 			strFull = storage.ToSz(full)
 			description = t.Info.Description.Value
+
+			uploaded = storage.ToSz(t.GetUploadStats())
 		}
 
 		var dow, upl, num uint64
@@ -366,7 +368,7 @@ func list() {
 
 		table = append(table, []string{hex.EncodeToString(t.BagID), description,
 			strDownloaded, strFull, fmt.Sprint(num),
-			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed)})
+			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed), uploaded})
 	}
 
 	if len(table) > 1 {

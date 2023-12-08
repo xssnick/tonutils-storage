@@ -308,8 +308,11 @@ func (s *storagePeer) Close() {
 func (s *storagePeer) touch() {
 	s.torrent.TouchPeer(s)
 	s.activateOnce.Do(func() {
-		for i := 0; i < 8; i++ {
-			go s.loop()
+		if !s.torrent.IsCompleted() {
+			for i := 0; i < 8; i++ {
+				go s.loop()
+			}
+			go s.pieceNotifier()
 		}
 	})
 }
@@ -326,7 +329,7 @@ func (s *storagePeer) pinger(srv *Server) {
 	for {
 		wait := 250 * time.Millisecond
 		if s.sessionId != 0 {
-			wait = 7 * time.Second
+			wait = 10 * time.Second
 			// session should be initialised
 			var pong Pong
 			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
@@ -351,7 +354,7 @@ func (s *storagePeer) pinger(srv *Server) {
 			}
 		}
 
-		if fails == 0 && time.Since(lastPeersReq) > 30*time.Second {
+		if fails == 0 && time.Since(lastPeersReq) > 20*time.Second {
 			Logger("[STORAGE] REQUESTING NODES LIST OF PEER", hex.EncodeToString(s.nodeId), "FOR", hex.EncodeToString(s.torrent.BagID))
 			var al overlay.NodesList
 			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
@@ -377,17 +380,74 @@ func (s *storagePeer) pinger(srv *Server) {
 	}
 }
 
+func (s *storagePeer) pieceNotifier() {
+	lastReported := 0
+	reportFails := 0
+	for {
+		select {
+		case <-s.globalCtx.Done():
+			return
+		case <-time.After(300 * time.Millisecond):
+		}
+
+		s.torrent.newPiecesCond.L.Lock()
+		for lastReported == s.torrent.DownloadedPiecesNum() {
+			s.torrent.newPiecesCond.Wait()
+
+			select {
+			case <-s.globalCtx.Done():
+				s.torrent.newPiecesCond.L.Unlock()
+				return
+			case <-s.torrent.completedCtx.Done():
+				if lastReported == s.torrent.DownloadedPiecesNum() {
+					// download completed and all pieces reported
+					s.torrent.newPiecesCond.L.Unlock()
+					return
+				}
+			default:
+			}
+		}
+		s.torrent.newPiecesCond.L.Unlock()
+
+		Logger("[STORAGE] NOTIFYING HAVE PIECES FOR PEER:", hex.EncodeToString(s.nodeId))
+		ctx, cancel := context.WithTimeout(s.globalCtx, 5*time.Second)
+		err := s.updateHavePieces(ctx, s.torrent)
+		cancel()
+		if err != nil {
+			reportFails++
+			Logger("[STORAGE] NOTIFY HAVE PIECES ERR:", err.Error())
+
+			if reportFails > 3 {
+				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
+
+				s.Close()
+				return
+			}
+			continue
+		}
+
+		reportFails = 0
+		lastReported = s.torrent.DownloadedPiecesNum()
+	}
+}
+
 func (s *storagePeer) loop() {
+	returnNoClose := false
 	atomic.AddInt32(&s.loops, 1)
 	defer func() {
 		atomic.AddInt32(&s.loops, -1)
-		s.Close()
+		if !returnNoClose {
+			s.Close()
+		}
 	}()
 
 	for {
 		var req *pieceRequest
 		select {
 		case <-s.globalCtx.Done():
+			return
+		case <-s.torrent.completedCtx.Done():
+			returnNoClose = true
 			return
 		case req = <-s.pieceQueue:
 			select {

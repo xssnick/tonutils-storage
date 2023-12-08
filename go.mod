@@ -5,7 +5,7 @@ go 1.19
 require (
 	github.com/pterm/pterm v0.12.59
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.7.4-0.20230622063139-5549e796f8cd
+	github.com/xssnick/tonutils-go v1.8.8-0.20231207120654-6860e0ce8447
 )
 
 require (
@@ -24,4 +24,8 @@ require (
 	golang.org/x/sys v0.6.0 // indirect
 	golang.org/x/term v0.6.0 // indirect
 	golang.org/x/text v0.9.0 // indirect
+)
+
+replace (
+	github.com/xssnick/tonutils-go v1.8.8-0.20231207120654-6860e0ce8447 => ../tonutils-go
 )
