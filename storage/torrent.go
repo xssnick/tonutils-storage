@@ -161,6 +161,7 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 
 	// create as stopped
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
+	t.completedCtx, t.complete = context.WithCancel(context.Background())
 	t.pause()
 
 	return t
