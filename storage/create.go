@@ -89,6 +89,12 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 
 	process := func(name string, isHeader bool, rd io.Reader, progress *pterm.ProgressbarPrinter) error {
 		for {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			if cbOffset == 0 {
 				pieceStartFileIndex = filesProcessed
 			}
@@ -111,7 +117,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 
 				cbOffset = 0
 				progress.Increment()
-				incProgress(2)
+				incProgress(3)
 			}
 		}
 
@@ -135,7 +141,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		piecesNum++
 	}
 
-	maxProgress = piecesNum * 3
+	maxProgress = piecesNum * 4
 
 	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating pieces...").Start()
 
@@ -174,7 +180,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		// save index of file where block starts
 		piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
 		progress.Increment()
-		incProgress(2)
+		incProgress(3)
 	}
 	_, _ = progress.Stop()
 
