@@ -33,6 +33,7 @@ var (
 	DBPath              = flag.String("db", "tonutils-storage-db", "Path to db folder")
 	Verbosity           = flag.Int("debug", 0, "Debug logs")
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
+	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 )
 
 var GitCommit string
@@ -96,13 +97,22 @@ func main() {
 		}
 	}
 
-	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
-	if err != nil {
-		pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
-		lsCfg = &liteclient.GlobalConfig{}
-		if err = json.NewDecoder(bytes.NewBufferString(config.FallbackNetworkConfig)).Decode(lsCfg); err != nil {
-			pterm.Error.Println("Failed to parse fallback ton config:", err.Error())
+	var lsCfg *liteclient.GlobalConfig
+	if *NetworkConfigPath != "" {
+		lsCfg, err = liteclient.GetConfigFromFile(*NetworkConfigPath)
+		if err != nil {
+			pterm.Error.Println("Failed to load ton network config from file:", err.Error())
 			os.Exit(1)
+		}
+	} else {
+		lsCfg, err = liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
+		if err != nil {
+			pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
+			lsCfg = &liteclient.GlobalConfig{}
+			if err = json.NewDecoder(bytes.NewBufferString(config.FallbackNetworkConfig)).Decode(lsCfg); err != nil {
+				pterm.Error.Println("Failed to parse fallback ton config:", err.Error())
+				os.Exit(1)
+			}
 		}
 	}
 

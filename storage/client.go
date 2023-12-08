@@ -309,7 +309,7 @@ func (s *storagePeer) touch() {
 	s.torrent.TouchPeer(s)
 	s.activateOnce.Do(func() {
 		if !s.torrent.IsCompleted() {
-			for i := 0; i < 8; i++ {
+			for i := 0; i < 20; i++ {
 				go s.loop()
 			}
 			go s.pieceNotifier()
@@ -447,6 +447,7 @@ func (s *storagePeer) loop() {
 		case <-s.globalCtx.Done():
 			return
 		case <-s.torrent.completedCtx.Done():
+			Logger("[STORAGE] DOWNLOAD COMPLETED, CLOSING LOOP", hex.EncodeToString(s.nodeId), s.nodeAddr)
 			returnNoClose = true
 			return
 		case req = <-s.pieceQueue:
