@@ -553,20 +553,18 @@ func (s *Server) addTorrentNode(node *overlay.Node, t *Torrent) {
 }
 
 func (s *Server) nodeConnector(adnlID []byte, t *Torrent, node *overlay.Node, attempt int) {
-	if t.GetPeer(adnlID) != nil {
-		return
-	}
-
 	onFail := func() {
 		select {
 		case <-t.globalCtx.Done():
 			t.peersMx.Lock()
 			delete(t.knownNodes, hex.EncodeToString(adnlID))
 			t.peersMx.Unlock()
+			Logger("[STORAGE] REMOVED PEER FROM KNOWN", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID))
 			return
 		case <-time.After(time.Duration(attempt*2) * time.Second):
 			// reconnect
 			go s.nodeConnector(adnlID, t, node, attempt+1)
+			Logger("[STORAGE] TRYING TO RECONNECT TO", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID))
 		}
 	}
 

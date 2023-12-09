@@ -102,7 +102,11 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 				buf: make([]uint64, 200),
 			},
 		}
-		t.peers[strId] = p
+
+		if peer.globalCtx.Err() == nil {
+			// add only if it is alive
+			t.peers[strId] = p
+		}
 	}
 	p.peer = peer
 	p.Addr = peer.nodeAddr
