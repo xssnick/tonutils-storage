@@ -59,7 +59,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 
 				Logger("[STORAGE_DHT] UPDATING OUR ADDRESS RECORD...")
 
-				ctx, cancel := context.WithTimeout(s.closeCtx, 100*time.Second)
+				ctx, cancel := context.WithTimeout(s.closeCtx, 180*time.Second)
 				err := s.updateDHT(ctx)
 				cancel()
 
@@ -431,7 +431,7 @@ func (s *storagePeer) updateHavePieces(ctx context.Context, t *Torrent) error {
 func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
-	ctxStore, cancel := context.WithTimeout(ctx, 80*time.Second)
+	ctxStore, cancel := context.WithTimeout(ctx, 90*time.Second)
 	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 10*time.Minute, s.key, 8)
 	cancel()
 	if err != nil && stored == 0 {
@@ -589,15 +589,16 @@ func (s *Server) nodeConnector(adnlID []byte, t *Torrent, node *overlay.Node, at
 func (s *Server) connectToNode(ctx context.Context, t *Torrent, adnlID []byte, node *overlay.Node) (*storagePeer, error) {
 	peer := s.GetPeerIfActive(adnlID)
 	if peer == nil {
-		lcCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		start := time.Now()
+		lcCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 		addrs, keyN, err := s.dht.FindAddresses(lcCtx, adnlID)
 		cancel()
 		if err != nil {
-			Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID))
+			Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID), "ERR", err.Error())
 			return nil, fmt.Errorf("failed to find node address: %w", err)
 		}
 
-		Logger("[STORAGE] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID))
+		Logger("[STORAGE] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), "FOR", hex.EncodeToString(t.BagID), "ELAPSED", time.Since(start).Seconds())
 
 		addr := addrs.Addresses[0].IP.String() + ":" + fmt.Sprint(addrs.Addresses[0].Port)
 
@@ -687,7 +688,7 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 		var nodes *overlay.NodesList
 		Logger("[STORAGE] SEARCHING PEERS FOR", hex.EncodeToString(t.BagID))
 
-		ctxFind, cancel := context.WithTimeout(t.globalCtx, time.Duration(45)*time.Second)
+		ctxFind, cancel := context.WithTimeout(t.globalCtx, time.Duration(60)*time.Second)
 		nodes, nodesDhtCont, err = s.dht.FindOverlayNodes(ctxFind, t.BagID, nodesDhtCont)
 		cancel()
 		if err != nil {
