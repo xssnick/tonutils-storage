@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/hex"
+	"sync/atomic"
 	"time"
 )
 
@@ -80,6 +81,8 @@ func (t *Torrent) ResetDownloadPeer(id []byte) {
 }
 
 func (t *Torrent) UpdateUploadedPeer(peer *storagePeer, bytes uint64) {
+	_ = t.db.UpdateUploadStats(t.BagID, atomic.AddUint64(&t.stats.Uploaded, bytes))
+
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
@@ -99,7 +102,11 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 				buf: make([]uint64, 200),
 			},
 		}
-		t.peers[strId] = p
+
+		if peer.globalCtx.Err() == nil {
+			// add only if it is alive
+			t.peers[strId] = p
+		}
 	}
 	p.peer = peer
 	p.Addr = peer.nodeAddr

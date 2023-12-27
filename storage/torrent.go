@@ -6,7 +6,9 @@ import (
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
+	"math/bits"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,6 +57,7 @@ type Storage interface {
 	RemovePiece(bagId []byte, id uint32) error
 	SetPiece(bagId []byte, id uint32, p *PieceInfo) error
 	PiecesMask(bagId []byte, num uint32) []byte
+	UpdateUploadStats(bagId []byte, val uint64) error
 }
 
 type NetConnector interface {
@@ -68,6 +71,10 @@ type NetConnector interface {
 	TorrentServer
 }
 
+type TorrentStats struct {
+	Uploaded uint64
+}
+
 type Torrent struct {
 	BagID     []byte
 	Path      string
@@ -79,6 +86,7 @@ type Torrent struct {
 	activeUpload    bool
 	downloadAll     bool
 	downloadOrdered bool
+	stats           TorrentStats
 
 	connector  NetConnector
 	downloader TorrentDownloader
@@ -90,14 +98,18 @@ type Torrent struct {
 	memCache map[uint32]*Piece
 	db       Storage
 
-	globalCtx context.Context
-	pause     func()
+	completedCtx context.Context
+	globalCtx    context.Context
+	pause        func()
+	complete     func()
 
 	filesIndex map[string]uint32
 
 	pieceMask []byte
 
-	mx sync.Mutex
+	mx            sync.Mutex
+	maskMx        sync.RWMutex
+	newPiecesCond *sync.Cond
 
 	currentDownloadFlag *bool
 	stopDownload        func()
@@ -106,7 +118,9 @@ type Torrent struct {
 var fs = NewFSController()
 
 func (t *Torrent) InitMask() {
+	t.maskMx.Lock()
 	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
+	t.maskMx.Unlock()
 }
 
 func (t *Torrent) GetConnector() NetConnector {
@@ -135,17 +149,19 @@ func (t *Torrent) BuildCache(cachePiecesNum int) error {
 
 func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t := &Torrent{
-		Path:       path,
-		CreatedAt:  time.Now(),
-		peers:      map[string]*PeerInfo{},
-		memCache:   map[uint32]*Piece{},
-		knownNodes: map[string]*overlay.Node{},
-		db:         db,
-		connector:  connector,
+		Path:          path,
+		CreatedAt:     time.Now(),
+		peers:         map[string]*PeerInfo{},
+		memCache:      map[uint32]*Piece{},
+		knownNodes:    map[string]*overlay.Node{},
+		db:            db,
+		connector:     connector,
+		newPiecesCond: sync.NewCond(&sync.Mutex{}),
 	}
 
 	// create as stopped
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
+	t.completedCtx, t.complete = context.WithCancel(context.Background())
 	t.pause()
 
 	return t
@@ -157,6 +173,14 @@ func (t *Torrent) IsDownloadAll() bool {
 
 func (t *Torrent) IsDownloadOrdered() bool {
 	return t.downloadOrdered
+}
+
+func (t *Torrent) GetUploadStats() uint64 {
+	return atomic.LoadUint64(&t.stats.Uploaded)
+}
+
+func (t *Torrent) SetUploadStats(val uint64) {
+	atomic.StoreUint64(&t.stats.Uploaded, val)
 }
 
 func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
@@ -187,8 +211,14 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
+	t.completedCtx, t.complete = context.WithCancel(context.Background())
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
+
+	if t.IsCompleted() {
+		t.complete()
+		return nil
+	}
 
 	currFlag := t.currentDownloadFlag
 	currPause := t.pause
@@ -214,19 +244,72 @@ func (t *Torrent) getPiece(id uint32) (*PieceInfo, error) {
 func (t *Torrent) removePiece(id uint32) error {
 	i := id / 8
 	y := id % 8
+
+	t.maskMx.Lock()
 	t.pieceMask[i] &= ^(1 << y)
+	t.maskMx.Unlock()
+
 	return t.db.RemovePiece(t.BagID, id)
 }
 
 func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
 	i := id / 8
 	y := id % 8
+
+	t.maskMx.Lock()
 	t.pieceMask[i] |= 1 << y
-	return t.db.SetPiece(t.BagID, id, p)
+	t.maskMx.Unlock()
+
+	if err := t.db.SetPiece(t.BagID, id, p); err != nil {
+		return err
+	}
+
+	// notify peers about our new pieces
+	t.newPiecesCond.Broadcast()
+
+	if t.IsCompleted() {
+		t.complete()
+	}
+
+	return nil
 }
 
 func (t *Torrent) PiecesMask() []byte {
-	return t.pieceMask
+	t.maskMx.RLock()
+	defer t.maskMx.RUnlock()
+
+	return append([]byte{}, t.pieceMask...)
+}
+
+func (t *Torrent) IsCompleted() bool {
+	mask := t.PiecesMask()
+	if len(mask) == 0 {
+		return false
+	}
+
+	for i, b := range mask {
+		ones := 8
+		if i == len(mask)-1 {
+			if ones = int(t.PiecesNum() % 8); ones == 0 {
+				ones = 8
+			}
+		}
+
+		if bits.OnesCount8(b) != ones {
+			return false
+		}
+	}
+	return true
+}
+
+func (t *Torrent) DownloadedPiecesNum() int {
+	mask := t.PiecesMask()
+
+	pieces := 0
+	for _, b := range mask {
+		pieces += bits.OnesCount8(b)
+	}
+	return pieces
 }
 
 func (t *Torrent) LoadActiveFilesIDs() error {
