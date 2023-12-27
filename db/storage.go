@@ -11,6 +11,7 @@ import (
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/storage"
 	"os"
 	"sort"
@@ -107,7 +108,7 @@ func (s *Storage) GetSpeedLimits() (download uint64, upload uint64, err error) {
 }
 
 func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
-	id, err := adnl.ToKeyID(adnl.PublicKeyOverlay{Key: t.BagID})
+	id, err := tl.Hash(adnl.PublicKeyOverlay{Key: t.BagID})
 	if err != nil {
 		return err
 	}
@@ -118,11 +119,11 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 
 	t.Stop()
 
-	k := make([]byte, 5+32)
-	copy(k, "bags:")
-	copy(k[5:], t.BagID)
+	b := &leveldb.Batch{}
+	b.Delete(append([]byte("bags:"), t.BagID...))
+	b.Delete(append([]byte("upl_stat:"), t.BagID...))
 
-	if err = s.db.Delete(k, nil); err != nil {
+	if err = s.db.Write(b, nil); err != nil {
 		return err
 	}
 
@@ -219,6 +220,11 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 		t.BagID = tr.BagID
 		t.CreatedAt = tr.CreatedAt
 
+		uplStat, err := s.db.Get(append([]byte("upl_stat:"), t.BagID...), nil)
+		if err != nil && !errors.Is(err, leveldb.ErrNotFound) {
+			return fmt.Errorf("failed to load upload stats of %s from db: %w", hex.EncodeToString(iter.Key()[5:]), err)
+		}
+
 		if t.Info != nil {
 			t.InitMask()
 			// cache header
@@ -228,6 +234,10 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 				continue
 			}*/
 			_ = t.LoadActiveFilesIDs()
+
+			if len(uplStat) == 8 {
+				t.SetUploadStats(binary.LittleEndian.Uint64(uplStat))
+			}
 		}
 
 		if tr.ActiveDownload {
@@ -245,5 +255,19 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 		}
 	}
 
+	return nil
+}
+
+func (s *Storage) UpdateUploadStats(bagId []byte, val uint64) error {
+	k := make([]byte, 9+32)
+	copy(k, "upl_stat:")
+	copy(k[9:], bagId)
+
+	data := make([]byte, 8)
+	binary.LittleEndian.PutUint64(data, val)
+
+	if err := s.db.Put(k, data, nil); err != nil {
+		return err
+	}
 	return nil
 }

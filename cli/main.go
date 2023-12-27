@@ -33,6 +33,7 @@ var (
 	DBPath              = flag.String("db", "tonutils-storage-db", "Path to db folder")
 	Verbosity           = flag.Int("debug", 0, "Debug logs")
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
+	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 )
 
 var GitCommit string
@@ -96,13 +97,22 @@ func main() {
 		}
 	}
 
-	lsCfg, err := liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
-	if err != nil {
-		pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
-		lsCfg = &liteclient.GlobalConfig{}
-		if err = json.NewDecoder(bytes.NewBufferString(config.FallbackNetworkConfig)).Decode(lsCfg); err != nil {
-			pterm.Error.Println("Failed to parse fallback ton config:", err.Error())
+	var lsCfg *liteclient.GlobalConfig
+	if *NetworkConfigPath != "" {
+		lsCfg, err = liteclient.GetConfigFromFile(*NetworkConfigPath)
+		if err != nil {
+			pterm.Error.Println("Failed to load ton network config from file:", err.Error())
 			os.Exit(1)
+		}
+	} else {
+		lsCfg, err = liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
+		if err != nil {
+			pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
+			lsCfg = &liteclient.GlobalConfig{}
+			if err = json.NewDecoder(bytes.NewBufferString(config.FallbackNetworkConfig)).Decode(lsCfg); err != nil {
+				pterm.Error.Println("Failed to parse fallback ton config:", err.Error())
+				os.Exit(1)
+			}
 		}
 	}
 
@@ -142,7 +152,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, true)
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
 	Connector = storage.NewConnector(srv)
 
 	Storage, err = db.NewStorage(ldb, Connector, true)
@@ -311,7 +321,7 @@ func create(path, name string) {
 		return
 	}
 
-	it, err := storage.CreateTorrent(context.Background(), rootPath, dirName, name, Storage, Connector, files)
+	it, err := storage.CreateTorrent(context.Background(), rootPath, dirName, name, Storage, Connector, files, nil)
 	if err != nil {
 		pterm.Error.Println("Failed to create bag:", err.Error())
 		return
@@ -330,11 +340,11 @@ func create(path, name string) {
 
 func list() {
 	var table = pterm.TableData{
-		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed"},
+		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed", "Uploaded"},
 	}
 
 	for _, t := range Storage.GetAll() {
-		var strDownloaded, strFull, description = "0 Bytes", "???", "???"
+		var strDownloaded, uploaded, strFull, description = "0 Bytes", "0 Bytes", "???", "???"
 		completed := false
 		if t.Info != nil {
 			mask := t.PiecesMask()
@@ -355,6 +365,8 @@ func list() {
 			strDownloaded = storage.ToSz(downloaded)
 			strFull = storage.ToSz(full)
 			description = t.Info.Description.Value
+
+			uploaded = storage.ToSz(t.GetUploadStats())
 		}
 
 		var dow, upl, num uint64
@@ -366,7 +378,7 @@ func list() {
 
 		table = append(table, []string{hex.EncodeToString(t.BagID), description,
 			strDownloaded, strFull, fmt.Sprint(num),
-			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed)})
+			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed), uploaded})
 	}
 
 	if len(table) > 1 {
