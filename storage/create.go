@@ -185,7 +185,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	_, _ = progress.Stop()
 
 	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
-	hashTree := buildMerkleTree(hashes)
+	hashTree := buildMerkleTree(hashes, 9) // 9 is most efficient in most cases
 	rootHash := hashTree.Hash()
 	waiter.Success("Merkle tree successfully built")
 
@@ -283,7 +283,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	return torrent, nil
 }
 
-func buildMerkleTree(hashes [][]byte) *cell.Cell {
+func buildMerkleTree(hashes [][]byte, parallelDepth int) *cell.Cell {
 	logN := uint32(0)
 	for (1 << logN) < len(hashes) {
 		logN++
@@ -300,11 +300,11 @@ func buildMerkleTree(hashes [][]byte) *cell.Cell {
 	for i := len(hashes); i < n; i++ {
 		cells[i] = emptyCell
 	}
-	root := createMerkleTreeCell(cells)
+	root := createMerkleTreeCell(cells, 1<<parallelDepth)
 	return root
 }
 
-func createMerkleTreeCell(cells []*cell.Cell) *cell.Cell {
+func createMerkleTreeCell(cells []*cell.Cell, depthParallel int) *cell.Cell {
 	switch len(cells) {
 	case 0:
 		panic("empty cells")
@@ -327,8 +327,22 @@ func createMerkleTreeCell(cells []*cell.Cell) *cell.Cell {
 			return result
 		}
 
-		left := createMerkleTreeCell(cells[:len(cells)/2])
-		right := createMerkleTreeCell(cells[len(cells)/2:])
+		var left, right *cell.Cell
+		if len(cells) >= depthParallel {
+			cLeft := make(chan *cell.Cell, 1)
+			cRight := make(chan *cell.Cell, 1)
+			go func() {
+				cLeft <- createMerkleTreeCell(cells[:len(cells)/2], depthParallel)
+			}()
+			go func() {
+				cRight <- createMerkleTreeCell(cells[len(cells)/2:], depthParallel)
+			}()
+			left = <-cLeft
+			right = <-cRight
+		} else {
+			left = createMerkleTreeCell(cells[:len(cells)/2], depthParallel)
+			right = createMerkleTreeCell(cells[len(cells)/2:], depthParallel)
+		}
 
 		result := cell.BeginCell().MustStoreRef(left).MustStoreRef(right).EndCell()
 		result.Hash()
