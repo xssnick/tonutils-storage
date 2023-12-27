@@ -158,10 +158,10 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	}
 
 	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
-	hashTree := buildHashTree(hashes)
+	hashTree := buildMerkleTree(hashes)
+	rootHash := hashTree.Hash(0)
 	waiter.Success("Merkle tree successfully built")
 
-	hashTree.Hash()
 	progress, _ = pterm.DefaultProgressbar.WithTotal(len(piecesStartIndexes)).WithTitle("Calculating proofs...").Start()
 
 	piecesNum := uint32(len(piecesStartIndexes))
@@ -174,7 +174,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	torrent.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
 		FileSize:   uint64(len(headerData)) + dataSize,
-		RootHash:   hashTree.Hash(),
+		RootHash:   rootHash,
 		HeaderSize: uint64(len(headerData)),
 		HeaderHash: calcHash(headerData),
 		Description: tlb.Text{
@@ -255,55 +255,61 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	return torrent, nil
 }
 
-func buildHashTree(hashes [][]byte) *cell.Cell {
-	piecesNum := uint32(len(hashes))
-	// calc tree depth
-	treeDepth := int(math.Log2(float64(piecesNum)))
-	if piecesNum > uint32(math.Pow(2, float64(treeDepth))) {
-		// add 1 if pieces num is not exact log2
-		treeDepth++
+func buildMerkleTree(hashes [][]byte) *cell.Cell {
+	logN := uint32(0)
+	for (1 << logN) < len(hashes) {
+		logN++
+	}
+	n := 1 << logN
+	cells := make([]*cell.Cell, n)
+
+	for i := 0; i < len(hashes); i++ {
+		cells[i] = cell.BeginCell().MustStoreSlice(hashes[i], 256).EndCell()
 	}
 
-	level := map[uint32]*cell.Cell{}
-	for piece := uint32(0); piece < uint32(math.Pow(2, float64(treeDepth))); piece++ {
-		var p []byte
-		if piece >= uint32(len(hashes)) {
-			p = make([]byte, 32)
-		} else {
-			p = hashes[piece]
+	emptyCell := cell.BeginCell().MustStoreSlice(make([]byte, 32), 256).EndCell()
+	emptyCell.Hash()
+	for i := len(hashes); i < n; i++ {
+		cells[i] = emptyCell
+	}
+	root := make(chan *cell.Cell, 1)
+	go createMerkleTreeParallel(cells, root)
+	return <-root
+}
+
+func createMerkleTreeParallel(cells []*cell.Cell, c chan *cell.Cell) {
+	switch len(cells) {
+	case 0:
+		return
+	case 1:
+		result := cells[0]
+		result.Hash()
+		c <- result
+	case 2:
+		result := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
+		result.Hash()
+		c <- result
+	default:
+		// minor optimization for same pieces
+		if len(cells) == 4 &&
+			bytes.Equal(cells[0].Hash(), cells[2].Hash()) &&
+			bytes.Equal(cells[1].Hash(), cells[3].Hash()) {
+			child := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
+			result := cell.BeginCell().MustStoreRef(child).MustStoreRef(child).EndCell()
+			result.Hash()
+			c <- result
+			return
 		}
-		level[piece] = cell.BeginCell().MustStoreSlice(p, 256).EndCell()
+
+		left := make(chan *cell.Cell, 1)
+		right := make(chan *cell.Cell, 1)
+		go createMerkleTreeParallel(cells[:len(cells)/2], left)
+		go createMerkleTreeParallel(cells[len(cells)/2:], right)
+
+		result := cell.BeginCell().MustStoreRef(<-left).MustStoreRef(<-right).EndCell()
+		result.Hash()
+		c <- result
 	}
-
-	for d := 0; d < treeDepth; d++ {
-		nextLevel := map[uint32]*cell.Cell{}
-		for k, v := range level {
-			isLeft := k&(1<<d) == 0
-			nextKey := k
-			if !isLeft {
-				nextKey = k ^ (1 << d) // switch off bit
-			}
-
-			if nextLevel[nextKey] != nil {
-				// already processed as neighbour
-				continue
-			}
-
-			neighbour := level[k^(1<<d)] // get neighbour bit
-			b := cell.BeginCell()
-			if !isLeft {
-				b.MustStoreRef(neighbour)
-				b.MustStoreRef(v)
-			} else {
-				b.MustStoreRef(v)
-				b.MustStoreRef(neighbour)
-			}
-
-			nextLevel[nextKey] = b.EndCell()
-		}
-		level = nextLevel
-	}
-	return level[0]
 }
 
 func calcHash(cb []byte) []byte {
