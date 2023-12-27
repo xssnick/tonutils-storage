@@ -300,23 +300,22 @@ func buildMerkleTree(hashes [][]byte) *cell.Cell {
 	for i := len(hashes); i < n; i++ {
 		cells[i] = emptyCell
 	}
-	root := make(chan *cell.Cell, 1)
-	go createMerkleTreeParallel(cells, root)
-	return <-root
+	root := createMerkleTreeCell(cells)
+	return root
 }
 
-func createMerkleTreeParallel(cells []*cell.Cell, c chan *cell.Cell) {
+func createMerkleTreeCell(cells []*cell.Cell) *cell.Cell {
 	switch len(cells) {
 	case 0:
-		return
+		panic("empty cells")
 	case 1:
 		result := cells[0]
 		result.Hash()
-		c <- result
+		return result
 	case 2:
 		result := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
 		result.Hash()
-		c <- result
+		return result
 	default:
 		// minor optimization for same pieces
 		if len(cells) == 4 &&
@@ -325,18 +324,15 @@ func createMerkleTreeParallel(cells []*cell.Cell, c chan *cell.Cell) {
 			child := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
 			result := cell.BeginCell().MustStoreRef(child).MustStoreRef(child).EndCell()
 			result.Hash()
-			c <- result
-			return
+			return result
 		}
 
-		left := make(chan *cell.Cell, 1)
-		right := make(chan *cell.Cell, 1)
-		go createMerkleTreeParallel(cells[:len(cells)/2], left)
-		go createMerkleTreeParallel(cells[len(cells)/2:], right)
+		left := createMerkleTreeCell(cells[:len(cells)/2])
+		right := createMerkleTreeCell(cells[len(cells)/2:])
 
-		result := cell.BeginCell().MustStoreRef(<-left).MustStoreRef(<-right).EndCell()
+		result := cell.BeginCell().MustStoreRef(left).MustStoreRef(right).EndCell()
 		result.Hash()
-		c <- result
+		return result
 	}
 }
 
