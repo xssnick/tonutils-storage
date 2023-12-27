@@ -159,7 +159,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 
 	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
 	hashTree := buildMerkleTree(hashes)
-	rootHash := hashTree.Hash(0)
+	rootHash := hashTree.Hash()
 	waiter.Success("Merkle tree successfully built")
 
 	progress, _ = pterm.DefaultProgressbar.WithTotal(len(piecesStartIndexes)).WithTitle("Calculating proofs...").Start()
