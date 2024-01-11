@@ -12,11 +12,11 @@ If you want to support this project and help us to develop projects like this 10
 ## Quick start
 
 1. Download precompiled version:
-   * [Linux AMD64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.1/tonutils-storage-linux-amd64)
-   * [Linux ARM64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.1/tonutils-storage-linux-arm64)
-   * [Windows x64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.1/tonutils-storage-x64.exe)
-   * [Mac Intel](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.1/tonutils-storage-mac-amd64)
-   * [Mac Apple Silicon](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.1/tonutils-storage-mac-arm64)
+   * [Linux AMD64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.2/tonutils-storage-linux-amd64)
+   * [Linux ARM64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.2/tonutils-storage-linux-arm64)
+   * [Windows x64](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.2/tonutils-storage-x64.exe)
+   * [Mac Intel](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.2/tonutils-storage-mac-amd64)
+   * [Mac Apple Silicon](https://github.com/xssnick/tonutils-storage/releases/download/v0.3.2/tonutils-storage-mac-arm64)
 2. Run
 `./tonutils-storage`
 3. Try `download 85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f`
