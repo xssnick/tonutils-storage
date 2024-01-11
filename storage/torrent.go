@@ -203,11 +203,15 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	if d, _ := t.IsActive(); d && t.downloadAll == downloadAll && t.downloadOrdered == downloadOrdered {
+		return nil
+	}
+
 	t.downloadAll = downloadAll
 	t.downloadOrdered = downloadOrdered
 
-	if d, _ := t.IsActive(); d {
-		return nil
+	if t.pause != nil {
+		t.pause()
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())

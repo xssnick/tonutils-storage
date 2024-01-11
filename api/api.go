@@ -42,6 +42,10 @@ type BagDetailed struct {
 	HasPiecesMask []byte `json:"has_pieces_mask"`
 	Files         []File `json:"files"`
 	Peers         []Peer `json:"peers"`
+
+	PieceSize  uint32 `json:"piece_size"`
+	BagSize    uint64 `json:"bag_size"`
+	MerkleHash string `json:"merkle_hash"`
 }
 
 type Bag struct {
@@ -149,7 +153,7 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 			response(w, http.StatusInternalServerError, Error{"Failed to start download:" + err.Error()})
 			return
 		}
-		pterm.Success.Println("Bag state updated", hex.EncodeToString(bag))
+		pterm.Success.Println("Bag state updated", hex.EncodeToString(bag), "download all:", req.DownloadAll)
 	}
 
 	if len(req.Files) > 0 {
@@ -428,6 +432,10 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 				}
 			}
 		}
+
+		res.BagSize = t.Info.FileSize
+		res.PieceSize = t.Info.PieceSize
+		res.MerkleHash = hex.EncodeToString(t.Info.RootHash)
 	}
 
 	active, seeding := t.IsActive()
