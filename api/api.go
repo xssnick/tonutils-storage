@@ -46,6 +46,7 @@ type BagDetailed struct {
 	PieceSize  uint32 `json:"piece_size"`
 	BagSize    uint64 `json:"bag_size"`
 	MerkleHash string `json:"merkle_hash"`
+	Path       string `json:"path"`
 }
 
 type Bag struct {
@@ -438,6 +439,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		res.MerkleHash = hex.EncodeToString(t.Info.RootHash)
 	}
 
+	res.Path = t.Path
 	active, seeding := t.IsActive()
 	res.Bag = Bag{
 		BagID:         hex.EncodeToString(t.BagID),

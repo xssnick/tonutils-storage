@@ -192,6 +192,15 @@ func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	}
 }
 
+func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
+	select {
+	case <-t.globalCtx.Done():
+		return false, false
+	default:
+		return true, t.activeUpload
+	}
+}
+
 func (t *Torrent) Stop() {
 	t.activeUpload = false
 	t.pause()

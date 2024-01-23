@@ -148,7 +148,7 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 }
 
 func (s *Storage) SetTorrent(t *storage.Torrent) error {
-	activeDownload, activeUpload := t.IsActive()
+	activeDownload, activeUpload := t.IsActiveRaw()
 	data, err := json.Marshal(&TorrentStored{
 		BagID:           t.BagID,
 		Path:            t.Path,
@@ -177,10 +177,11 @@ func (s *Storage) SetTorrent(t *storage.Torrent) error {
 }
 
 func (s *Storage) addTorrent(t *storage.Torrent) error {
-	id, err := adnl.ToKeyID(adnl.PublicKeyOverlay{Key: t.BagID})
+	id, err := tl.Hash(adnl.PublicKeyOverlay{Key: t.BagID})
 	if err != nil {
 		return err
 	}
+
 	s.mx.Lock()
 	s.torrents[string(t.BagID)] = t
 	s.torrentsOverlay[string(id)] = t
@@ -248,6 +249,8 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 				}
 			}
 		}
+
+		println("START", hex.EncodeToString(tr.BagID), tr.ActiveDownload, tr.ActiveUpload, tr.DownloadAll, tr.DownloadOrdered)
 
 		err = s.addTorrent(t)
 		if err != nil {
