@@ -105,75 +105,6 @@ const FallbackNetworkConfig = `{
           "@type": "dht.node",
           "id": {
             "@type": "pub.ed25519",
-            "key": "fZnkoIAxrTd4xeBgVpZFRm5SvVvSx7eN3Vbe8c83YMk="
-          },
-          "addr_list": {
-            "@type": "adnl.addressList",
-            "addrs": [
-              {
-                "@type": "adnl.address.udp",
-                "ip": 1091897261,
-                "port": 15813
-              }
-            ],
-            "version": 0,
-            "reinit_date": 0,
-            "priority": 0,
-            "expire_at": 0
-          },
-          "version": -1,
-          "signature": "cmaMrV/9wuaHOOyXYjoxBnckJktJqrQZ2i+YaY3ehIyiL3LkW81OQ91vm8zzsx1kwwadGZNzgq4hI4PCB/U5Dw=="
-        },
-        {
-          "@type": "dht.node",
-          "id": {
-            "@type": "pub.ed25519",
-            "key": "zDBLsKjns4bBqQokzY0wOzC2vwbOeiE1J7aOjfCp5mg="
-          },
-          "addr_list": {
-            "@type": "adnl.addressList",
-            "addrs": [
-              {
-                "@type": "adnl.address.udp",
-                "ip": -1573440928,
-                "port": 12821
-              }
-            ],
-            "version": 0,
-            "reinit_date": 0,
-            "priority": 0,
-            "expire_at": 0
-          },
-          "version": -1,
-          "signature": "qORMhem9RyG7wnNYF822YL3EXwEoTO82h2TarFbjd0jikMIGizAdir1JyxSfyKkhHdFKGcLMeoPb2dfMIvQwAA=="
-        },
-        {
-          "@type": "dht.node",
-          "id": {
-            "@type": "pub.ed25519",
-            "key": "CU9ytJok8WBnpl29T740gfC/h69kgvQJp7FJMq/N60g="
-          },
-          "addr_list": {
-            "@type": "adnl.addressList",
-            "addrs": [
-              {
-                "@type": "adnl.address.udp",
-                "ip": 391653587,
-                "port": 15895
-              }
-            ],
-            "version": 0,
-            "reinit_date": 0,
-            "priority": 0,
-            "expire_at": 0
-          },
-          "version": -1,
-          "signature": "DKyGF2nPRxmerpIHxE5FN1Lod3zvJu728NP0iYc1hpNyPvl5epu+7amjimLy1VdzNqFzTJAoJ/gqPPMkXS/kDw=="
-        },
-        {
-          "@type": "dht.node",
-          "id": {
-            "@type": "pub.ed25519",
             "key": "MJr8xja0xpu9DoisFXBrkNHNx1XozR7HHw9fJdSyEdo="
           },
           "addr_list": {
@@ -513,9 +444,9 @@ const FallbackNetworkConfig = `{
       "file_hash": "XplPz01CXAps5qeSWUtxcyBfdAo5zVb1N979KLSKD24="
     },
     "init_block": {
-      "root_hash": "YRkrcmZMvLBvjanwKCyL3w4oceGPtFfgx8ym1QKCK/4=",
-      "seqno": 27747086,
-      "file_hash": "N42xzPnJjDlE3hxPXOb+pNzXomgRtpX5AZzMPnIA41s=",
+      "root_hash": "VpWyfNOLm8Rqt6CZZ9dZGqJRO3NyrlHHYN1k1oLbJ6g=",
+      "seqno": 34835953,
+      "file_hash": "8o12KX54BtJM8RERD1J97Qe1ZWk61LIIyXydlBnixK8=",
       "workchain": -1,
       "shard": -9223372036854775808
     },

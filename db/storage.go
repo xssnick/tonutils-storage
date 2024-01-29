@@ -26,23 +26,32 @@ type Config struct {
 	DownloadsPath string
 }
 
+type Event int
+
+const (
+	EventTorrentUpdated Event = iota
+	EventUploadUpdated
+)
+
 type Storage struct {
 	torrents        map[string]*storage.Torrent
 	torrentsOverlay map[string]*storage.Torrent
 	connector       storage.NetConnector
 	fs              OsFs
 
-	db *leveldb.DB
-	mx sync.RWMutex
+	notifyCh chan Event
+	db       *leveldb.DB
+	mx       sync.RWMutex
 }
 
-func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool) (*Storage, error) {
+func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool, notifier chan Event) (*Storage, error) {
 	s := &Storage{
 		torrents:        map[string]*storage.Torrent{},
 		torrentsOverlay: map[string]*storage.Torrent{},
 		db:              db,
 		connector:       connector,
 		fs:              OsFs{},
+		notifyCh:        notifier,
 	}
 
 	err := s.loadTorrents(startWithoutActiveFilesToo)
@@ -144,6 +153,7 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 			_ = s.RemovePiece(t.BagID, i)
 		}
 	}
+	s.notify(EventTorrentUpdated)
 	return nil
 }
 
@@ -186,6 +196,7 @@ func (s *Storage) addTorrent(t *storage.Torrent) error {
 	s.torrents[string(t.BagID)] = t
 	s.torrentsOverlay[string(id)] = t
 	s.mx.Unlock()
+	s.notify(EventTorrentUpdated)
 	return nil
 }
 
@@ -250,8 +261,6 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 			}
 		}
 
-		println("START", hex.EncodeToString(tr.BagID), tr.ActiveDownload, tr.ActiveUpload, tr.DownloadAll, tr.DownloadOrdered)
-
 		err = s.addTorrent(t)
 		if err != nil {
 			return fmt.Errorf("failed to add torrent %s from db: %w", hex.EncodeToString(t.BagID), err)
@@ -272,5 +281,15 @@ func (s *Storage) UpdateUploadStats(bagId []byte, val uint64) error {
 	if err := s.db.Put(k, data, nil); err != nil {
 		return err
 	}
+	s.notify(EventUploadUpdated)
 	return nil
+}
+
+func (s *Storage) notify(e Event) {
+	if s.notifyCh != nil {
+		select {
+		case s.notifyCh <- e:
+		default:
+		}
+	}
 }

@@ -155,7 +155,7 @@ func main() {
 	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
 	Connector = storage.NewConnector(srv)
 
-	Storage, err = db.NewStorage(ldb, Connector, true)
+	Storage, err = db.NewStorage(ldb, Connector, true, nil)
 	if err != nil {
 		pterm.Error.Println("Failed to init storage:", err.Error())
 		os.Exit(1)
