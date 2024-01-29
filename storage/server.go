@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/pterm/pterm"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
@@ -77,14 +76,14 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 
 	if serverMode {
 		go func() {
-			lastUpdate := map[string]int64{}
-			wait := 5 * time.Second
+			var mx sync.Mutex
+			lastUpdate := map[string]time.Time{}
 			// refresh dht records
 			for {
 				select {
 				case <-s.closeCtx.Done():
 					return
-				case <-time.After(wait):
+				case <-time.After(5 * time.Second):
 				}
 
 				if s.store == nil {
@@ -92,19 +91,35 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 				}
 
 				list := s.store.GetAll()
+				ctx, cancel := context.WithTimeout(s.closeCtx, 120*time.Second)
+
+				var wg sync.WaitGroup
 				for _, torrent := range list {
 					if !torrent.activeUpload {
+						Logger("[STORAGE_DHT] SKIPPING", hex.EncodeToString(torrent.BagID), "UPLOAD IS NOT ACTIVE")
 						continue
+					} else {
+						Logger("[STORAGE_DHT] CHECKING", hex.EncodeToString(torrent.BagID), "UPLOAD IS ACTIVE")
 					}
 
+					mx.Lock()
 					lastAt := lastUpdate[hex.EncodeToString(torrent.BagID)]
-					if lastAt+180 <= time.Now().Unix() {
-						ctx, cancel := context.WithTimeout(s.closeCtx, 45*time.Second)
-						_ = s.updateTorrent(ctx, torrent, serverMode)
-						cancel()
-						lastUpdate[hex.EncodeToString(torrent.BagID)] = time.Now().Unix()
+					mx.Unlock()
+					if lastAt.Before(time.Now().Add(5 * time.Minute)) {
+						wg.Add(1)
+
+						go func(torrent *Torrent) {
+							defer wg.Done()
+							if err := s.updateTorrent(ctx, torrent, serverMode); err == nil {
+								mx.Lock()
+								lastUpdate[hex.EncodeToString(torrent.BagID)] = time.Now()
+								mx.Unlock()
+							}
+						}(torrent)
 					}
 				}
+				wg.Wait()
+				cancel()
 			}
 		}()
 	}
@@ -454,7 +469,7 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 
 	nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
 	if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
-		println(err.Error())
+		Logger("[STORAGE_DHT] FAILED TO FIND DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
 		return err
 	}
 
@@ -466,7 +481,7 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 
 	node, err := overlay.NewNode(torrent.BagID, s.key)
 	if err != nil {
-		pterm.Warning.Printf("Failed to update DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+		Logger("[STORAGE_DHT] FAILED CREATE OVERLAY NODE FOR", hex.EncodeToString(torrent.BagID), err.Error())
 		return err
 	}
 
@@ -509,11 +524,11 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 	}
 
 	if refreshed {
-		ctxStore, cancel := context.WithTimeout(ctx, 45*time.Second)
-		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 60*time.Minute, 5)
+		ctxStore, cancel := context.WithTimeout(ctx, 100*time.Second)
+		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 30*time.Minute, 5)
 		cancel()
 		if err != nil && stored == 0 {
-			pterm.Warning.Printf("Failed to store DHT record for bag %s: %v", hex.EncodeToString(torrent.BagID), err)
+			Logger("[STORAGE_DHT] FAILED TO STORE DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
 			return err
 		}
 		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))

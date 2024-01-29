@@ -20,6 +20,8 @@ func (s *Storage) SetActiveFiles(bagId []byte, ids []uint32) error {
 	for i := 0; i < len(ids); i++ {
 		binary.LittleEndian.PutUint32(v[i*4:], ids[i])
 	}
+	defer s.notify(EventTorrentUpdated)
+
 	return s.db.Put(k, v, nil)
 }
 
@@ -75,6 +77,7 @@ func (s *Storage) RemovePiece(bagId []byte, id uint32) error {
 	copy(k[3:3+32], bagId)
 	binary.LittleEndian.PutUint32(k[3+32:], id)
 
+	defer s.notify(EventTorrentUpdated)
 	return s.db.Delete(k, nil)
 }
 
@@ -92,6 +95,7 @@ func (s *Storage) SetPiece(bagId []byte, id uint32, p *storage.PieceInfo) error 
 	binary.LittleEndian.PutUint32(v, p.StartFileIndex)
 	copy(v[4:], p.Proof)
 
+	defer s.notify(EventTorrentUpdated)
 	return s.db.Put(k, v, nil)
 }
 

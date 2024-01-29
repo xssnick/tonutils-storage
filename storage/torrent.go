@@ -192,6 +192,15 @@ func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	}
 }
 
+func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
+	select {
+	case <-t.globalCtx.Done():
+		return false, false
+	default:
+		return true, t.activeUpload
+	}
+}
+
 func (t *Torrent) Stop() {
 	t.activeUpload = false
 	t.pause()
@@ -203,11 +212,15 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
+	if d, _ := t.IsActive(); d && t.downloadAll == downloadAll && t.downloadOrdered == downloadOrdered {
+		return nil
+	}
+
 	t.downloadAll = downloadAll
 	t.downloadOrdered = downloadOrdered
 
-	if d, _ := t.IsActive(); d {
-		return nil
+	if t.pause != nil {
+		t.pause()
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
