@@ -752,6 +752,10 @@ func (s *Server) StartPeerSearcher(t *Torrent) {
 	}
 }
 
+func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
+	return s.key
+}
+
 func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
 		return n

@@ -28,6 +28,8 @@ func init() {
 		"name_index:(files_count * [uint64]) data_index:(files_count * [uint64]) "+
 		"names:(file_names_size * [uint8]) data:(tot_data_size * [uint8]) "+
 		"= TorrentHeader")
+
+	tl.Register(ADNLProofScheme{}, "storage.tonutils.adnlProviderProof provider_key:int256 = storage.tonutils.AdnlProviderProof")
 }
 
 type AddUpdate struct {
@@ -79,6 +81,10 @@ type UpdateState struct {
 type Ok struct{}
 
 type FECInfoNone struct{}
+
+type ADNLProofScheme struct {
+	Key []byte `tl:"int256"`
+}
 
 type TorrentHeader struct {
 	FilesCount    uint32
