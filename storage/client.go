@@ -117,6 +117,7 @@ type speedLimit struct {
 }
 
 type TorrentServer interface {
+	GetADNLPrivateKey() ed25519.PrivateKey
 	StartPeerSearcher(t *Torrent)
 }
 
@@ -197,6 +198,10 @@ func (c *Connector) ThrottleDownload(ctx context.Context, sz uint64) error {
 
 func (c *Connector) ThrottleUpload(ctx context.Context, sz uint64) error {
 	return c.uploadLimit.Throttle(ctx, sz)
+}
+
+func (c *Connector) GetADNLPrivateKey() ed25519.PrivateKey {
+	return c.TorrentServer.GetADNLPrivateKey()
 }
 
 func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int) (_ TorrentDownloader, err error) {

@@ -1,9 +1,11 @@
 package api
 
 import (
+	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
 	"github.com/pterm/pterm"
+	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/db"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
@@ -17,6 +19,11 @@ type Error struct {
 
 type Ok struct {
 	Ok bool `json:"ok"`
+}
+
+type ADNLProofResponse struct {
+	Key       []byte `json:"key"`
+	Signature []byte `json:"signature"`
 }
 
 type ProofResponse struct {
@@ -105,6 +112,8 @@ func (s *Server) Start(addr string) error {
 	m.HandleFunc("/api/v1/stop", s.withAuth(s.handleStop))
 	m.HandleFunc("/api/v1/list", s.withAuth(s.handleList))
 	m.HandleFunc("/api/v1/piece/proof", s.withAuth(s.handlePieceProof))
+	m.HandleFunc("/api/v1/sign/provider", s.withAuth(s.handleSignProvider))
+
 	return http.ListenAndServe(addr, m)
 }
 
@@ -275,6 +284,41 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 		bags = append(bags, s.getBag(t, true).Bag)
 	}
 	response(w, http.StatusOK, List{Bags: bags})
+}
+
+func (s *Server) handleSignProvider(w http.ResponseWriter, r *http.Request) {
+	req := struct {
+		ProviderID string `json:"provider_id"`
+	}{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response(w, http.StatusBadRequest, Error{err.Error()})
+		return
+	}
+
+	providerId, err := hex.DecodeString(req.ProviderID)
+	if err != nil {
+		response(w, http.StatusBadRequest, Error{"Invalid provider id"})
+		return
+	}
+
+	if len(providerId) != 32 {
+		response(w, http.StatusBadRequest, Error{"Invalid provider id"})
+		return
+	}
+
+	res, err := tl.Serialize(storage.ADNLProofScheme{
+		Key: providerId,
+	}, true)
+	if err != nil {
+		response(w, http.StatusBadRequest, Error{"Invalid provider id, cannot serialize scheme"})
+		return
+	}
+
+	key := s.connector.GetADNLPrivateKey()
+	response(w, http.StatusOK, ADNLProofResponse{
+		Key:       key.Public().(ed25519.PublicKey),
+		Signature: ed25519.Sign(key, res),
+	})
 }
 
 func (s *Server) handleDetails(w http.ResponseWriter, r *http.Request) {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/ed25519"
 	"fmt"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
@@ -61,6 +62,7 @@ type Storage interface {
 }
 
 type NetConnector interface {
+	GetADNLPrivateKey() ed25519.PrivateKey
 	SetDownloadLimit(bytesPerSec uint64)
 	SetUploadLimit(bytesPerSec uint64)
 	GetUploadLimit() uint64
