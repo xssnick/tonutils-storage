@@ -44,6 +44,7 @@ var (
 	Verbosity           = flag.Int("debug", 0, "Debug logs")
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
+	Version             = flag.Bool("version", false, "Show version and exit")
 )
 
 var GitCommit string
@@ -54,6 +55,11 @@ var Connector storage.NetConnector
 
 func main() {
 	flag.Parse()
+
+	if *Version {
+		println("Build version: " + GitCommit)
+		os.Exit(0)
+	}
 
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}

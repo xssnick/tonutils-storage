@@ -1,6 +1,11 @@
-ver := $(shell git log -1 --pretty=format:%h)
+.PHONY: all build
 
-compile:
+ver := $(shell git log -1 --pretty=format:"%h-%as")
+
+build:
+	go build -ldflags "-w -s -X main.GitCommit=$(ver)" -o build/tonutils-storage cli/main.go
+
+all:
 	GOOS=linux GOARCH=amd64 go build -ldflags "-w -s -X main.GitCommit=$(ver)" -o build/tonutils-storage-linux-amd64 cli/main.go
 	GOOS=linux GOARCH=arm64 go build -ldflags "-w -s -X main.GitCommit=$(ver)" -o build/tonutils-storage-linux-arm64 cli/main.go
 	GOOS=darwin GOARCH=arm64 go build -ldflags "-w -s -X main.GitCommit=$(ver)" -o build/tonutils-storage-mac-arm64 cli/main.go
