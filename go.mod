@@ -5,8 +5,8 @@ go 1.19
 require (
 	github.com/pterm/pterm v0.12.59
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.9.5-0.20240417125423-e29436509558
-	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417130547-76e2dbb41970
+	github.com/xssnick/tonutils-go v1.9.5-0.20240417140218-f5211a727ef0
+	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b
 )
 
 require (

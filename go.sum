@@ -80,6 +80,7 @@ github.com/xssnick/tonutils-go v1.9.4 h1:Wp2/PXFJ1whdWdyMWK0mu8Gm0K93/lCv3blOeic
 github.com/xssnick/tonutils-go v1.9.4/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-go v1.9.5-0.20240417092401-47a2338307aa/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-go v1.9.5-0.20240417125423-e29436509558/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
+github.com/xssnick/tonutils-go v1.9.5-0.20240417140218-f5211a727ef0/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-storage-provider v0.1.1/go.mod h1:t0PQEmO4jIzkFjPU7qR1onL42sv7p2VzV76XojM0KSU=
 github.com/xssnick/tonutils-storage-provider v0.2.0 h1:clyL5O2nTPegqHXN9F2lb1IbdvOLUWiNN896ORZfa5M=
 github.com/xssnick/tonutils-storage-provider v0.2.0/go.mod h1:959sFEz5jDjGggrOL9dmp7dHMizgmyeFbIYEcz4y6rA=
@@ -87,6 +88,8 @@ github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417092951-894f3ce6198
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417092951-894f3ce61986/go.mod h1:aT2hvKWj2Ch51OlNZzSjLK3rLcwGrpZsjv+6MOEO3ac=
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417130547-76e2dbb41970 h1:rApnM+TtlsMOeS+XpBahqcWmjU/XManYNGdslIPy2rA=
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417130547-76e2dbb41970/go.mod h1:qMDgcpamqUePq1EqdHA+LmmehO2USPH3JdDthiJOcgI=
+github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b h1:prvgFJOva8KIbI9lFb6D27etp1+ugt4EODMBXxRUsos=
+github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b/go.mod h1:7xA5QMPIdKygiZwyqq3na+3KG58boW6Ja/6/LIuhUcc=
 golang.org/x/crypto v0.17.0 h1:r8bRNjWL3GshPW3gkd+RpvzWrZAwPS49OmTGZ/uhM4k=
 golang.org/x/crypto v0.17.0/go.mod h1:gCAAfMLgwOJRpTjQ2zCCt2OcSfYMTeZVSRtQlPC7Nq4=
 golang.org/x/exp v0.0.0-20220909182711-5c715a9e8561 h1:MDc5xs78ZrZr3HMQugiXOAkSZtfTpbJLDr/lwfgO53E=
