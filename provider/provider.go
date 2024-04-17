@@ -223,7 +223,7 @@ func (c *Client) RequestProviderStorageInfo(ctx context.Context, torrentHash, pr
 	// run job if result is older than 10 sec and no another active job
 	if time.Since(tm) > 5*time.Second && (v.Context == nil || v.Context.Err() != nil) {
 		var end func()
-		v.Context, end = context.WithCancel(context.Background())
+		v.Context, end = context.WithTimeout(context.Background(), 30*time.Second)
 
 		go func() {
 			defer end()
