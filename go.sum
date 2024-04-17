@@ -74,10 +74,16 @@ github.com/syndtr/goleveldb v1.0.0/go.mod h1:ZVVdQEZoIme9iO1Ch2Jdy24qqXrMMOU6lpP
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
+github.com/xssnick/tonutils-go v1.9.3-0.20240417085945-5d6daf793dcc h1:3JLM4EbCr+2MTKIWwWzKKMVILFg2I+fA237tIGhOW24=
+github.com/xssnick/tonutils-go v1.9.3-0.20240417085945-5d6daf793dcc/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-go v1.9.4 h1:Wp2/PXFJ1whdWdyMWK0mu8Gm0K93/lCv3blOeicQAeo=
 github.com/xssnick/tonutils-go v1.9.4/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
+github.com/xssnick/tonutils-go v1.9.5-0.20240417092401-47a2338307aa/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
+github.com/xssnick/tonutils-storage-provider v0.1.1/go.mod h1:t0PQEmO4jIzkFjPU7qR1onL42sv7p2VzV76XojM0KSU=
 github.com/xssnick/tonutils-storage-provider v0.2.0 h1:clyL5O2nTPegqHXN9F2lb1IbdvOLUWiNN896ORZfa5M=
 github.com/xssnick/tonutils-storage-provider v0.2.0/go.mod h1:959sFEz5jDjGggrOL9dmp7dHMizgmyeFbIYEcz4y6rA=
+github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417092951-894f3ce61986 h1:Eeb5sjRJ1aD6kHoM2qWiMuk4PzwkBBfNsCXqapyhBjM=
+github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417092951-894f3ce61986/go.mod h1:aT2hvKWj2Ch51OlNZzSjLK3rLcwGrpZsjv+6MOEO3ac=
 golang.org/x/crypto v0.17.0 h1:r8bRNjWL3GshPW3gkd+RpvzWrZAwPS49OmTGZ/uhM4k=
 golang.org/x/crypto v0.17.0/go.mod h1:gCAAfMLgwOJRpTjQ2zCCt2OcSfYMTeZVSRtQlPC7Nq4=
 golang.org/x/exp v0.0.0-20220909182711-5c715a9e8561 h1:MDc5xs78ZrZr3HMQugiXOAkSZtfTpbJLDr/lwfgO53E=
