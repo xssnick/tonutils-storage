@@ -9,6 +9,9 @@ import (
 	"time"
 )
 
+var DownloadThreads = 24
+var DownloadPrefetch = 200
+
 type fileInfo struct {
 	path string
 	info *FileInfo
@@ -264,7 +267,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 60, 200, pieces)
+				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, DownloadThreads, DownloadPrefetch, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -278,13 +281,13 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				}
 
 				left := len(pieces)
-				ready := make(chan uint32, 200)
+				ready := make(chan uint32, DownloadPrefetch)
 				fetch := NewPreFetcher(ctx, t, t.downloader, func(event Event) {
 					if event.Name == EventPieceDownloaded {
 						ready <- event.Value.(uint32)
 					}
 					report(event)
-				}, downloaded, 60, 200, pieces)
+				}, downloaded, DownloadThreads, DownloadPrefetch, pieces)
 				defer fetch.Stop()
 
 				var currentFile FSFile
