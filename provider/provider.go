@@ -223,16 +223,17 @@ func (c *Client) RequestProviderStorageInfo(ctx context.Context, torrentHash, pr
 	// run job if result is older than 10 sec and no another active job
 	if time.Since(tm) > 5*time.Second && (v.Context == nil || v.Context.Err() != nil) {
 		var end func()
-		v.Context, end = context.WithTimeout(context.Background(), 30*time.Second)
+		v.Context, end = context.WithTimeout(context.Background(), 60*time.Second)
 
 		go func() {
 			defer end()
 
+			sn := time.Now()
 			var storageADNL string
 			proofByte := uint64(rand.Int63()) % t.Info.FileSize
 			info, err := c.provider.RequestStorageInfo(v.Context, providerKey, addr, proofByte)
 			if err != nil {
-				Logger("failed to get storage info:", err)
+				Logger("failed to get storage info:", err, "took", time.Since(sn).String())
 
 				c.mx.Lock()
 				c.infoCache[mKey] = &ProviderStorageInfo{

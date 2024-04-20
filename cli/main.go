@@ -407,12 +407,18 @@ func create(path, name string) {
 
 func list() {
 	var table = pterm.TableData{
-		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Completed", "Uploaded"},
+		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Status", "Uploaded"},
 	}
 
 	for _, t := range Storage.GetAll() {
 		var strDownloaded, uploaded, strFull, description = "0 Bytes", "0 Bytes", "???", "???"
-		completed := false
+		status := "Resolving"
+
+		activeDownload, activeUpload := t.IsActive()
+		if !activeDownload {
+			status = "Inactive"
+		}
+
 		if t.Info != nil {
 			mask := t.PiecesMask()
 			downloadedPieces := 0
@@ -427,7 +433,14 @@ func list() {
 			if downloaded > full { // cut not full last piece
 				downloaded = full
 			}
-			completed = downloaded == full
+			if downloaded == full {
+				status = "Downloaded"
+				if activeUpload {
+					status = "Seeding"
+				}
+			} else if activeDownload {
+				status = "Downloading"
+			}
 
 			strDownloaded = storage.ToSz(downloaded)
 			strFull = storage.ToSz(full)
@@ -445,7 +458,7 @@ func list() {
 
 		table = append(table, []string{hex.EncodeToString(t.BagID), description,
 			strDownloaded, strFull, fmt.Sprint(num),
-			storage.ToSpeed(dow), storage.ToSpeed(upl), fmt.Sprint(completed), uploaded})
+			storage.ToSpeed(dow), storage.ToSpeed(upl), status, uploaded})
 	}
 
 	if len(table) > 1 {

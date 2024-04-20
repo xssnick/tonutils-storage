@@ -31,6 +31,10 @@ func (o *OsFs) Exists(name string) bool {
 	return err == nil
 }
 
+func (o *OsFs) Delete(name string) error {
+	return os.Remove(name)
+}
+
 func (s *Storage) GetFS() storage.FS {
 	return &s.fs
 }

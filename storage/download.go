@@ -64,6 +64,94 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	}
 }
 
+func (t *Torrent) verify(deep bool) error {
+	if t.Header == nil {
+		return nil
+	}
+
+	rootPath := t.Path + "/" + string(t.Header.DirName)
+	checked := map[uint32]bool{}
+
+	var files []uint32
+	if t.downloadAll {
+		for i := uint32(0); i < t.Header.FilesCount; i++ {
+			files = append(files, i)
+		}
+	} else {
+		files = t.GetActiveFilesIDs()
+	}
+
+	Logger("[VERIFICATION] STARTED:", hex.EncodeToString(t.BagID), "FILES:", len(files))
+
+	needDownload := false
+	for _, f := range files {
+		info, err := t.GetFileOffsetsByID(f)
+		if err != nil {
+			Logger("[VERIFICATION] GET FILE ID ERR:", hex.EncodeToString(t.BagID), err.Error())
+
+			continue
+		}
+
+		isDelete := false
+		if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
+			isDelete = true
+		} else if deep {
+			for i := info.FromPiece; i <= info.ToPiece; i++ {
+				if checked[i] {
+					continue
+				}
+
+				_, err := t.getPieceInternal(i, true)
+				if err != nil {
+					if strings.Contains(err.Error(), "is not downloaded") {
+						continue
+					}
+
+					isDelete = true
+					break
+				}
+
+				// mark only for existing pieces to remove not only 1 file in not exist
+				checked[i] = true
+			}
+		}
+
+		if isDelete {
+			// we delete whole file because size can be > than expected
+			// and just replace of piece will be not enough
+			for i := info.FromPiece; i <= info.ToPiece; i++ {
+				// file was deleted, delete pieces records also
+				if err = t.removePiece(i); err != nil {
+					Logger("[VERIFICATION] REMOVE PIECE ERR:", hex.EncodeToString(t.BagID), i, err.Error())
+
+					return err
+				}
+			}
+			needDownload = true
+			Logger("[VERIFICATION] CORRUPTED, NEED REDOWNLOAD:", hex.EncodeToString(t.BagID))
+
+			if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil {
+				Logger("[VERIFICATION] FAILED TO REMOVE FILE:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID), err.Error())
+			}
+		}
+	}
+
+	if needDownload {
+		// restart download of missing pieces
+		currFlag := t.currentDownloadFlag
+		currPause := t.pause
+		_ = t.startDownload(func(event Event) {
+			if event.Name == EventErr && currFlag == t.currentDownloadFlag {
+				currPause()
+			}
+		})
+	}
+
+	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID))
+
+	return nil
+}
+
 func (t *Torrent) startDownload(report func(Event)) error {
 	if t.BagID == nil {
 		return fmt.Errorf("bag is not set")
@@ -176,7 +264,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 24, 200, pieces)
+				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, 60, 200, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -196,7 +284,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 						ready <- event.Value.(uint32)
 					}
 					report(event)
-				}, downloaded, 24, 200, pieces)
+				}, downloaded, 60, 200, pieces)
 				defer fetch.Stop()
 
 				var currentFile FSFile
