@@ -300,7 +300,9 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
 			if err != nil {
-				return err
+				// we will not respond on this, because it will be incompatible with protocol,
+				// sender will retry to get the data
+				return nil
 			}
 
 			pc, err := t.GetPiece(uint32(q.PieceID))
@@ -762,14 +764,13 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv
 	}
 
 	stNode := &storagePeer{
-		torrent:    t,
-		nodeAddr:   conn.adnl.RemoteAddr(),
-		nodeId:     conn.adnl.GetID(),
-		conn:       conn,
-		sessionId:  sessionId,
-		overlay:    overlay,
-		hasPieces:  map[uint32]bool{},
-		pieceQueue: make(chan *pieceRequest),
+		torrent:   t,
+		nodeAddr:  conn.adnl.RemoteAddr(),
+		nodeId:    conn.adnl.GetID(),
+		conn:      conn,
+		sessionId: sessionId,
+		overlay:   overlay,
+		hasPieces: map[uint32]bool{},
 	}
 
 	conn.UseFor(stNode)

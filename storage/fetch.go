@@ -122,9 +122,17 @@ func (f *PreFetcher) worker() {
 		case <-f.ctx.Done():
 			return
 		case task = <-f.tasks:
-			err := f.torrent.connector.ThrottleDownload(f.ctx, uint64(f.torrent.Info.PieceSize))
-			if err != nil {
-				return
+			for {
+				err := f.torrent.connector.ThrottleDownload(f.ctx, uint64(f.torrent.Info.PieceSize))
+				if err != nil {
+					select {
+					case <-f.ctx.Done():
+						return
+					case <-time.After(5 * time.Millisecond):
+						continue
+					}
+				}
+				break
 			}
 		}
 

@@ -6,7 +6,9 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"github.com/kevinms/leakybucket-go"
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
@@ -15,10 +17,11 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
 	"math/rand"
-	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 var Logger = func(...any) {}
@@ -89,10 +92,9 @@ type storagePeer struct {
 	hasPieces      map[uint32]bool
 	piecesMx       sync.RWMutex
 
-	fails int32
-	loops int32
-
-	pieceQueue chan *pieceRequest
+	fails    int32
+	failAt   int64
+	inflight int32
 
 	activateOnce sync.Once
 	closeOnce    sync.Once
@@ -111,9 +113,7 @@ type TorrentInfo struct {
 
 type speedLimit struct {
 	bytesPerSec uint64
-	limitUsed   uint64
-	lastUsedAt  time.Time
-	mx          sync.Mutex
+	bucket      unsafe.Pointer
 }
 
 type TorrentServer interface {
@@ -136,42 +136,36 @@ func NewConnector(srv TorrentServer) *Connector {
 }
 
 func (s *speedLimit) SetLimit(bytesPerSec uint64) {
-	atomic.StoreUint64(&s.limitUsed, 0)
+	if bytesPerSec == 0 {
+		atomic.StorePointer(&s.bucket, unsafe.Pointer(nil))
+		return
+	}
+
+	if bytesPerSec > math.MaxInt64/3 {
+		bytesPerSec = math.MaxInt64 / 3
+	}
+
 	atomic.StoreUint64(&s.bytesPerSec, bytesPerSec)
+
+	b := leakybucket.NewLeakyBucket(float64(bytesPerSec), int64(bytesPerSec*3))
+	atomic.StorePointer(&s.bucket, unsafe.Pointer(b))
 }
 
 func (s *speedLimit) GetLimit() uint64 {
 	return atomic.LoadUint64(&s.bytesPerSec)
 }
 
-func (s *speedLimit) Throttle(ctx context.Context, sz uint64) error {
-	if atomic.LoadUint64(&s.bytesPerSec) > 0 {
-		s.mx.Lock()
-		defer s.mx.Unlock()
-
-		select {
-		case <-ctx.Done():
-			// skip if not needed anymore
-			return ctx.Err()
-		default:
+func (s *speedLimit) Throttle(_ context.Context, sz uint64) error {
+	b := (*leakybucket.LeakyBucket)(atomic.LoadPointer(&s.bucket))
+	if b != nil {
+		full := uint64(b.Capacity())
+		if sz < full {
+			full = sz
 		}
 
-		used := atomic.LoadUint64(&s.limitUsed)
-		limit := atomic.LoadUint64(&s.bytesPerSec)
-		if limit > 0 && used > limit {
-			wait := time.Duration(float64(used)/float64(limit)*float64(time.Second)) - time.Since(s.lastUsedAt)
-			if wait > 0 {
-				select {
-				case <-ctx.Done():
-					// skip if not needed anymore
-					return ctx.Err()
-				case <-time.After(wait):
-				}
-			}
-			atomic.StoreUint64(&s.limitUsed, 0)
+		if b.Remaining() < int64(full) || b.Add(int64(sz)) == 0 {
+			return fmt.Errorf("limited")
 		}
-		s.lastUsedAt = time.Now()
-		atomic.AddUint64(&s.limitUsed, sz)
 	}
 	return nil
 }
@@ -313,12 +307,7 @@ func (s *storagePeer) Close() {
 func (s *storagePeer) touch() {
 	s.torrent.TouchPeer(s)
 	s.activateOnce.Do(func() {
-		if !s.torrent.IsCompleted() {
-			for i := 0; i < 20; i++ {
-				go s.loop()
-			}
-			go s.pieceNotifier()
-		}
+		go s.pieceNotifier()
 	})
 }
 
@@ -403,12 +392,6 @@ func (s *storagePeer) pieceNotifier() {
 			case <-s.globalCtx.Done():
 				s.torrent.newPiecesCond.L.Unlock()
 				return
-			case <-s.torrent.completedCtx.Done():
-				if lastReported == s.torrent.DownloadedPiecesNum() {
-					// download completed and all pieces reported
-					s.torrent.newPiecesCond.L.Unlock()
-					return
-				}
 			default:
 			}
 		}
@@ -423,7 +406,7 @@ func (s *storagePeer) pieceNotifier() {
 			Logger("[STORAGE] NOTIFY HAVE PIECES ERR:", err.Error())
 
 			if reportFails > 3 {
-				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
+				Logger("[STORAGE] TOO MANY NOTIFY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 
 				s.Close()
 				return
@@ -436,108 +419,67 @@ func (s *storagePeer) pieceNotifier() {
 	}
 }
 
-func (s *storagePeer) loop() {
-	returnNoClose := false
-	atomic.AddInt32(&s.loops, 1)
-	defer func() {
-		atomic.AddInt32(&s.loops, -1)
-		if !returnNoClose {
-			s.Close()
+func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
+	atomic.AddInt32(&s.inflight, 1)
+	defer atomic.AddInt32(&s.inflight, -1)
+
+	var piece Piece
+	err := func() error {
+		reqCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 		}
+
+		proof, err := cell.FromBOC(piece.Proof)
+		if err != nil {
+			return fmt.Errorf("failed to parse BoC of piece %d, err: %w", id, err)
+		}
+
+		err = cell.CheckProof(proof, s.torrent.Info.RootHash)
+		if err != nil {
+			return fmt.Errorf("proof check of piece %d failed: %w", id, err)
+		}
+
+		err = s.torrent.checkProofBranch(proof, piece.Data, id)
+		if err != nil {
+			return fmt.Errorf("proof branch check of piece %d failed: %w", id, err)
+		}
+
+		s.torrent.UpdateDownloadedPeer(s, uint64(len(piece.Data)))
+		return nil
 	}()
-
-	for {
-		var req *pieceRequest
-		select {
-		case <-s.globalCtx.Done():
-			return
-		case <-s.torrent.completedCtx.Done():
-			Logger("[STORAGE] DOWNLOAD COMPLETED, CLOSING LOOP", hex.EncodeToString(s.nodeId), s.nodeAddr)
-			returnNoClose = true
-			return
-		case req = <-s.pieceQueue:
-			select {
-			case <-req.ctx.Done():
-				Logger("[STORAGE] ABANDONED PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.nodeAddr)
-				continue
-			default:
-			}
-
-			Logger("[STORAGE] PICKED UP PIECE TASK", req.index, "BY ", hex.EncodeToString(s.nodeId), s.nodeAddr)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, err
 		}
 
-		resp := pieceResponse{
-			index: req.index,
-			node:  s,
-		}
+		Logger("[STORAGE] LOAD PIECE FROM", s.nodeAddr, "ERR:", err.Error())
 
-		untrusted := false
-		var piece Piece
-		resp.err = func() error {
-			reqCtx, cancel := context.WithTimeout(req.ctx, 7*time.Second)
-			err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{req.index}), &piece)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("failed to query piece %d. err: %w", req.index, err)
+		now := time.Now().Unix()
+		if old := atomic.LoadInt64(&s.failAt); old < time.Now().Unix()-2 {
+			if atomic.CompareAndSwapInt64(&s.failAt, old, now) {
+				atomic.AddInt32(&s.fails, 1)
 			}
 
-			proof, err := cell.FromBOC(piece.Proof)
-			if err != nil {
-				untrusted = true
-				return fmt.Errorf("failed to parse BoC of piece %d, err: %w", req.index, err)
-			}
-
-			err = cell.CheckProof(proof, s.torrent.Info.RootHash)
-			if err != nil {
-				untrusted = true
-				return fmt.Errorf("proof check of piece %d failed: %w", req.index, err)
-			}
-
-			err = s.torrent.checkProofBranch(proof, piece.Data, uint32(req.index))
-			if err != nil {
-				untrusted = true
-				return fmt.Errorf("proof branch check of piece %d failed: %w", req.index, err)
-			}
-
-			s.torrent.UpdateDownloadedPeer(s, uint64(len(piece.Data)))
-			return nil
-		}()
-		if resp.err == nil {
-			atomic.StoreInt32(&s.fails, 0)
-			resp.piece = piece
-		} else {
-			Logger("[STORAGE] LOAD PIECE FROM", s.nodeAddr, "ERR:", resp.err.Error())
-			atomic.AddInt32(&s.fails, 1)
-		}
-		req.result <- resp
-
-		if resp.err != nil {
-			if atomic.LoadInt32(&s.fails) >= 3*atomic.LoadInt32(&s.loops) || untrusted {
-				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", resp.err.Error())
+			// in case 3 fails with 2s delay in a row, disconnect
+			if atomic.LoadInt32(&s.fails) >= 3 {
+				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 				// something wrong, close connection, we should reconnect after it
-				return
-			}
-
-			select {
-			case <-s.globalCtx.Done():
-				return
-			case <-time.After(300 * time.Millisecond):
-				// TODO: take down all loops
-				// take loop down for some time, to allow other nodes to pickup piece
+				s.Close()
 			}
 		}
+		return nil, err
 	}
+	atomic.StoreInt32(&s.fails, 0)
+	atomic.StoreInt64(&s.failAt, 0)
+
+	return &piece, nil
 }
 
 // DownloadPieceDetailed - same as DownloadPiece, but also returns proof data
 func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (piece []byte, proof []byte, peer []byte, peerAddr string, err error) {
-	resp := make(chan pieceResponse, 1)
-	req := pieceRequest{
-		index:  int32(pieceIndex),
-		ctx:    ctx,
-		result: resp,
-	}
-
 	skip := map[string]*storagePeer{}
 	for {
 		peers := t.torrent.GetPeers()
@@ -568,29 +510,21 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			continue
 		}
 
-		// wait for one of desired nodes to accept task
-		cases := make([]reflect.SelectCase, len(nodes)+1)
-		for i, n := range nodes {
-			cases[i] = reflect.SelectCase{Dir: reflect.SelectSend, Chan: reflect.ValueOf(n.pieceQueue), Send: reflect.ValueOf(&req)}
-		}
-		cases[len(nodes)] = reflect.SelectCase{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(ctx.Done())}
+		// use most free node
+		sort.Slice(nodes, func(i, j int) bool {
+			p1 := atomic.LoadInt32(&nodes[i].inflight) + (5 * atomic.LoadInt32(&nodes[i].fails))
+			p2 := atomic.LoadInt32(&nodes[j].inflight) + (5 * atomic.LoadInt32(&nodes[j].fails))
+			return p1 < p2
+		})
 
-		chId, _, recvOk := reflect.Select(cases)
-		if recvOk && ctx.Err() != nil {
-			return nil, nil, nil, "", ctx.Err()
+		node := nodes[0]
+		pc, err := node.downloadPiece(ctx, pieceIndex)
+		if err != nil {
+			skip[string(node.nodeId)] = node
+			continue
 		}
 
-		select {
-		case <-ctx.Done():
-			return nil, nil, nil, "", ctx.Err()
-		case result := <-resp:
-			if result.err != nil {
-				skip[string(nodes[chId].nodeId)] = nodes[chId]
-				// try next node
-				continue
-			}
-			return result.piece.Data, result.piece.Proof, result.node.nodeId, result.node.nodeAddr, nil
-		}
+		return pc.Data, pc.Proof, node.nodeId, node.nodeAddr, nil
 	}
 }
 

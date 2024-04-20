@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/hex"
 	"fmt"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 	"io"
 	"math/bits"
 	"sync"
@@ -39,6 +41,7 @@ type FSFile interface {
 
 type FS interface {
 	Open(name string, mode OpenMode) (FSFile, error)
+	Delete(name string) error
 	Exists(name string) bool
 }
 
@@ -97,17 +100,18 @@ type Torrent struct {
 	peers      map[string]*PeerInfo
 	peersMx    sync.RWMutex
 
-	memCache map[uint32]*Piece
-	db       Storage
+	db Storage
 
-	completedCtx context.Context
-	globalCtx    context.Context
-	pause        func()
-	complete     func()
+	// completedCtx context.Context
+	globalCtx context.Context
+	pause     func()
+	// complete     func()
 
 	filesIndex map[string]uint32
 
-	pieceMask []byte
+	pieceMask                []byte
+	lastVerified             time.Time
+	isVerificationInProgress bool
 
 	mx            sync.Mutex
 	maskMx        sync.RWMutex
@@ -129,32 +133,11 @@ func (t *Torrent) GetConnector() NetConnector {
 	return t.connector
 }
 
-func (t *Torrent) BuildCache(cachePiecesNum int) error {
-	t.memCache = map[uint32]*Piece{}
-
-	num := t.PiecesNum()
-	if cachePiecesNum > int(num) {
-		cachePiecesNum = int(num)
-	}
-
-	t.memCache = map[uint32]*Piece{}
-	for i := 0; i < cachePiecesNum; i++ {
-		p, err := t.getPieceInternal(uint32(i))
-		if err != nil {
-			return err
-		}
-		t.memCache[uint32(i)] = p
-	}
-
-	return nil
-}
-
 func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t := &Torrent{
 		Path:          path,
 		CreatedAt:     time.Now(),
 		peers:         map[string]*PeerInfo{},
-		memCache:      map[uint32]*Piece{},
 		knownNodes:    map[string]*overlay.Node{},
 		db:            db,
 		connector:     connector,
@@ -163,7 +146,7 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 
 	// create as stopped
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
-	t.completedCtx, t.complete = context.WithCancel(context.Background())
+	// t.completedCtx, t.complete = context.WithCancel(context.Background())
 	t.pause()
 
 	return t
@@ -194,6 +177,10 @@ func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 	}
 }
 
+func (t *Torrent) GetLastVerifiedAt() (bool, time.Time) {
+	return t.isVerificationInProgress, t.lastVerified
+}
+
 func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
 	select {
 	case <-t.globalCtx.Done():
@@ -218,6 +205,22 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 		return nil
 	}
 
+	if !t.isVerificationInProgress && t.lastVerified.Before(time.Now().Add(-30*time.Second)) {
+		t.isVerificationInProgress = true
+		go func() {
+			// it will remove corrupted pieces
+			if err = t.verify(true); err != nil {
+				Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
+			}
+
+			t.mx.Lock()
+			defer t.mx.Unlock()
+
+			t.lastVerified = time.Now()
+			t.isVerificationInProgress = false
+		}()
+	}
+
 	t.downloadAll = downloadAll
 	t.downloadOrdered = downloadOrdered
 
@@ -226,12 +229,12 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
-	t.completedCtx, t.complete = context.WithCancel(context.Background())
+	// t.completedCtx, t.complete = context.WithCancel(context.Background())
 	go t.runPeersMonitor()
 	go t.connector.StartPeerSearcher(t)
 
 	if t.IsCompleted() {
-		t.complete()
+		//	t.complete()
 		return nil
 	}
 
@@ -282,9 +285,9 @@ func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
 	// notify peers about our new pieces
 	t.newPiecesCond.Broadcast()
 
-	if t.IsCompleted() {
-		t.complete()
-	}
+	//if t.IsCompleted() {
+	//	t.complete()
+	//}
 
 	return nil
 }
@@ -381,24 +384,17 @@ func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 		return nil, fmt.Errorf("torrent paused")
 	default:
 	}
-	return t.getPieceInternal(id)
+	return t.getPieceInternal(id, false)
 }
 
-func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
-	if t.memCache != nil {
-		p := t.memCache[id]
-		if p != nil {
-			return p, nil
-		}
-	}
-
+func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 	if id >= t.PiecesNum() {
 		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
 	}
 
 	piece, err := t.getPiece(id)
 	if err != nil {
-		return nil, fmt.Errorf("piece %d is not downlaoded (%w)", id, err)
+		return nil, fmt.Errorf("piece %d is not downloaded (%w)", id, err)
 	}
 
 	offset := 0
@@ -463,6 +459,21 @@ func (t *Torrent) getPieceInternal(id uint32) (*Piece, error) {
 		block = block[:offset]
 	}
 
+	if verify {
+		proof, err := cell.FromBOC(piece.Proof)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse proof cell: %w", err)
+		}
+
+		if err = cell.CheckProof(proof, t.Info.RootHash); err != nil {
+			return nil, fmt.Errorf("proof check of piece %d failed: %w", id, err)
+		}
+
+		if err = t.checkProofBranch(proof, block, id); err != nil {
+			return nil, fmt.Errorf("piece verification failed: %w", err)
+		}
+	}
+
 	return &Piece{
 		Proof: piece.Proof,
 		Data:  block,
@@ -474,9 +485,9 @@ func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
 		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
 	}
 
-	piece, err := t.getPiece(id)
+	piece, err := t.getPieceInternal(id, true)
 	if err != nil {
-		return nil, fmt.Errorf("piece %d is not downlaoded (%w)", id, err)
+		return nil, fmt.Errorf("piece %d error: %w", id, err)
 	}
 
 	return piece.Proof, nil
