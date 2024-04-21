@@ -56,7 +56,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 		}
 
 		if t.downloader == nil || !t.downloader.IsActive() {
-			t.downloader, err = t.connector.CreateDownloader(ctx, t, 5, 12)
+			t.downloader, err = t.connector.CreateDownloader(ctx, t)
 			if err != nil {
 				Logger("bag information not resolved: %s", err.Error())
 				time.Sleep(1 * time.Second)

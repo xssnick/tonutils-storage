@@ -45,24 +45,17 @@ type FileInfo struct {
 type TorrentDownloader interface {
 	DownloadPiece(ctx context.Context, pieceIndex uint32) (_ []byte, err error)
 	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, peerAddr string, err error)
-	SetDesiredMinNodesNum(num int)
 	Close()
 	IsActive() bool
 }
 
 type torrentDownloader struct {
-	piecesNum uint32
-
-	desiredMinPeersNum int
-	threadsPerPeer     int
-	attempts           int
-
 	torrent *Torrent
-
-	mx sync.Mutex
 
 	globalCtx      context.Context
 	downloadCancel func()
+
+	mx sync.Mutex
 }
 
 type pieceResponse struct {
@@ -91,9 +84,10 @@ type storagePeer struct {
 	hasPieces      map[uint32]bool
 	piecesMx       sync.RWMutex
 
-	fails    int32
-	failAt   int64
-	inflight int32
+	fails            int32
+	failAt           int64
+	inflight         int32
+	maxInflightScore int32
 
 	activateOnce sync.Once
 	closeOnce    sync.Once
@@ -197,18 +191,16 @@ func (c *Connector) GetADNLPrivateKey() ed25519.PrivateKey {
 	return c.TorrentServer.GetADNLPrivateKey()
 }
 
-func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMinPeersNum, threadsPerPeer int) (_ TorrentDownloader, err error) {
+func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ TorrentDownloader, err error) {
 	if len(t.BagID) != 32 {
 		return nil, fmt.Errorf("invalid torrent bag id")
 	}
 
 	globalCtx, downloadCancel := context.WithCancel(ctx)
 	var dow = &torrentDownloader{
-		torrent:            t,
-		globalCtx:          globalCtx,
-		downloadCancel:     downloadCancel,
-		desiredMinPeersNum: desiredMinPeersNum,
-		threadsPerPeer:     threadsPerPeer,
+		torrent:        t,
+		globalCtx:      globalCtx,
+		downloadCancel: downloadCancel,
 	}
 	defer func() {
 		if err != nil {
@@ -232,7 +224,6 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent, desiredMin
 			}
 		}
 	}
-	dow.piecesNum = dow.torrent.PiecesNum()
 
 	if dow.torrent.Header == nil {
 		hdrPieces := dow.torrent.Info.HeaderSize / uint64(dow.torrent.Info.PieceSize)
@@ -419,9 +410,6 @@ func (s *storagePeer) pieceNotifier() {
 }
 
 func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
-	atomic.AddInt32(&s.inflight, 1)
-	defer atomic.AddInt32(&s.inflight, -1)
-
 	var piece Piece
 	err := func() error {
 		reqCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
@@ -477,7 +465,7 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 	return &piece, nil
 }
 
-var DownloadMaxInflight = int32(20)
+var DownloadMaxInflightScore = int32(400)
 
 // DownloadPieceDetailed - same as DownloadPiece, but also returns proof data
 func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (piece []byte, proof []byte, peer []byte, peerAddr string, err error) {
@@ -495,7 +483,7 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 				}
 
 				inf := atomic.LoadInt32(&node.peer.inflight)
-				if inf >= DownloadMaxInflight {
+				if inf > atomic.LoadInt32(&node.peer.maxInflightScore)/10 {
 					continue
 				}
 
@@ -532,8 +520,16 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 		pc, err := bestNode.downloadPiece(ctx, pieceIndex)
 		atomic.AddInt32(&bestNode.inflight, -1)
 		if err != nil {
+			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x > 5 {
+				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x-5)
+			}
+
 			skip[string(bestNode.nodeId)] = bestNode
 			continue
+		}
+
+		if x := atomic.LoadInt32(&bestNode.maxInflightScore); x < DownloadMaxInflightScore {
+			atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x+1)
 		}
 
 		return pc.Data, pc.Proof, bestNode.nodeId, bestNode.nodeAddr, nil
@@ -597,10 +593,6 @@ func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) 
 		return fmt.Errorf("incorrect branch hash")
 	}
 	return nil
-}
-
-func (t *torrentDownloader) SetDesiredMinNodesNum(num int) {
-	t.desiredMinPeersNum = num
 }
 
 func (t *torrentDownloader) Close() {

@@ -764,13 +764,14 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv
 	}
 
 	stNode := &storagePeer{
-		torrent:   t,
-		nodeAddr:  conn.adnl.RemoteAddr(),
-		nodeId:    conn.adnl.GetID(),
-		conn:      conn,
-		sessionId: sessionId,
-		overlay:   overlay,
-		hasPieces: map[uint32]bool{},
+		torrent:          t,
+		nodeAddr:         conn.adnl.RemoteAddr(),
+		nodeId:           conn.adnl.GetID(),
+		conn:             conn,
+		sessionId:        sessionId,
+		overlay:          overlay,
+		maxInflightScore: 50,
+		hasPieces:        map[uint32]bool{},
 	}
 
 	conn.UseFor(stNode)
