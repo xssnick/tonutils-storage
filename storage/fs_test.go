@@ -40,7 +40,6 @@ func testAcquire(paths []string) error {
 	eg := new(errgroup.Group)
 	for i, p := range paths {
 		i, p := i, p
-		fmt.Println("acquiring path", p)
 		eg.Go(func() error {
 			fd, err := fs.Acquire(p)
 			if i > _FDLimit-3 {
