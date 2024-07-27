@@ -76,8 +76,6 @@ github.com/syndtr/goleveldb v1.0.0/go.mod h1:ZVVdQEZoIme9iO1Ch2Jdy24qqXrMMOU6lpP
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
-github.com/xssnick/tonutils-go v1.9.5-0.20240417140218-f5211a727ef0 h1:LS+4RL5V23YdErIyWd6sibJl/+IkcnWvHbfS7vy6i3c=
-github.com/xssnick/tonutils-go v1.9.5-0.20240417140218-f5211a727ef0/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-go v1.9.5 h1:kyjWcSEBQeCyXsIMYhdMWIV5coNQZ/89pCriqBXOayM=
 github.com/xssnick/tonutils-go v1.9.5/go.mod h1:p1l1Bxdv9sz6x2jfbuGQUGJn6g5cqg7xsTp8rBHFoJY=
 github.com/xssnick/tonutils-go v1.9.9-0.20240726185310-b76c122b8cd6 h1:po4uMNWZTLZxO0Xms4BEHB8TCar3gLFMUAGgmvDsN9E=
@@ -89,6 +87,8 @@ golang.org/x/crypto v0.17.0/go.mod h1:gCAAfMLgwOJRpTjQ2zCCt2OcSfYMTeZVSRtQlPC7Nq
 golang.org/x/exp v0.0.0-20220909182711-5c715a9e8561 h1:MDc5xs78ZrZr3HMQugiXOAkSZtfTpbJLDr/lwfgO53E=
 golang.org/x/net v0.0.0-20180906233101-161cd47e91fd/go.mod h1:mL1N/T3taQHkDXs73rZJwtUhF3w3ftmwwsq0BUmARs4=
 golang.org/x/net v0.10.0 h1:X2//UzNDwYmtCLn7To6G58Wr6f5ahEAQgKNzv9Y951M=
+golang.org/x/net v0.10.0/go.mod h1:0qNGK6F8kojg2nk9dLZ2mShWaEBan6FAoqfSigmmuDg=
+golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f h1:wMNYb4v58l5UBM7MYRLPG6ZhfOqbKu7X5eyFl8ZhKvA=
 golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=
 golang.org/x/sys v0.0.0-20180909124046-d0be0721c37e/go.mod h1:STP8DvDyc/dI5b8T5hshtkjS+E42TnysNCUPdjciGhY=
 golang.org/x/sys v0.0.0-20201119102817-f84b799fce68/go.mod h1:h1NjWce9XRLGQEsW7wpKNCjG9DtNlClVuFLEZdDNbEs=

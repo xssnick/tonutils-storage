@@ -5,14 +5,15 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
-	"github.com/xssnick/tonutils-go/adnl/overlay"
-	"github.com/xssnick/tonutils-go/tl"
-	"github.com/xssnick/tonutils-go/tvm/cell"
 	"io"
 	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/xssnick/tonutils-go/adnl/overlay"
+	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
 type FileIndex struct {
@@ -423,7 +424,7 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 				if err != nil {
 					return err
 				}
-				defer fd.Free()
+				defer fs.Free(fd)
 
 				n, err := fd.Get().ReadAt(block[offset:], from)
 				if err != nil && err != io.EOF {
