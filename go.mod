@@ -6,7 +6,7 @@ require (
 	github.com/kevinms/leakybucket-go v0.0.0-20200115003610-082473db97ca
 	github.com/pterm/pterm v0.12.59
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/xssnick/tonutils-go v1.9.9-0.20240726185310-b76c122b8cd6
+	github.com/xssnick/tonutils-go v1.9.9-0.20240729172752-0ce0d252a288
 	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b
 	golang.org/x/sync v0.0.0-20180314180146-1d60e4601c6f
 )
