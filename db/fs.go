@@ -139,6 +139,12 @@ func (s *Storage) GetAllFilesRefsInDir(path string) ([]storage.FileRef, error) {
 		name := filePath[len(path)+1:]
 		name = strings.ReplaceAll(name, "\\", "/") // to unix style
 
+		nameLower := strings.ToLower(name)
+		if name == ".DS_Store" || nameLower == "desktop.ini" || nameLower == "thumbs.db" {
+			// exclude OS-created files that can be modified automatically and thus break some torrent pieces
+			return nil
+		}
+
 		// stat is not always gives the right file size, so we open file and find the end
 		fl, err := os.Open(filePath)
 		if err != nil {
