@@ -2,6 +2,9 @@ package storage
 
 import (
 	"crypto/rand"
+	"fmt"
+	"io"
+	"os"
 	"testing"
 )
 
@@ -128,6 +131,79 @@ func BenchmarkBuildMerkleTreeDepth4_1k(b *testing.B) {
 }
 func BenchmarkBuildMerkleTreeDepth3_1k(b *testing.B) {
 	testTree(3, 1_000, b)
+}
+
+type fileRef struct {
+	file *os.File
+	size uint64
+}
+
+func (f fileRef) GetName() string {
+	return f.file.Name()
+}
+
+func (f fileRef) GetSize() uint64 {
+	return f.size
+}
+
+func (f fileRef) CreateReader() (io.ReadCloser, error) {
+	return f.file, nil
+}
+
+func TestInitializeTorrent(t *testing.T) {
+	// create tmp files
+	err := os.Mkdir("dumpfiles", 0755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll("dumpfiles")
+
+	files := make([]FileRef, 1000)
+	buff := make([]byte, 1024)
+
+	for i := 0; i < 1000; i++ {
+		f, err := os.CreateTemp("dumpfiles", "dump_")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+
+		_, err = rand.Read(buff)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		f.Write(buff)
+
+		files[i] = fileRef{
+			file: f,
+			size: 1024,
+		}
+	}
+
+	torrent := &Torrent{
+		Header: &TorrentHeader{
+			DirNameSize: uint32(len("dumpfiles")),
+			DirName:     []byte("dumpfiles"),
+		},
+	}
+
+	dataSize, err := initializeTorrentHeader(torrent, files)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if dataSize != 1024*1000 {
+		t.Fatal(fmt.Sprintf("expected 1024 * 1000, got : %d", dataSize))
+	}
+
+	if torrent.Header.FilesCount != 1000 {
+		t.Fatal("invalid files count")
+	}
+
+	if len(torrent.Header.DataIndex) != 1000 {
+		t.Fatal("invalid torrent.Header.DataIndex size")
+	}
 }
 
 func testTree(depth int, hashesCount int, b *testing.B) {

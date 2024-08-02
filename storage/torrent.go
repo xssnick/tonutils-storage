@@ -13,6 +13,7 @@ import (
 
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
@@ -492,4 +493,18 @@ func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
 	}
 
 	return piece.Proof, nil
+}
+
+func (t *Torrent) SetInfoStats(headerData, rootHash []byte, fileSize, headerSize uint64, description string) {
+	t.Info = &TorrentInfo{
+		PieceSize:  pieceSize,
+		FileSize:   fileSize,
+		RootHash:   rootHash,
+		HeaderSize: headerSize,
+		HeaderHash: calcHash(headerData),
+		Description: tlb.Text{
+			MaxFirstChunkSize: tlb.MaxTextChunkSize - 84, // 84 = size of prev data in bytes
+			Value:             description,
+		},
+	}
 }
