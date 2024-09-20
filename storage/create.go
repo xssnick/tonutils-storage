@@ -30,6 +30,21 @@ type FileRef interface {
 }
 
 func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
+	if dirName == "/" {
+		dirName = ""
+	}
+	if err := validateFileName(dirName, false); err != nil {
+		return nil, err
+	}
+	header := &TorrentHeader{
+		DirNameSize: uint32(len(dirName)),
+		DirName:     []byte(dirName),
+	}
+
+	return CreateTorrentWithInitialHeader(ctx, filesRootPath, description, header, db, connector, files, progressCallback)
+}
+
+func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, description string, header *TorrentHeader, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
 	if len(files) == 0 {
 		return nil, fmt.Errorf("0 files in torrent")
 	}
@@ -38,19 +53,8 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 
-	if dirName == "/" {
-		dirName = ""
-	}
-
-	if err := validateFileName(dirName, false); err != nil {
-		return nil, err
-	}
-
 	torrent := NewTorrent(filesRootPath, db, connector)
-	torrent.Header = &TorrentHeader{
-		DirNameSize: uint32(len(dirName)),
-		DirName:     []byte(dirName),
-	}
+	torrent.Header = header
 
 	var maxProgress, doneProgress uint64
 	incProgress := func(num uint64) {
