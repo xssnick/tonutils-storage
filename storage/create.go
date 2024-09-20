@@ -38,12 +38,18 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 	if err := validateFileName(dirName, false); err != nil {
 		return nil, err
 	}
-
-	torrent := NewTorrent(filesRootPath, db, connector)
-	torrent.Header = &TorrentHeader{
+	header := &TorrentHeader{
 		DirNameSize: uint32(len(dirName)),
 		DirName:     []byte(dirName),
 	}
+
+	return CreateTorrentWithInitialHeader(ctx, filesRootPath, description, header, db, connector, files, progressCallback)
+}
+
+func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, description string, header *TorrentHeader, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
+
+	torrent := NewTorrent(filesRootPath, db, connector)
+	torrent.Header = header
 
 	// scanning files to initialize torrent header
 	dataSize, err := initializeTorrentHeader(torrent, files)
