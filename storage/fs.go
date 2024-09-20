@@ -2,12 +2,13 @@ package storage
 
 import (
 	"io"
+	"math"
 	"os"
 	"sync"
 	"sync/atomic"
 )
 
-const _FDLimit = 800
+const _FDLimit = math.MaxInt32
 
 type FDesc struct {
 	file *os.File
