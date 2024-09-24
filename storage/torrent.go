@@ -122,7 +122,7 @@ type Torrent struct {
 	stopDownload        func()
 }
 
-var fs = NewFSController()
+var Fs = NewFSController()
 
 func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
@@ -420,11 +420,11 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 
 			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
 			read := func(path string, from int64) error {
-				fd, err := fs.Acquire(path)
+				fd, err := Fs.Acquire(path)
 				if err != nil {
 					return err
 				}
-				defer fs.Free(fd)
+				defer Fs.Free(fd)
 
 				n, err := fd.Get().ReadAt(block[offset:], from)
 				if err != nil && err != io.EOF {
