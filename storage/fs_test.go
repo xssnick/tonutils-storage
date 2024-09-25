@@ -14,6 +14,7 @@ type testCaseAcquire struct {
 }
 
 func TestAcquire(t *testing.T) {
+	_FDLimit = 800
 	tcs := genTestCasesAcquire()
 	for _, tc := range tcs {
 		t.Run(tc.name, func(t *testing.T) {
@@ -27,6 +28,7 @@ func TestAcquire(t *testing.T) {
 }
 
 func BenchmarkAcquire(b *testing.B) {
+	_FDLimit = 800
 	paths := createTmpFiles(2000)
 	defer cleanTmpFiles(paths)
 	for i := 0; i < b.N; i++ {
