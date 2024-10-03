@@ -280,9 +280,9 @@ func (t *Torrent) ListFiles() ([]string, error) {
 		return nil, err
 	}
 
-	files := make([]string, 0, len(t.filesIndex))
-	for s := range t.filesIndex {
-		files = append(files, s)
+	files := make([]string, len(t.filesIndex), len(t.filesIndex))
+	for s, idx := range t.filesIndex {
+		files[idx] = s
 	}
 	return files, nil
 }
