@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -12,7 +13,9 @@ func init() {
 	tl.Register(TorrentInfoContainer{}, "storage.torrentInfo data:bytes = storage.TorrentInfo")
 	tl.Register(GetTorrentInfo{}, "storage.getTorrentInfo = storage.TorrentInfo")
 	tl.Register(Piece{}, "storage.piece proof:bytes data:bytes = storage.Piece")
+	tl.Register(Test{}, "storage.test data:bytes = storage.Test")
 	tl.Register(GetPiece{}, "storage.getPiece piece_id:int = storage.Piece")
+	tl.Register(GetTest{}, "storage.getTest piece_id:int = storage.test")
 	tl.Register(Ping{}, "storage.ping session_id:long = storage.Pong")
 	tl.Register(Pong{}, "storage.pong = storage.Pong")
 	tl.Register(AddUpdate{}, "storage.addUpdate session_id:long seqno:int update:storage.Update = Ok")
@@ -51,6 +54,20 @@ type Piece struct {
 }
 
 type GetPiece struct {
+	PieceID int32 `tl:"int"`
+}
+
+type Test struct {
+	Data []byte `tl:"bytes"`
+}
+
+var stub = func() []byte {
+	b := make([]byte, 100*128*1024)
+	_, _ = rand.Read(b)
+	return b
+}()
+
+type GetTest struct {
 	PieceID int32 `tl:"int"`
 }
 
@@ -282,9 +299,9 @@ func (t *Torrent) ListFiles() ([]string, error) {
 		return nil, err
 	}
 
-	files := make([]string, 0, len(t.filesIndex))
-	for s := range t.filesIndex {
-		files = append(files, s)
+	files := make([]string, len(t.filesIndex), len(t.filesIndex))
+	for s, idx := range t.filesIndex {
+		files[idx] = s
 	}
 	return files, nil
 }

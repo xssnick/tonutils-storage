@@ -309,7 +309,7 @@ func (s *storagePeer) pinger(srv *Server) {
 	var lastPeersReq time.Time
 
 	startedAt := time.Now()
-	fails := 0
+	fails := int32(0)
 	for {
 		wait := 250 * time.Millisecond
 		if s.sessionId != 0 {
@@ -317,16 +317,18 @@ func (s *storagePeer) pinger(srv *Server) {
 			// session should be initialised
 			var pong Pong
 			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
-			err := s.conn.rldp.DoQuery(ctx, 1<<25, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
+			err := s.conn.adnl.Query(ctx, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
 			cancel()
 			if err != nil {
 				fails++
 				if fails >= 3 {
 					Logger("[STORAGE] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.nodeAddr, err.Error())
+					s.conn.FailedFor(s, true)
 					return
 				}
 			} else {
 				fails = 0
+				s.conn.FailedFor(s, false)
 				s.touch()
 			}
 		} else {
@@ -412,7 +414,7 @@ func (s *storagePeer) pieceNotifier() {
 func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
 	var piece Piece
 	err := func() error {
-		reqCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
 		cancel()
 		if err != nil {
@@ -454,6 +456,7 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 			if atomic.LoadInt32(&s.fails) >= 3 {
 				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 				// something wrong, close connection, we should reconnect after it
+				s.conn.FailedFor(s, true)
 				s.Close()
 			}
 		}
@@ -461,6 +464,7 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 	}
 	atomic.StoreInt32(&s.fails, 0)
 	atomic.StoreInt64(&s.failAt, 0)
+	s.conn.FailedFor(s, false)
 
 	return &piece, nil
 }
@@ -517,7 +521,9 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			continue
 		}
 
+		// tm := time.Now()
 		pc, err := bestNode.downloadPiece(ctx, pieceIndex)
+		// log.Println("DW", pieceIndex, bestNode.nodeAddr, time.Since(tm).String(), err)
 		atomic.AddInt32(&bestNode.inflight, -1)
 		if err != nil {
 			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x > 5 {

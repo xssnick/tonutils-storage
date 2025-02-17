@@ -6,12 +6,64 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/pterm/pterm"
-	"github.com/xssnick/tonutils-storage/db"
 	"log"
 	"net"
 	"os"
+	"runtime"
 	"time"
 )
+
+type ChannelConfig struct {
+	VirtualChannelProxyFee      string
+	QuarantineDurationSec       uint32
+	MisbehaviorFine             string
+	ConditionalCloseDurationSec uint32
+}
+
+type PaymentsConfig struct {
+	Enabled            bool
+	PaymentsServerKey  []byte
+	WalletPrivateKey   []byte
+	PaymentsListenAddr string
+	DBPath             string
+	SecureProofPolicy  bool
+	ChannelConfig      ChannelConfig
+}
+
+type PaymentChain struct {
+	NodeKey     []byte
+	Fee         string
+	MaxCapacity string
+}
+
+type TunnelSectionPayment struct {
+	Chain              []PaymentChain
+	PricePerPacketNano uint64
+}
+
+type TunnelRouteSection struct {
+	Key     []byte
+	Payment *TunnelSectionPayment
+}
+
+type TunnelConfig struct {
+	Enabled         bool
+	TunnelServerKey []byte
+	TunnelThreads   uint
+	Payments        PaymentsConfig
+	OutGateway      TunnelRouteSection
+	RouteOut        []TunnelRouteSection
+	RouteIn         []TunnelRouteSection
+}
+
+type Config struct {
+	Key              ed25519.PrivateKey
+	ListenAddr       string
+	ExternalIP       string
+	DownloadsPath    string
+	NetworkConfigUrl string
+	Tunnel           TunnelConfig
+}
 
 func checkIPAddress(ip string) string {
 	p := net.ParseIP(ip)
@@ -97,7 +149,7 @@ func checkCanSeed() (string, bool) {
 	return ip, ok
 }
 
-func LoadConfig(dir string) (*db.Config, error) {
+func LoadConfig(dir string) (*Config, error) {
 	_, err := os.Stat(dir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -116,11 +168,56 @@ func LoadConfig(dir string) (*db.Config, error) {
 			return nil, err
 		}
 
-		cfg := &db.Config{
-			Key:           priv,
-			ListenAddr:    "0.0.0.0:17555",
-			ExternalIP:    "",
-			DownloadsPath: "./downloads/",
+		_, paymentsPrv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+
+		_, tunnelPrv, err := ed25519.GenerateKey(nil)
+		if err != nil {
+			return nil, err
+		}
+
+		cfg := &Config{
+			Key:              priv,
+			ListenAddr:       "0.0.0.0:17555",
+			ExternalIP:       "",
+			DownloadsPath:    "./downloads/",
+			NetworkConfigUrl: "https://ton-blockchain.github.io/global.config.json",
+			Tunnel: TunnelConfig{
+				Enabled:         false,
+				TunnelServerKey: tunnelPrv.Seed(),
+				TunnelThreads:   uint(runtime.NumCPU()),
+				Payments: PaymentsConfig{
+					Enabled:            false,
+					PaymentsServerKey:  paymentsPrv.Seed(),
+					WalletPrivateKey:   priv.Seed(),
+					PaymentsListenAddr: "0.0.0.0:17331",
+					DBPath:             "./payments-db/",
+					SecureProofPolicy:  false,
+					ChannelConfig: ChannelConfig{
+						VirtualChannelProxyFee:      "0.01",
+						QuarantineDurationSec:       600,
+						MisbehaviorFine:             "0.15",
+						ConditionalCloseDurationSec: 180,
+					},
+				},
+				OutGateway: TunnelRouteSection{
+					Key: nil,
+					Payment: &TunnelSectionPayment{
+						Chain: []PaymentChain{
+							{
+								NodeKey:     nil,
+								Fee:         "0.005",
+								MaxCapacity: "3",
+							},
+						},
+						PricePerPacketNano: 0,
+					},
+				},
+				RouteOut: []TunnelRouteSection{},
+				RouteIn:  []TunnelRouteSection{},
+			},
 		}
 
 		ip, seed := checkCanSeed()
@@ -140,7 +237,7 @@ func LoadConfig(dir string) (*db.Config, error) {
 			return nil, err
 		}
 
-		var cfg db.Config
+		var cfg Config
 		err = json.Unmarshal(data, &cfg)
 		if err != nil {
 			return nil, err
@@ -151,7 +248,7 @@ func LoadConfig(dir string) (*db.Config, error) {
 	return nil, err
 }
 
-func SaveConfig(cfg *db.Config, dir string) error {
+func SaveConfig(cfg *Config, dir string) error {
 	path := dir + "/config.json"
 
 	data, err := json.MarshalIndent(cfg, "", "\t")
