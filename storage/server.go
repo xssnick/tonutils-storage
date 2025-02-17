@@ -15,6 +15,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/rand"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -189,13 +190,13 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 
 		_, isUpl := t.IsActive()
 		if !isUpl {
-			return fmt.Errorf("bag is not active")
+			return fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID))
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 
-		switch req.(type) {
+		switch q := req.(type) {
 		case overlay.GetRandomPeers:
 			node, err := overlay.NewNode(t.BagID, s.key)
 			if err != nil {
@@ -217,9 +218,71 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 				return err
 			}
 		case Ping:
-			err := peer.Answer(ctx, query.ID, Pong{})
-			if err != nil {
+			p := s.GetPeerIfActive(peer.GetID())
+			if p == nil {
+				return fmt.Errorf("peer disconnected")
+			}
+			stPeer := p.GetFor(t.BagID)
+
+			if stPeer == nil {
+				var sesId = rand.Int63()
+				switch q := req.(type) {
+				case Ping:
+					sesId = q.SessionID
+				}
+
+				t.mx.Lock()
+				stPeer = t.initStoragePeer(t.globalCtx, over, s, p, sesId)
+				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
+				t.mx.Unlock()
+
+				// prepare torrent info if needed
+				go stPeer.prepareTorrentInfo(t)
+			}
+			stPeer.touch()
+
+			if atomic.LoadInt64(&stPeer.sessionId) != q.SessionID {
+				atomic.StoreInt64(&stPeer.sessionId, q.SessionID)
+				atomic.StoreInt64(&stPeer.sessionSeqno, 0)
+				Logger("[STORAGE] NEW SESSION WITH", hex.EncodeToString(peer.GetID()), q.SessionID)
+			}
+
+			if err := peer.Answer(ctx, query.ID, Pong{}); err != nil {
 				return err
+			}
+
+			// TODO: async?
+			if atomic.LoadInt64(&stPeer.sessionSeqno) == 0 {
+				stPeer.piecesMx.Lock()
+				stPeer.lastSentPieces = t.PiecesMask()
+				stPeer.piecesMx.Unlock()
+
+				up := AddUpdate{
+					SessionID: atomic.LoadInt64(&stPeer.sessionId),
+					Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
+					Update: UpdateInit{
+						HavePieces:       stPeer.lastSentPieces,
+						HavePiecesOffset: 0,
+						State: State{
+							WillUpload:   isUpl,
+							WantDownload: true,
+						},
+					},
+				}
+
+				go func() {
+					var updRes Ok
+					if err := stPeer.conn.rldp.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
+						return
+					}
+				}()
+
+			} else {
+				go func() {
+					if err := stPeer.updateHavePieces(context.Background(), t); err != nil {
+						return
+					}
+				}()
 			}
 		}
 
@@ -230,6 +293,19 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte, query *rldp.Query) error {
 	return func(transfer []byte, query *rldp.Query) error {
 		req, over := overlay.UnwrapQuery(query.Data)
+
+		switch q := req.(type) {
+		case GetTest:
+			i := uint32(q.PieceID) % 100
+			// println("GT", q.PieceID)
+
+			err := peer.SendAnswer(context.Background(), query.MaxAnswerSize, query.ID, transfer, Test{stub[i : i+128*1024]})
+			if err != nil {
+				return err
+			}
+			return nil
+		default:
+		}
 
 		if s.store == nil {
 			return fmt.Errorf("storage is not yet initialized")
@@ -242,7 +318,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		isDow, isUpl := t.IsActive()
 		if !isDow && !isUpl {
-			return fmt.Errorf("bag is not active")
+			return fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID))
 		}
 
 		adnlId := peer.GetADNL().GetID()
@@ -759,7 +835,10 @@ func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
 	return s.key
 }
 
-func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
+var DOTEST = false
+var oo = sync.Once{}
+
+func (t *Torrent) initStoragePeer(globalCtx context.Context, over []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
 		return n
 	}
@@ -770,7 +849,7 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv
 		nodeId:           conn.adnl.GetID(),
 		conn:             conn,
 		sessionId:        sessionId,
-		overlay:          overlay,
+		overlay:          over,
 		maxInflightScore: 50,
 		hasPieces:        map[uint32]bool{},
 	}
@@ -778,6 +857,85 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, overlay []byte, srv
 	conn.UseFor(stNode)
 	stNode.globalCtx, stNode.stop = context.WithCancel(globalCtx)
 	go stNode.pinger(srv)
+
+	if DOTEST {
+		oo.Do(func() {
+			i := int32(0)
+			transferred := uint64(0)
+			lastTransferred := uint64(0)
+			println("DOING TEST!")
+			lastAt := int64(0)
+
+			mw := map[string]time.Time{}
+			mx := sync.RWMutex{}
+
+			toQuery := make(chan bool, 100)
+			for x := 0; x < 100; x++ {
+				toQuery <- true
+			}
+
+			ch := make(chan rldp.AsyncQueryResult, 2048)
+			for f := 0; f < 2; f++ {
+				go func() {
+					for range toQuery {
+						qid := make([]byte, 32)
+						rand.Read(qid)
+
+						mx.Lock()
+						mw[string(qid)] = time.Now()
+						mx.Unlock()
+
+						ctm, cancel := context.WithTimeout(context.Background(), time.Second*5)
+						//err := stNode.conn.adnl.SendCustomMessage(ctm, Test{make([]byte, 800)})
+						err := stNode.conn.rldp.DoQueryAsync(ctm, 100*1024*1024, qid, overlay.WrapQuery(over, GetTest{PieceID: atomic.AddInt32(&i, 1)}), ch)
+						cancel()
+						if err != nil {
+							println("FAIL", err.Error())
+							time.Sleep(50 * time.Millisecond)
+							continue
+						}
+					}
+				}()
+			}
+
+			go func() {
+				for {
+					time.Sleep(20 * time.Millisecond)
+
+					mx.Lock()
+					for s, t2 := range mw {
+						if time.Since(t2) > 5*time.Second {
+							delete(mw, s)
+							toQuery <- true
+						}
+					}
+					mx.Unlock()
+				}
+			}()
+
+			go func() {
+				for result := range ch {
+					id := string(result.QueryID)
+					mx.Lock()
+					ln := len(mw)
+					if _, ok := mw[id]; ok {
+						delete(mw, string(result.QueryID))
+						toQuery <- true
+					}
+					mx.Unlock()
+
+					amt := atomic.AddUint64(&transferred, uint64(len(result.Result.(Test).Data)))
+					la := atomic.LoadInt64(&lastAt)
+					tm := time.Now().Unix()
+
+					if la < tm && atomic.CompareAndSwapInt64(&lastAt, la, tm) {
+						println("TRANSFERRED:", amt/1024/1024, "MB", (amt-lastTransferred)/1024, "KB/ps", runtime.NumGoroutine(), ln)
+						lastTransferred = amt
+					}
+				}
+			}()
+		})
+	}
 
 	return stNode
 }

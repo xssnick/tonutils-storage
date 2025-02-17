@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -11,13 +12,24 @@ import (
 	"fmt"
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
+	zl "github.com/rs/zerolog"
+	zlg "github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/ton-blockchain/adnl-tunnel/tunnel"
+	"github.com/xssnick/ton-payment-network/pkg/payments"
+	"github.com/xssnick/ton-payment-network/tonpayments"
+	"github.com/xssnick/ton-payment-network/tonpayments/chain"
+	configPayments "github.com/xssnick/ton-payment-network/tonpayments/config"
+	dbPayments "github.com/xssnick/ton-payment-network/tonpayments/db"
+	leveldbPayments "github.com/xssnick/ton-payment-network/tonpayments/db/leveldb"
+	transportPayments "github.com/xssnick/ton-payment-network/tonpayments/transport"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
+	"github.com/xssnick/tonutils-go/ton/wallet"
 	"github.com/xssnick/tonutils-storage-provider/pkg/contract"
 	"github.com/xssnick/tonutils-storage-provider/pkg/transport"
 	"github.com/xssnick/tonutils-storage/api"
@@ -29,22 +41,28 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 )
+
+import _ "net/http/pprof"
 
 var (
 	API                 = flag.String("api", "", "HTTP API listen address")
 	CredentialsLogin    = flag.String("api-login", "", "HTTP API credentials login")
 	CredentialsPassword = flag.String("api-password", "", "HTTP API credentials password")
 	DBPath              = flag.String("db", "tonutils-storage-db", "Path to db folder")
-	Verbosity           = flag.Int("debug", 0, "Debug logs")
+	Verbosity           = flag.Int("verbosity", 2, "Debug logs")
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 	Version             = flag.Bool("version", false, "Show version and exit")
+	DoTest              = flag.Bool("xtest", false, "T traffic")
+	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 )
 
 var GitCommit string
@@ -61,23 +79,25 @@ func main() {
 		os.Exit(0)
 	}
 
+	storage.DOTEST = *DoTest
+
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
 	provider.Logger = func(...any) {}
 
-	if *Verbosity > 3 {
-		*Verbosity = 3
+	if *Verbosity > 13 {
+		*Verbosity = 13
 	}
 
 	switch *Verbosity {
-	case 3:
+	case 13:
 		adnl.Logger = log.Println
 		fallthrough
-	case 2:
+	case 12:
 		dht.Logger = log.Println
 		fallthrough
-	case 1:
+	case 11:
 		storage.Logger = log.Println
 		provider.Logger = log.Println
 	}
@@ -124,7 +144,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		lsCfg, err = liteclient.GetConfigFromUrl(context.Background(), "https://ton.org/global.config.json")
+		lsCfg, err = liteclient.GetConfigFromUrl(context.Background(), cfg.NetworkConfigUrl)
 		if err != nil {
 			pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
 			lsCfg = &liteclient.GlobalConfig{}
@@ -135,18 +155,65 @@ func main() {
 		}
 	}
 
-	gate := adnl.NewGateway(cfg.Key)
+	lsClient := liteclient.NewConnectionPool()
+	if err = lsClient.AddConnectionsFromConfig(context.Background(), lsCfg); err != nil {
+		pterm.Error.Println("Failed to init LS client:", err.Error())
+		os.Exit(1)
+	}
+
+	apiClient := ton.NewAPIClient(lsClient, ton.ProofCheckPolicyFast).WithRetry().WithTimeout(10 * time.Second)
+
+	runtime.SetBlockProfileRate(1)
+	go func() {
+		log.Println(http.ListenAndServe(":6063", nil))
+	}()
+
+	var gate *adnl.Gateway
+	if cfg.Tunnel.Enabled {
+		var ipTun net.IP
+		var portTun uint16
+		var tun *tunnel.RegularOutTunnel
+		tun, portTun, ipTun, err = prepareTun(cfg, apiClient)
+		if err != nil {
+			pterm.Fatal.Println(err.Error())
+			return
+		}
+
+		gate = adnl.NewGatewayWithListener(cfg.Key, func(addr string) (net.PacketConn, error) {
+			return tun, nil
+		})
+
+		if ipTun != nil {
+			pterm.Success.Println("Using tunnel:", ipTun.String())
+			if ip != nil {
+				ip = ipTun
+				gate.SetExternalPort(portTun)
+			}
+		} else {
+			pterm.Warning.Println("Using tunnel: ???")
+		}
+	} else {
+		gate = adnl.NewGateway(cfg.Key)
+	}
+
+	listenThreads := runtime.NumCPU()
+	if listenThreads > 32 {
+		listenThreads = 32
+	}
+	if *ListenThreads > 0 {
+		listenThreads = *ListenThreads
+	}
 
 	serverMode := ip != nil
 	if serverMode {
 		gate.SetExternalIP(ip)
-		err = gate.StartServer(cfg.ListenAddr)
+		err = gate.StartServer(cfg.ListenAddr, listenThreads)
 		if err != nil {
 			pterm.Error.Println("Failed to start adnl gateway in server mode:", err.Error())
 			os.Exit(1)
 		}
 	} else {
-		err = gate.StartClient()
+		err = gate.StartClient(listenThreads)
 		if err != nil {
 			pterm.Error.Println("Failed to start adnl gateway in client mode:", err.Error())
 			os.Exit(1)
@@ -187,13 +254,6 @@ func main() {
 	}
 	srv.SetStorage(Storage)
 
-	lsClient := liteclient.NewConnectionPool()
-	if err = lsClient.AddConnectionsFromConfig(context.Background(), lsCfg); err != nil {
-		pterm.Error.Println("Failed to init LS client:", err.Error())
-		os.Exit(1)
-	}
-
-	apiClient := ton.NewAPIClient(lsClient, ton.ProofCheckPolicyFast).WithRetry().WithTimeout(10 * time.Second)
 	Provider = provider.NewClient(Storage, apiClient, transport.NewClient(providerGate, dhtClient))
 
 	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
@@ -806,4 +866,329 @@ func rentStorage(ctx context.Context, bagId, addrStr, providerId, amount string)
 
 	tx := "ton://transfer/" + contractAddr.String() + "?bin=" + base64.URLEncoding.EncodeToString(body) + "&init=" + base64.URLEncoding.EncodeToString(stateInit) + "&amount=" + amt.Nano().String()
 	pterm.Info.Println("Use this url to execute transaction:\n" + pterm.Magenta(tx))
+}
+
+func prepareTun(cfg *config.Config, apiClient ton.APIClientWrapped) (*tunnel.RegularOutTunnel, uint16, net.IP, error) {
+	_, dhtKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("failed to generate DHT key: %w", err)
+	}
+
+	_, tunKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("failed to generate TUN key: %w", err)
+	}
+
+	gate := adnl.NewGateway(tunKey)
+	if err = gate.StartClient(8); err != nil {
+		return nil, 0, nil, fmt.Errorf("start gateway as client failed: %w", err)
+	}
+
+	dhtGate := adnl.NewGateway(dhtKey)
+	if err = dhtGate.StartClient(); err != nil {
+		return nil, 0, nil, fmt.Errorf("start dht gateway failed: %w", err)
+	}
+
+	dhtClient, err := dht.NewClientFromConfigUrl(context.Background(), dhtGate, "https://ton-blockchain.github.io/global.config.json")
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("failed to create DHT client: %w", err)
+	}
+
+	/*
+		nodes, err := tGate.DiscoverNodes(context.Background())
+		if err != nil {
+			return nil, nil, fmt.Errorf("discover nodes failed: %w", err)
+		}
+
+		if len(nodes) == 0 {
+			return nil, nil, fmt.Errorf("no nodes found")
+		}
+
+		nodes = nodes[:1]*/
+
+	var chainTo, chainFrom []*tunnel.SectionInfo
+
+	for i, s := range cfg.Tunnel.RouteOut {
+		si, err := paymentConfigToSections(&s, cfg.Tunnel.Payments.Enabled)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("convert config to section %d in `out` route failed: %w", i, err)
+		}
+
+		chainTo = append(chainTo, si)
+	}
+
+	for i, s := range cfg.Tunnel.RouteIn {
+		si, err := paymentConfigToSections(&s, cfg.Tunnel.Payments.Enabled)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("convert config to section %d in `in` route failed: %w", i, err)
+		}
+
+		chainFrom = append(chainFrom, si)
+	}
+
+	siGate, err := paymentConfigToSections(&cfg.Tunnel.OutGateway, cfg.Tunnel.Payments.Enabled)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("convert config to section out gateway failed: %w", err)
+	}
+
+	chainTo = append(chainTo, siGate)
+
+	toUs, err := tunnel.GenerateEncryptionKeys(tunKey.Public().(ed25519.PublicKey))
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("generate us encryption keys failed: %w", err)
+	}
+	chainFrom = append(chainFrom, &tunnel.SectionInfo{
+		Keys: toUs,
+	})
+
+	zLogger := zl.New(zl.NewConsoleWriter()).With().Timestamp().Logger().Level(zl.InfoLevel)
+	if *Verbosity >= 3 {
+		zLogger = zLogger.Level(zl.DebugLevel).With().Logger()
+	} else if *Verbosity == 2 {
+		zLogger = zLogger.Level(zl.InfoLevel).With().Logger()
+	} else if *Verbosity == 1 {
+		zLogger = zLogger.Level(zl.WarnLevel).With().Logger()
+	} else if *Verbosity == 0 {
+		zLogger = zLogger.Level(zl.ErrorLevel).With().Logger()
+	} else {
+		zLogger = zLogger.Level(zl.FatalLevel).With().Logger()
+	}
+	zlg.Logger = zLogger
+
+	scanLog := zl.Nop()
+	if *Verbosity >= 4 {
+		scanLog = zLogger.Level(zl.DebugLevel).With().Str("component", "payments").Logger()
+	}
+
+	var pay *tonpayments.Service
+	if cfg.Tunnel.Payments.Enabled {
+		pay, err = preparePayments(context.Background(), apiClient, dhtClient, cfg, scanLog)
+		if err != nil {
+			return nil, 0, nil, fmt.Errorf("prepare payments failed: %w", err)
+		}
+	}
+
+	tGate := tunnel.NewGateway(gate, dhtClient, tunKey, zLogger.With().Str("component", "gateway").Logger(), tunnel.PaymentConfig{
+		Service: pay,
+	})
+	go func() {
+		if err = tGate.Start(); err != nil {
+			pterm.Fatal.Println("tunnel gateway failed", err)
+			return
+		}
+	}()
+
+	zLogger.Info().Msg("creating adnl tunnel...")
+
+	tun, err := tGate.CreateRegularOutTunnel(context.Background(), chainTo, chainFrom, zLogger.With().Str("component", "tunnel").Logger())
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("create regular out tunnel failed: %w", err)
+	}
+
+	extIP, extPort, err := tun.WaitForInit(context.Background())
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("wait for tunnel init failed: %w", err)
+	}
+
+	zLogger.Info().Msg("adnl tunnel is ready")
+
+	return tun, extPort, extIP, nil
+}
+
+func preparePayments(ctx context.Context, apiClient ton.APIClientWrapped, dhtClient *dht.Client, cfg *config.Config, logger zl.Logger) (*tonpayments.Service, error) {
+	nodePrv := ed25519.NewKeyFromSeed(cfg.Tunnel.Payments.PaymentsServerKey)
+	gate := adnl.NewGateway(nodePrv)
+
+	if cfg.ExternalIP != "" {
+		ip := net.ParseIP(cfg.ExternalIP)
+		if ip == nil {
+			return nil, fmt.Errorf("incorrect ip format")
+		}
+
+		gate.SetExternalIP(ip.To4())
+		if err := gate.StartServer(cfg.Tunnel.Payments.PaymentsListenAddr); err != nil {
+			return nil, fmt.Errorf("failed to init adnl gateway: %w", err)
+		}
+	} else {
+		if err := gate.StartClient(); err != nil {
+			return nil, fmt.Errorf("failed to init adnl gateway: %w", err)
+		}
+	}
+
+	walletPrv := ed25519.NewKeyFromSeed(cfg.Tunnel.Payments.WalletPrivateKey)
+	fdb, err := leveldbPayments.NewDB(cfg.Tunnel.Payments.DBPath, walletPrv.Public().(ed25519.PublicKey))
+	if err != nil {
+		return nil, fmt.Errorf("failed to init leveldb: %w", err)
+	}
+
+	tr := transportPayments.NewServer(dhtClient, gate, nodePrv, walletPrv, cfg.ExternalIP != "")
+
+	var seqno uint32
+	if bo, err := fdb.GetBlockOffset(ctx); err != nil {
+		if !errors.Is(err, dbPayments.ErrNotFound) {
+			return nil, fmt.Errorf("failed to load block offset: %w", err)
+		}
+	} else {
+		seqno = bo.Seqno
+	}
+
+	inv := make(chan any)
+	sc := chain.NewScanner(apiClient, payments.AsyncPaymentChannelCodeHash, seqno, logger)
+	if err = sc.Start(context.Background(), inv); err != nil {
+		return nil, fmt.Errorf("failed to start chain scanner: %w", err)
+	}
+
+	w, err := wallet.FromPrivateKey(apiClient, walletPrv, wallet.ConfigHighloadV3{
+		MessageTTL: 3*60 + 30,
+		MessageBuilder: func(ctx context.Context, subWalletId uint32) (id uint32, createdAt int64, err error) {
+			createdAt = time.Now().Unix() - 30 // something older than last master block, to pass through LS external's time validation
+			id = uint32(createdAt) % (1 << 23) // TODO: store seqno in db
+			return
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to init wallet: %w", err)
+	}
+	pterm.Info.Println("wallet initialized with address:", w.WalletAddress().String())
+
+	svc := tonpayments.NewService(apiClient, fdb, tr, w, inv, walletPrv, configPayments.ChannelConfig(cfg.Tunnel.Payments.ChannelConfig))
+	tr.SetService(svc)
+	pterm.Success.Println("payment node initialized with public key:", base64.StdEncoding.EncodeToString(walletPrv.Public().(ed25519.PublicKey)))
+
+	go svc.Start()
+	if _, err = preparePaymentChannel(ctx, svc, nil); err != nil {
+		return nil, fmt.Errorf("failed to prepare payment channel: %w", err)
+	}
+
+	return svc, nil
+}
+
+func preparePaymentChannel(ctx context.Context, pmt *tonpayments.Service, ch []byte) ([]byte, error) {
+	list, err := pmt.ListChannels(ctx, nil, dbPayments.ChannelStateActive)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list channels: %w", err)
+	}
+
+	var best []byte
+	var bestAmount = big.NewInt(0)
+	for _, channel := range list {
+		if len(ch) > 0 {
+			if bytes.Equal(channel.TheirOnchain.Key, ch) {
+				// we have specified channel already deployed
+				return channel.TheirOnchain.Key, nil
+			}
+			continue
+		}
+
+		balance, err := channel.CalcBalance(false)
+		if err != nil {
+			continue
+		}
+
+		if balance.Cmp(tlb.MustFromTON("0.1").Nano()) < 0 {
+			// skip if balance too low
+			continue
+		}
+
+		// if specific channel not defined we select the channel with the biggest deposit
+		if balance.Cmp(bestAmount) >= 0 {
+			bestAmount = balance
+			best = channel.TheirOnchain.Key
+		}
+	}
+
+	if best != nil {
+		return best, nil
+	}
+
+	var inp string
+
+	// if no channels (or specified channel) are nod deployed, we deploy
+	if len(ch) == 0 {
+		pterm.Warning.Println("No active onchain payment channel found, please input payment node id (pub key) in hex format, to deploy channel with:")
+		if _, err = fmt.Scanln(&inp); err != nil {
+			return nil, fmt.Errorf("failed to read input: %w", err)
+		}
+
+		ch, err = hex.DecodeString(inp)
+		if err != nil {
+			return nil, fmt.Errorf("invalid id formet: %w", err)
+		}
+	}
+
+	if len(ch) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid channel id length")
+	}
+
+	pterm.Warning.Println("Please input amount in TON to reserve in channel:")
+	if _, err = fmt.Scanln(&inp); err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+
+	amt, err := tlb.FromTON(inp)
+	if err != nil {
+		return nil, fmt.Errorf("incorrect format of amount: %w", err)
+	}
+
+	ctxTm, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	addr, err := pmt.DeployChannelWithNode(ctxTm, amt, ch, nil)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("failed to deploy channel with node: %w", err)
+	}
+	pterm.Info.Printf("Onchain channel deployed at address: %s\n", addr.String())
+
+	return ch, nil
+}
+
+func paymentConfigToSections(s *config.TunnelRouteSection, paymentsEnabled bool) (*tunnel.SectionInfo, error) {
+	if len(s.Key) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("invalid `in` route node key size")
+	}
+
+	k, err := tunnel.GenerateEncryptionKeys(s.Key)
+	if err != nil {
+		return nil, fmt.Errorf("generate to encryption keys failed: %w", err)
+	}
+
+	var payer *tunnel.Payer
+	if s.Payment != nil {
+		if !paymentsEnabled {
+			return nil, fmt.Errorf("node payment is enabled but payments are disabled in config")
+		}
+
+		var ptn []tunnel.PaymentTunnelSection
+
+		for _, paymentChain := range s.Payment.Chain {
+			if len(paymentChain.NodeKey) != ed25519.PublicKeySize {
+				return nil, fmt.Errorf("invalid payment node key size")
+			}
+
+			cFee, err := tlb.FromTON(paymentChain.Fee)
+			if err != nil {
+				return nil, fmt.Errorf("invalid payment fee: %w", err)
+			}
+
+			cCap, err := tlb.FromTON(paymentChain.MaxCapacity)
+			if err != nil {
+				return nil, fmt.Errorf("invalid payment capacity: %w", err)
+			}
+
+			ptn = append(ptn, tunnel.PaymentTunnelSection{
+				Key:         paymentChain.NodeKey,
+				Fee:         cFee.Nano(),
+				MaxCapacity: cCap.Nano(),
+			})
+		}
+
+		payer = &tunnel.Payer{
+			PaymentTunnel:  ptn,
+			PricePerPacket: s.Payment.PricePerPacketNano,
+		}
+	}
+
+	return &tunnel.SectionInfo{
+		Keys:        k,
+		PaymentInfo: payer,
+	}, nil
 }

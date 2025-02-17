@@ -317,7 +317,7 @@ func (s *storagePeer) pinger(srv *Server) {
 			// session should be initialised
 			var pong Pong
 			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
-			err := s.conn.rldp.DoQuery(ctx, 1<<25, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
+			err := s.conn.adnl.Query(ctx, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
 			cancel()
 			if err != nil {
 				fails++
@@ -414,7 +414,7 @@ func (s *storagePeer) pieceNotifier() {
 func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
 	var piece Piece
 	err := func() error {
-		reqCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
 		cancel()
 		if err != nil {
@@ -521,7 +521,9 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			continue
 		}
 
+		// tm := time.Now()
 		pc, err := bestNode.downloadPiece(ctx, pieceIndex)
+		// log.Println("DW", pieceIndex, bestNode.nodeAddr, time.Since(tm).String(), err)
 		atomic.AddInt32(&bestNode.inflight, -1)
 		if err != nil {
 			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x > 5 {

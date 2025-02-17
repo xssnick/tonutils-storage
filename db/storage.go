@@ -2,7 +2,6 @@ package db
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -18,13 +17,6 @@ import (
 	"sync"
 	"time"
 )
-
-type Config struct {
-	Key           ed25519.PrivateKey
-	ListenAddr    string
-	ExternalIP    string
-	DownloadsPath string
-}
 
 type Event int
 

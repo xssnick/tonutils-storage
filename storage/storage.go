@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,7 +13,9 @@ func init() {
 	tl.Register(TorrentInfoContainer{}, "storage.torrentInfo data:bytes = storage.TorrentInfo")
 	tl.Register(GetTorrentInfo{}, "storage.getTorrentInfo = storage.TorrentInfo")
 	tl.Register(Piece{}, "storage.piece proof:bytes data:bytes = storage.Piece")
+	tl.Register(Test{}, "storage.test data:bytes = storage.Test")
 	tl.Register(GetPiece{}, "storage.getPiece piece_id:int = storage.Piece")
+	tl.Register(GetTest{}, "storage.getTest piece_id:int = storage.test")
 	tl.Register(Ping{}, "storage.ping session_id:long = storage.Pong")
 	tl.Register(Pong{}, "storage.pong = storage.Pong")
 	tl.Register(AddUpdate{}, "storage.addUpdate session_id:long seqno:int update:storage.Update = Ok")
@@ -50,6 +54,20 @@ type Piece struct {
 }
 
 type GetPiece struct {
+	PieceID int32 `tl:"int"`
+}
+
+type Test struct {
+	Data []byte `tl:"bytes"`
+}
+
+var stub = func() []byte {
+	b := make([]byte, 100*128*1024)
+	_, _ = rand.Read(b)
+	return b
+}()
+
+type GetTest struct {
 	PieceID int32 `tl:"int"`
 }
 
@@ -137,42 +155,43 @@ func (t *TorrentHeader) Parse(data []byte) (_ []byte, err error) {
 	return data, nil
 }
 
-func (t *TorrentHeader) Serialize() ([]byte, error) {
-	data := make([]byte, 20)
-	binary.LittleEndian.PutUint32(data[0:], t.FilesCount)
-	binary.LittleEndian.PutUint64(data[4:], t.TotalNameSize)
-	binary.LittleEndian.PutUint64(data[12:], t.TotalDataSize)
+func (t *TorrentHeader) Serialize(buffer *bytes.Buffer) error {
+	tmp := make([]byte, 20)
+	binary.LittleEndian.PutUint32(tmp[0:], t.FilesCount)
+	binary.LittleEndian.PutUint64(tmp[4:], t.TotalNameSize)
+	binary.LittleEndian.PutUint64(tmp[12:], t.TotalDataSize)
+	buffer.Write(tmp)
 
 	fecData, err := tl.Serialize(t.FEC, true)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	data = append(data, fecData...)
+	buffer.Write(fecData)
 
 	if t.DirNameSize != uint32(len(t.DirName)) {
-		return nil, fmt.Errorf("incorrect dir name size")
+		return fmt.Errorf("incorrect dir name size")
 	}
 
 	dataDirNameSz := make([]byte, 4)
 	binary.LittleEndian.PutUint32(dataDirNameSz, t.DirNameSize)
-	data = append(data, dataDirNameSz...)
-	data = append(data, t.DirName...)
+	buffer.Write(dataDirNameSz)
+	buffer.Write(t.DirName)
 
 	for _, ni := range t.NameIndex {
 		iData := make([]byte, 8)
 		binary.LittleEndian.PutUint64(iData, ni)
-		data = append(data, iData...)
+		buffer.Write(iData)
 	}
 
 	for _, ni := range t.DataIndex {
 		iData := make([]byte, 8)
 		binary.LittleEndian.PutUint64(iData, ni)
-		data = append(data, iData...)
+		buffer.Write(iData)
 	}
-	data = append(data, t.Names...)
-	data = append(data, t.Data...)
+	buffer.Write(t.Names)
+	buffer.Write(t.Data)
 
-	return data, nil
+	return nil
 }
 
 func (t *Torrent) calcFileIndexes() error {

@@ -425,7 +425,7 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 				if err != nil {
 					return err
 				}
-				defer fs.Free(fd)
+				defer fd.Free()
 
 				n, err := fd.Get().ReadAt(block[offset:], from)
 				if err != nil && err != io.EOF {
