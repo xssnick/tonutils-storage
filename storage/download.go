@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-var DownloadThreads = 12
+var DownloadThreads = 32
 var DownloadPrefetch = 200
 
 type fileInfo struct {

@@ -61,7 +61,6 @@ var (
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 	Version             = flag.Bool("version", false, "Show version and exit")
-	DoTest              = flag.Bool("xtest", false, "T traffic")
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 )
 
@@ -78,8 +77,6 @@ func main() {
 		println("Build version: " + GitCommit)
 		os.Exit(0)
 	}
-
-	storage.DOTEST = *DoTest
 
 	storage.Logger = func(v ...any) {}
 	adnl.Logger = func(v ...any) {}

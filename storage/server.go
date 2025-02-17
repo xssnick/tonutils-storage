@@ -15,7 +15,6 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/rand"
-	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -835,9 +834,6 @@ func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
 	return s.key
 }
 
-var DOTEST = false
-var oo = sync.Once{}
-
 func (t *Torrent) initStoragePeer(globalCtx context.Context, over []byte, srv *Server, conn *PeerConnection, sessionId int64) *storagePeer {
 	if n := conn.GetFor(t.BagID); n != nil {
 		return n
@@ -857,85 +853,6 @@ func (t *Torrent) initStoragePeer(globalCtx context.Context, over []byte, srv *S
 	conn.UseFor(stNode)
 	stNode.globalCtx, stNode.stop = context.WithCancel(globalCtx)
 	go stNode.pinger(srv)
-
-	if DOTEST {
-		oo.Do(func() {
-			i := int32(0)
-			transferred := uint64(0)
-			lastTransferred := uint64(0)
-			println("DOING TEST!")
-			lastAt := int64(0)
-
-			mw := map[string]time.Time{}
-			mx := sync.RWMutex{}
-
-			toQuery := make(chan bool, 100)
-			for x := 0; x < 100; x++ {
-				toQuery <- true
-			}
-
-			ch := make(chan rldp.AsyncQueryResult, 2048)
-			for f := 0; f < 2; f++ {
-				go func() {
-					for range toQuery {
-						qid := make([]byte, 32)
-						rand.Read(qid)
-
-						mx.Lock()
-						mw[string(qid)] = time.Now()
-						mx.Unlock()
-
-						ctm, cancel := context.WithTimeout(context.Background(), time.Second*5)
-						//err := stNode.conn.adnl.SendCustomMessage(ctm, Test{make([]byte, 800)})
-						err := stNode.conn.rldp.DoQueryAsync(ctm, 100*1024*1024, qid, overlay.WrapQuery(over, GetTest{PieceID: atomic.AddInt32(&i, 1)}), ch)
-						cancel()
-						if err != nil {
-							println("FAIL", err.Error())
-							time.Sleep(50 * time.Millisecond)
-							continue
-						}
-					}
-				}()
-			}
-
-			go func() {
-				for {
-					time.Sleep(20 * time.Millisecond)
-
-					mx.Lock()
-					for s, t2 := range mw {
-						if time.Since(t2) > 5*time.Second {
-							delete(mw, s)
-							toQuery <- true
-						}
-					}
-					mx.Unlock()
-				}
-			}()
-
-			go func() {
-				for result := range ch {
-					id := string(result.QueryID)
-					mx.Lock()
-					ln := len(mw)
-					if _, ok := mw[id]; ok {
-						delete(mw, string(result.QueryID))
-						toQuery <- true
-					}
-					mx.Unlock()
-
-					amt := atomic.AddUint64(&transferred, uint64(len(result.Result.(Test).Data)))
-					la := atomic.LoadInt64(&lastAt)
-					tm := time.Now().Unix()
-
-					if la < tm && atomic.CompareAndSwapInt64(&lastAt, la, tm) {
-						println("TRANSFERRED:", amt/1024/1024, "MB", (amt-lastTransferred)/1024, "KB/ps", runtime.NumGoroutine(), ln)
-						lastTransferred = amt
-					}
-				}
-			}()
-		})
-	}
 
 	return stNode
 }
