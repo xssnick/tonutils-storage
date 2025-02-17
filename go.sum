@@ -89,11 +89,15 @@ github.com/stretchr/testify v1.8.0 h1:pSgiaMZlXftHpm5L7V1+rVB+AZJydKsMxsQBIJw4PK
 github.com/stretchr/testify v1.8.0/go.mod h1:yNjHg4UonilssWZ8iaSj1OCr/vHnekPRkoO+kdMU+MU=
 github.com/syndtr/goleveldb v1.0.0 h1:fBdIW9lB4Iz0n9khmH8w27SJ3QEJ7+IgjPEwGSZiFdE=
 github.com/syndtr/goleveldb v1.0.0/go.mod h1:ZVVdQEZoIme9iO1Ch2Jdy24qqXrMMOU6lpPAyBWyWuQ=
+github.com/ton-blockchain/adnl-tunnel v0.0.0-20250211062412-2dddd5ca88cd h1:EpCz0DXFoRqVVLbr6Dl6mGoBpheyQOhLqyg3Kvt4IUs=
+github.com/ton-blockchain/adnl-tunnel v0.0.0-20250211062412-2dddd5ca88cd/go.mod h1:fHMUj+meFVhP34xO/DcR4wlABUrikwDmwngVnfeKjRc=
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
 github.com/xssnick/raptorq v1.0.0 h1:l77lntIV/W/SV9rZjF4wRpIhikQm8nBHtB3h+qiu2cM=
 github.com/xssnick/raptorq v1.0.0/go.mod h1:kgEVVsZv2hP+IeV7C7985KIFsDdvYq2ARW234SBA9Q4=
+github.com/xssnick/ton-payment-network v0.0.0-20250211055352-ed9cef403ce1 h1:qm8w/frmy4dcBlRyo9qzZe5iG7DalHamGADXRr9oEh8=
+github.com/xssnick/ton-payment-network v0.0.0-20250211055352-ed9cef403ce1/go.mod h1:HK2Gt9vHZ0mNA/z447N+icByDZxdXW+wPWYRdoWpHPw=
 github.com/xssnick/tonutils-go v1.11.0 h1:mCD9tKZukK2VLvSVeNcftkaykJTO0gAB03bImSGjrL0=
 github.com/xssnick/tonutils-go v1.11.0/go.mod h1:Wj8TFiUUc7IGdLn2X/ZDzmMs/1b4fsF3iJzH/l+PXTI=
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b h1:prvgFJOva8KIbI9lFb6D27etp1+ugt4EODMBXxRUsos=

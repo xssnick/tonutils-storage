@@ -184,7 +184,9 @@ func main() {
 			pterm.Success.Println("Using tunnel:", ipTun.String())
 			if ip != nil {
 				ip = ipTun
-				gate.SetExternalPort(portTun)
+				_ = portTun
+				panic("server mode not yet ready")
+				// gate.SetExternalPort(portTun)
 			}
 		} else {
 			pterm.Warning.Println("Using tunnel: ???")
