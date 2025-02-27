@@ -250,32 +250,43 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 				return err
 			}
 
-			// TODO: async?
 			if atomic.LoadInt64(&stPeer.sessionSeqno) == 0 {
 				stPeer.piecesMx.Lock()
 				stPeer.lastSentPieces = t.PiecesMask()
 				stPeer.piecesMx.Unlock()
 
-				up := AddUpdate{
-					SessionID: atomic.LoadInt64(&stPeer.sessionId),
-					Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
-					Update: UpdateInit{
-						HavePieces:       stPeer.lastSentPieces,
-						HavePiecesOffset: 0,
-						State: State{
-							WillUpload:   isUpl,
-							WantDownload: true,
-						},
-					},
-				}
-
 				go func() {
-					var updRes Ok
-					if err := stPeer.conn.rldp.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
-						return
+					const maxPiecesBytesPerRequest = 6000
+					num := t.PiecesNum()
+					sent := uint32(0)
+					for i := uint32(0); sent < num; i++ {
+						have := stPeer.lastSentPieces[i*maxPiecesBytesPerRequest:]
+						if len(have) > maxPiecesBytesPerRequest {
+							have = have[:maxPiecesBytesPerRequest]
+						}
+
+						up := AddUpdate{
+							SessionID: atomic.LoadInt64(&stPeer.sessionId),
+							Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
+							Update: UpdateInit{
+								HavePieces:       have,
+								HavePiecesOffset: int32(sent),
+								State: State{
+									WillUpload:   isUpl,
+									WantDownload: true,
+								},
+							},
+						}
+
+						var updRes Ok
+						if err := stPeer.conn.rldp.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
+							Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID, err.Error())
+							return
+						}
+
+						sent += (maxPiecesBytesPerRequest * 8) * i
 					}
 				}()
-
 			} else {
 				go func() {
 					if err := stPeer.updateHavePieces(context.Background(), t); err != nil {
