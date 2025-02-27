@@ -3,3 +3,5 @@
 base
 build
 tonutils-storage-db*
+*.json
+payments-db

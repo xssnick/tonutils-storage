@@ -9,52 +9,8 @@ import (
 	"log"
 	"net"
 	"os"
-	"runtime"
 	"time"
 )
-
-type ChannelConfig struct {
-	VirtualChannelProxyFee      string
-	QuarantineDurationSec       uint32
-	MisbehaviorFine             string
-	ConditionalCloseDurationSec uint32
-}
-
-type PaymentsConfig struct {
-	Enabled            bool
-	PaymentsServerKey  []byte
-	WalletPrivateKey   []byte
-	PaymentsListenAddr string
-	DBPath             string
-	SecureProofPolicy  bool
-	ChannelConfig      ChannelConfig
-}
-
-type PaymentChain struct {
-	NodeKey     []byte
-	Fee         string
-	MaxCapacity string
-}
-
-type TunnelSectionPayment struct {
-	Chain              []PaymentChain
-	PricePerPacketNano uint64
-}
-
-type TunnelRouteSection struct {
-	Key     []byte
-	Payment *TunnelSectionPayment
-}
-
-type TunnelConfig struct {
-	Enabled         bool
-	TunnelServerKey []byte
-	TunnelThreads   uint
-	Payments        PaymentsConfig
-	OutGateway      TunnelRouteSection
-	RouteOut        []TunnelRouteSection
-	RouteIn         []TunnelRouteSection
-}
 
 type Config struct {
 	Key              ed25519.PrivateKey
@@ -62,7 +18,6 @@ type Config struct {
 	ExternalIP       string
 	DownloadsPath    string
 	NetworkConfigUrl string
-	Tunnel           TunnelConfig
 }
 
 func checkIPAddress(ip string) string {
@@ -168,56 +123,12 @@ func LoadConfig(dir string) (*Config, error) {
 			return nil, err
 		}
 
-		_, paymentsPrv, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			return nil, err
-		}
-
-		_, tunnelPrv, err := ed25519.GenerateKey(nil)
-		if err != nil {
-			return nil, err
-		}
-
 		cfg := &Config{
 			Key:              priv,
 			ListenAddr:       "0.0.0.0:17555",
 			ExternalIP:       "",
 			DownloadsPath:    "./downloads/",
 			NetworkConfigUrl: "https://ton-blockchain.github.io/global.config.json",
-			Tunnel: TunnelConfig{
-				Enabled:         false,
-				TunnelServerKey: tunnelPrv.Seed(),
-				TunnelThreads:   uint(runtime.NumCPU()),
-				Payments: PaymentsConfig{
-					Enabled:            false,
-					PaymentsServerKey:  paymentsPrv.Seed(),
-					WalletPrivateKey:   priv.Seed(),
-					PaymentsListenAddr: "0.0.0.0:17331",
-					DBPath:             "./payments-db/",
-					SecureProofPolicy:  false,
-					ChannelConfig: ChannelConfig{
-						VirtualChannelProxyFee:      "0.01",
-						QuarantineDurationSec:       600,
-						MisbehaviorFine:             "0.15",
-						ConditionalCloseDurationSec: 180,
-					},
-				},
-				OutGateway: TunnelRouteSection{
-					Key: nil,
-					Payment: &TunnelSectionPayment{
-						Chain: []PaymentChain{
-							{
-								NodeKey:     nil,
-								Fee:         "0.005",
-								MaxCapacity: "3",
-							},
-						},
-						PricePerPacketNano: 0,
-					},
-				},
-				RouteOut: []TunnelRouteSection{},
-				RouteIn:  []TunnelRouteSection{},
-			},
 		}
 
 		ip, seed := checkCanSeed()
