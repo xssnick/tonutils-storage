@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -159,6 +160,7 @@ func main() {
 
 	apiClient := ton.NewAPIClient(lsClient, ton.ProofCheckPolicyFast).WithRetry().WithTimeout(10 * time.Second)
 
+	var netMgr adnl.NetManager
 	var gate *adnl.Gateway
 	if *TunnelConfig != "" {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(zerolog.InfoLevel)
@@ -191,10 +193,9 @@ func main() {
 			pterm.Fatal.Println(err.Error())
 			return
 		}
+		netMgr = adnl.NewMultiNetReader(tun)
 
-		gate = adnl.NewGatewayWithListener(cfg.Key, func(addr string) (net.PacketConn, error) {
-			return tun, nil
-		})
+		gate = adnl.NewGatewayWithNetManager(cfg.Key, netMgr)
 
 		tun.SetOutAddressChangedHandler(func(addr *net.UDPAddr) {
 			gate.SetAddressList([]*adnlAddress.UDP{
@@ -207,7 +208,13 @@ func main() {
 
 		pterm.Success.Println("Using tunnel:", ip.String())
 	} else {
-		gate = adnl.NewGateway(cfg.Key)
+		dl, err := adnl.DefaultListener(cfg.ListenAddr)
+		if err != nil {
+			pterm.Fatal.Println(err.Error())
+			return
+		}
+		netMgr = adnl.NewMultiNetReader(dl)
+		gate = adnl.NewGatewayWithNetManager(cfg.Key, netMgr)
 	}
 
 	listenThreads := runtime.NumCPU()
@@ -240,7 +247,13 @@ func main() {
 		}
 	}
 
-	dhtGate := adnl.NewGateway(cfg.Key)
+	_, dhtKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		pterm.Error.Println(err.Error())
+		return
+	}
+
+	dhtGate := adnl.NewGatewayWithNetManager(dhtKey, netMgr)
 	if err = dhtGate.StartClient(); err != nil {
 		pterm.Error.Println("Failed to init dht adnl gateway:", err.Error())
 		os.Exit(1)

@@ -13,6 +13,7 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/storage"
 	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -133,7 +134,10 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 			list, err := t.ListFiles()
 			if err == nil {
 				for _, f := range list {
-					_ = os.Remove(t.Path + "/" + string(t.Header.DirName) + "/" + f)
+					path := filepath.Clean(t.Path + "/" + string(t.Header.DirName) + "/" + f)
+					if errR := os.Remove(path); errR != nil {
+						println("remove err, skip", path, errR.Error())
+					}
 				}
 			}
 			recursiveEmptyDelete(buildTreeFromDir(t.Path + "/" + string(t.Header.DirName)))

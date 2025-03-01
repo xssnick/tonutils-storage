@@ -32,7 +32,7 @@ func (o *OsFs) Exists(name string) bool {
 }
 
 func (o *OsFs) Delete(name string) error {
-	return os.Remove(name)
+	return os.Remove(filepath.Clean(name))
 }
 
 func (s *Storage) GetFS() storage.FS {

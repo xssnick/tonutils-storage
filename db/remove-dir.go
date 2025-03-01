@@ -73,7 +73,12 @@ func recursiveEmptyDelete(root *Node) {
 	if !ifDir(root.Id) {
 		return
 	} else if content, _ := os.ReadDir(root.Id); len(content) != 0 {
+		println("skip remove of", root.Id, "contains unknown files")
+
 		return
 	}
-	os.Remove(root.Id)
+	if err := os.Remove(filepath.Clean(root.Id)); err != nil {
+		println("failed to remove", root.Id, err.Error())
+		return
+	}
 }
