@@ -1,6 +1,8 @@
 package db
 
 import (
+	"github.com/xssnick/tonutils-storage/storage"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -62,23 +64,23 @@ func ifDir(path string) bool {
 	return false
 }
 
-func recursiveEmptyDelete(root *Node) {
+func recursiveEmptyDelete(root *Node, fs storage.FSController) {
 	// If the current root is not pointing to any dir
 	if root == nil {
 		return
 	}
 	for _, each := range root.Children {
-		recursiveEmptyDelete(each)
+		recursiveEmptyDelete(each, fs)
 	}
 	if !ifDir(root.Id) {
 		return
 	} else if content, _ := os.ReadDir(root.Id); len(content) != 0 {
-		println("skip remove of", root.Id, "contains unknown files")
+		log.Println("skip remove of", root.Id, "contains unknown files")
 
 		return
 	}
-	if err := os.Remove(filepath.Clean(root.Id)); err != nil {
-		println("failed to remove", root.Id, err.Error())
+	if err := fs.RemoveFile(root.Id); err != nil {
+		log.Println("failed to remove", root.Id, err.Error())
 		return
 	}
 }

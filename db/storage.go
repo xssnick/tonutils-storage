@@ -12,7 +12,6 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/storage"
-	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -43,8 +42,10 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActi
 		torrentsOverlay: map[string]*storage.Torrent{},
 		db:              db,
 		connector:       connector,
-		fs:              OsFs{},
-		notifyCh:        notifier,
+		fs: OsFs{
+			ctrl: NewFSControllerCache(),
+		},
+		notifyCh: notifier,
 	}
 
 	err := s.loadTorrents(startWithoutActiveFilesToo)
@@ -135,12 +136,12 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 			if err == nil {
 				for _, f := range list {
 					path := filepath.Clean(t.Path + "/" + string(t.Header.DirName) + "/" + f)
-					if errR := os.Remove(path); errR != nil {
+					if errR := s.fs.GetController().RemoveFile(path); errR != nil {
 						println("remove err, skip", path, errR.Error())
 					}
 				}
 			}
-			recursiveEmptyDelete(buildTreeFromDir(t.Path + "/" + string(t.Header.DirName)))
+			recursiveEmptyDelete(buildTreeFromDir(t.Path+"/"+string(t.Header.DirName)), s.fs.GetController())
 		}
 	}
 
