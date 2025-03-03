@@ -93,6 +93,8 @@ github.com/syndtr/goleveldb v1.0.0 h1:fBdIW9lB4Iz0n9khmH8w27SJ3QEJ7+IgjPEwGSZiFd
 github.com/syndtr/goleveldb v1.0.0/go.mod h1:ZVVdQEZoIme9iO1Ch2Jdy24qqXrMMOU6lpPAyBWyWuQ=
 github.com/ton-blockchain/adnl-tunnel v0.0.0-20250227065935-bdeeba972e50 h1:cOZg2CMDyolYJmvUilT+ADQZEEw3KZr3sqUWAu0zJTA=
 github.com/ton-blockchain/adnl-tunnel v0.0.0-20250227065935-bdeeba972e50/go.mod h1:oGjNyVCIItWKbJ/kUd32gg2EeaxTtUUBToldPq9wUd4=
+github.com/ton-blockchain/adnl-tunnel v0.0.0-20250303064129-b1f4c72ad756 h1:wdCq3XAuEr2Ee2COJ6F7FFejMGFLzaEQI/0epDgldMs=
+github.com/ton-blockchain/adnl-tunnel v0.0.0-20250303064129-b1f4c72ad756/go.mod h1:cgzF7+cqsdaEhoPw1+Aw5L4UEkJXKeAloYuNCyjvmA0=
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
