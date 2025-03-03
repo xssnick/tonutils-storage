@@ -108,6 +108,8 @@ github.com/xssnick/tonutils-go v1.11.1-0.20250228092019-a5ac467dfcdb h1:ai0Abi+G
 github.com/xssnick/tonutils-go v1.11.1-0.20250228092019-a5ac467dfcdb/go.mod h1:Wj8TFiUUc7IGdLn2X/ZDzmMs/1b4fsF3iJzH/l+PXTI=
 github.com/xssnick/tonutils-go v1.11.1-0.20250301170704-e54bf77ab0e5 h1:w3recKdjasN9AvSlb3dxWKAQludUmKh+Iem+Q4kz74s=
 github.com/xssnick/tonutils-go v1.11.1-0.20250301170704-e54bf77ab0e5/go.mod h1:Wj8TFiUUc7IGdLn2X/ZDzmMs/1b4fsF3iJzH/l+PXTI=
+github.com/xssnick/tonutils-go v1.11.1-0.20250303084128-490b8e738613 h1:7n1Y4AS4BMwq1zz5Y8VMCJypABx2NM+IUh5s2UJCQHo=
+github.com/xssnick/tonutils-go v1.11.1-0.20250303084128-490b8e738613/go.mod h1:Wj8TFiUUc7IGdLn2X/ZDzmMs/1b4fsF3iJzH/l+PXTI=
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b h1:prvgFJOva8KIbI9lFb6D27etp1+ugt4EODMBXxRUsos=
 github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b/go.mod h1:7xA5QMPIdKygiZwyqq3na+3KG58boW6Ja/6/LIuhUcc=
 golang.org/x/crypto v0.35.0 h1:b15kiHdrGCHrP6LvwaQ3c03kgNhhiMgvlhxHQhmg2Xs=
