@@ -285,7 +285,7 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 							return
 						}
 
-						sent += (maxPiecesBytesPerRequest * 8) * i
+						sent += uint32(len(have) * 8)
 					}
 				}()
 			} else {
