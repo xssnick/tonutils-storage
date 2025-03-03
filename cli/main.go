@@ -53,6 +53,7 @@ var (
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 	Version             = flag.Bool("version", false, "Show version and exit")
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
+	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	TunnelConfig        = flag.String("tunnel-config", "", "tunnel config path")
 )
 
@@ -98,6 +99,10 @@ func main() {
 
 	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgLightBlue)).Println(pterm.LightWhite("   Storage   "))
 	pterm.Info.Println("Version:", GitCommit)
+
+	if *CachedFD > 0 {
+		db.CachedFDLimit = *CachedFD
+	}
 
 	if *DBPath == "" {
 		pterm.Error.Println("DB path should be specified with -db flag")
