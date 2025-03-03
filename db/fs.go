@@ -9,7 +9,13 @@ import (
 	"strings"
 )
 
-type OsFs struct{}
+type OsFs struct {
+	ctrl storage.FSController
+}
+
+func (o *OsFs) GetController() storage.FSController {
+	return o.ctrl
+}
 
 func (o *OsFs) Open(name string, mode storage.OpenMode) (storage.FSFile, error) {
 	if mode == storage.OpenModeWrite {
@@ -32,7 +38,7 @@ func (o *OsFs) Exists(name string) bool {
 }
 
 func (o *OsFs) Delete(name string) error {
-	return os.Remove(name)
+	return o.ctrl.RemoveFile(name)
 }
 
 func (s *Storage) GetFS() storage.FS {

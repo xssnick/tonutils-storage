@@ -1,4 +1,4 @@
-package storage
+package db
 
 import (
 	"fmt"
@@ -35,17 +35,13 @@ func BenchmarkAcquire(b *testing.B) {
 }
 
 func testAcquire(paths []string) error {
-	fs := NewFSController()
+	fs := NewFSControllerCache()
 	// acquire all the fd in tc.paths
 	eg := new(errgroup.Group)
-	for i, p := range paths {
-		i, p := i, p
+	for _, p := range paths {
+		p := p
 		eg.Go(func() error {
-			fd, err := fs.Acquire(p)
-			if i > _FDLimit-3 {
-				fs.Free(fd)
-			}
-
+			_, err := fs.AcquireRead(p, make([]byte, 1), 0)
 			return err
 		})
 	}
@@ -65,7 +61,7 @@ func genTestCasesAcquire() []testCaseAcquire {
 		},
 		{
 			name:  "acquiring _FDLimit file descriptors",
-			paths: createTmpFiles(_FDLimit),
+			paths: createTmpFiles(CachedFDLimit),
 		},
 		{
 			name:  "acquiring 2000 file descriptors",
@@ -78,6 +74,7 @@ func createTmpFiles(n int) []string {
 	paths := make([]string, n)
 	for i := 0; i < n; i++ {
 		f, _ := os.CreateTemp("", "dump_")
+		f.WriteString(fmt.Sprint(i))
 		p := f.Name()
 		f.Close()
 		paths[i] = p

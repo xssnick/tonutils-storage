@@ -7,8 +7,8 @@ require (
 	github.com/pterm/pterm v0.12.59
 	github.com/rs/zerolog v1.33.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/ton-blockchain/adnl-tunnel v0.0.0-20250227065935-bdeeba972e50
-	github.com/xssnick/tonutils-go v1.11.1-0.20250226184842-e0277c2b08f8
+	github.com/ton-blockchain/adnl-tunnel v0.0.0-20250303064129-b1f4c72ad756
+	github.com/xssnick/tonutils-go v1.11.1-0.20250301170704-e54bf77ab0e5
 	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b
 	golang.org/x/sync v0.11.0
 )

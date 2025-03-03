@@ -34,6 +34,11 @@ const (
 	OpenModeWrite
 )
 
+type FSController interface {
+	AcquireRead(path string, p []byte, off int64) (n int, err error)
+	RemoveFile(path string) error
+}
+
 type FSFile interface {
 	io.ReaderAt
 	io.WriterAt
@@ -45,6 +50,7 @@ type FS interface {
 	Open(name string, mode OpenMode) (FSFile, error)
 	Delete(name string) error
 	Exists(name string) bool
+	GetController() FSController
 }
 
 type PieceInfo struct {
@@ -122,8 +128,6 @@ type Torrent struct {
 	currentDownloadFlag *bool
 	stopDownload        func()
 }
-
-var fs = NewFSController()
 
 func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
@@ -421,13 +425,7 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 
 			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
 			read := func(path string, from int64) error {
-				fd, err := fs.Acquire(path)
-				if err != nil {
-					return err
-				}
-				defer fd.Free()
-
-				n, err := fd.Get().ReadAt(block[offset:], from)
+				n, err := t.db.GetFS().GetController().AcquireRead(path, block[offset:], from)
 				if err != nil && err != io.EOF {
 					return err
 				}
