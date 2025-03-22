@@ -30,13 +30,14 @@ type Storage struct {
 	torrentsOverlay map[string]*storage.Torrent
 	connector       storage.NetConnector
 	fs              OsFs
+	skipVerify      bool
 
 	notifyCh chan Event
 	db       *leveldb.DB
 	mx       sync.RWMutex
 }
 
-func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool, notifier chan Event) (*Storage, error) {
+func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool, skipVerify bool, notifier chan Event) (*Storage, error) {
 	s := &Storage{
 		torrents:        map[string]*storage.Torrent{},
 		torrentsOverlay: map[string]*storage.Torrent{},
@@ -45,7 +46,8 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActi
 		fs: OsFs{
 			ctrl: NewFSControllerCache(),
 		},
-		notifyCh: notifier,
+		notifyCh:   notifier,
+		skipVerify: skipVerify,
 	}
 
 	err := s.loadTorrents(startWithoutActiveFilesToo)
@@ -54,6 +56,10 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActi
 	}
 
 	return s, nil
+}
+
+func (s *Storage) VerifyOnStartup() bool {
+	return !s.skipVerify
 }
 
 func (s *Storage) GetTorrent(hash []byte) *storage.Torrent {

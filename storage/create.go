@@ -19,8 +19,6 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
-const pieceSize = 128 * 1024
-
 type fileInfoData struct {
 	Path string
 	Name string
@@ -29,7 +27,7 @@ type fileInfoData struct {
 type FileRef interface {
 	GetName() string
 	GetSize() uint64
-	CreateReader() (io.ReadCloser, error)
+	CreateReader() (io.ReaderAt, func() error, error)
 }
 
 func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
@@ -53,6 +51,21 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		return nil, err
 	}
 
+	var pieceSize uint32
+
+	switch {
+	case dataSize > 100<<30: // > 100 GB
+		pieceSize = 8 << 20 // 8 MB (16MB -1 is bytes TL limit so it is max)
+	case dataSize > 20<<30: // > 20 GB
+		pieceSize = 4 << 20 // 4 MB
+	case dataSize > 1<<30: // > 1 GB
+		pieceSize = 1 << 20 // 1 MB
+	case dataSize > 512<<20: // > 512 MB
+		pieceSize = 256 << 10 // 256 KB
+	default:
+		pieceSize = 128 << 10 // 128 KB
+	}
+
 	waiter, _ := pterm.DefaultSpinner.Start("Generating bag header...")
 	headerData, err := tl.Serialize(torrent.Header, true)
 	if err != nil {
@@ -60,7 +73,7 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		return nil, fmt.Errorf("failed to serialize header: %w", err)
 	}
 
-	err = computeHashesAndJoinPieces(ctx, torrent, dataSize, headerData, files, description, waiter, progressCallback)
+	err = computeHashesAndJoinPieces(ctx, torrent, pieceSize, dataSize, headerData, files, description, waiter, progressCallback)
 	if err != nil {
 		return nil, err
 	}
@@ -105,6 +118,7 @@ func initializeTorrentHeader(torrent *Torrent, files []FileRef) (uint64, error) 
 func computeHashesAndJoinPieces(
 	ctx context.Context,
 	torrent *Torrent,
+	pieceSize uint32,
 	dataSize uint64,
 	headerData []byte,
 	files []FileRef,
@@ -113,8 +127,8 @@ func computeHashesAndJoinPieces(
 	progressCallback func(done uint64, max uint64),
 ) error {
 	fullSz := uint64(len(headerData)) + dataSize
-	piecesNum := fullSz / pieceSize
-	if fullSz%pieceSize != 0 {
+	piecesNum := fullSz / uint64(pieceSize)
+	if fullSz%uint64(pieceSize) != 0 {
 		piecesNum++
 	}
 
@@ -125,10 +139,10 @@ func computeHashesAndJoinPieces(
 
 	hashes, piecesStartIndexes, err := computeFileHashes(
 		ctx,
-		torrent,
+		pieceSize,
 		headerData,
 		files,
-		piecesNum, doneProgress, uint64(maxProgress),
+		piecesNum, doneProgress, maxProgress,
 		waiter,
 		progressCallback,
 	)
@@ -150,7 +164,7 @@ func computeHashesAndJoinPieces(
 	torrent.pieceMask = make([]byte, pcNumBytes)
 
 	// set torrent stats
-	torrent.SetInfoStats(headerData, rootHash, uint64(len(headerData))+dataSize, uint64(len(headerData)), description)
+	torrent.SetInfoStats(pieceSize, headerData, rootHash, uint64(len(headerData))+dataSize, uint64(len(headerData)), description)
 
 	tCell, err := tlb.ToCell(torrent.Info)
 	if err != nil {
@@ -159,7 +173,7 @@ func computeHashesAndJoinPieces(
 	}
 	torrent.BagID = tCell.Hash()
 
-	err = joinTorrentPieces(ctx, torrent, hashTree, files, piecesStartIndexes, doneProgress, uint64(maxProgress), progress, progressCallback)
+	err = joinTorrentPieces(ctx, torrent, hashTree, files, piecesStartIndexes, doneProgress, maxProgress, progress, progressCallback)
 	if err != nil {
 		return err
 	}
@@ -227,7 +241,7 @@ func joinTorrentPieces(
 			progress.Increment()
 			if progressCallback != nil {
 				doneProgress += 1
-				progressCallback(doneProgress, uint64(maxProgress))
+				progressCallback(doneProgress, maxProgress)
 			}
 		}
 	}
@@ -248,22 +262,26 @@ func joinTorrentPieces(
 
 func computeFileHashes(
 	ctx context.Context,
-	torrent *Torrent,
+	pieceSize uint32,
 	headerData []byte,
 	files []FileRef,
 	piecesNum, doneProgress, maxProgress uint64,
 	waiter *pterm.SpinnerPrinter,
 	progressCallback func(done uint64, max uint64),
 ) ([][]byte, []uint32, error) {
-	hashes := make([][]byte, 0, 256)
-	piecesStartIndexes := make([]uint32, 0, 256)
+	hashes := make([][]byte, piecesNum)
+	piecesStartFileIndexes := make([]uint32, piecesNum)
 	pieceStartFileIndex := uint32(0)
 	cb := make([]byte, pieceSize)
 	cbOffset := 0
 	var filesProcessed uint32
+	var piecesProcessed int64
 
-	process := func(isHeader bool, rd io.Reader, progress *pterm.ProgressbarPrinter) error {
-		for {
+	hx := sha256.New()
+	process := func(isHeader bool, size uint64, rd io.ReaderAt, progress *pterm.ProgressbarPrinter) error {
+		var fileOffset int64 = 0
+		end := false
+		for !end {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -272,29 +290,114 @@ func computeFileHashes(
 
 			if cbOffset == 0 {
 				pieceStartFileIndex = filesProcessed
+
+				// we start parallel execution only for full pieces and when file is big enough
+				if !isHeader && size/piecesNum > 10000 {
+					type job struct {
+						offset int64
+						piece  int64
+					}
+
+					var done = make(chan error, 130)
+					var task = make(chan job, 130)
+
+					ctxWorker, cancelWorker := context.WithCancel(ctx)
+
+					for i := 0; i < runtime.NumCPU(); i++ {
+						go func() {
+							var buf = make([]byte, pieceSize)
+							for {
+								select {
+								case <-ctxWorker.Done():
+									return
+								case j := <-task:
+									_, err := rd.ReadAt(buf, j.offset)
+									if err != nil {
+										done <- err
+										break
+									}
+
+									h := sha256.Sum256(buf)
+									hashes[j.piece] = h[:]
+									piecesStartFileIndexes[j.piece] = pieceStartFileIndex
+
+									select {
+									case done <- nil:
+									case <-ctxWorker.Done():
+										return
+									}
+								}
+							}
+						}()
+					}
+
+					fullPiecesLeft := (int64(size) - fileOffset) / int64(pieceSize)
+
+					go func() {
+						for i := int64(0); i < fullPiecesLeft; i++ {
+							select {
+							case <-ctxWorker.Done():
+								return
+							case task <- job{
+								offset: fileOffset + i*int64(pieceSize),
+								piece:  piecesProcessed + i,
+							}:
+							}
+						}
+					}()
+
+					// process only full pieces in parallel
+					for i := int64(0); i < fullPiecesLeft; i++ {
+						select {
+						case <-ctx.Done():
+							cancelWorker()
+							return ctx.Err()
+						case err := <-done:
+							if err != nil {
+								cancelWorker()
+								return err
+							}
+
+							progress.Increment()
+							if progressCallback != nil {
+								doneProgress += 3
+								progressCallback(doneProgress, maxProgress)
+							}
+						}
+					}
+
+					piecesProcessed += fullPiecesLeft
+					fileOffset += fullPiecesLeft * int64(pieceSize)
+					cancelWorker()
+				}
 			}
 
-			n, err := rd.Read(cb[cbOffset:])
+			n, err := rd.ReadAt(cb[cbOffset:], fileOffset)
 			if err != nil {
 				if errors.Is(err, io.EOF) {
-					break
+					end = true
+					err = nil
+				} else {
+					return err
 				}
-				return err
 			}
+			fileOffset += int64(n)
 			cbOffset += n
 
-			if cbOffset == len(cb) {
-				hash := calcHash(cb)
-				hashes = append(hashes, hash)
-
+			if cbOffset == int(pieceSize) {
+				hx.Write(cb)
+				hashes[piecesProcessed] = hx.Sum(nil)
 				// save index of file where block starts
-				piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
+				piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
+				hx.Reset()
+
+				piecesProcessed++
 
 				cbOffset = 0
 				progress.Increment()
 				if progressCallback != nil {
 					doneProgress += 3
-					progressCallback(doneProgress, uint64(maxProgress))
+					progressCallback(doneProgress, maxProgress)
 				}
 			}
 		}
@@ -305,9 +408,9 @@ func computeFileHashes(
 		return nil
 	}
 
-	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating pieces...").Start()
+	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Hashing pieces...").Start()
 
-	err := process(true, bytes.NewBuffer(headerData), progress)
+	err := process(true, uint64(len(headerData)), bytes.NewReader(headerData), progress)
 	if err != nil {
 		waiter.Fail(err.Error())
 		return nil, nil, fmt.Errorf("failed to process header piece: %w", err)
@@ -322,13 +425,13 @@ func computeFileHashes(
 		default:
 		}
 
-		rd, err := f.CreateReader()
+		rd, closer, err := f.CreateReader()
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read file %s: %w", f.GetName(), err)
 		}
 
-		err = process(false, rd, progress)
-		_ = rd.Close()
+		err = process(false, f.GetSize(), rd, progress)
+		_ = closer()
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to process file %s: %w", f.GetName(), err)
 		}
@@ -336,21 +439,29 @@ func computeFileHashes(
 
 	if cbOffset != 0 {
 		// last data hash
-		hash := calcHash(cb[:cbOffset])
-		hashes = append(hashes, hash)
+		hx.Write(cb[:cbOffset])
+		hashes[piecesProcessed] = hx.Sum(nil)
 
 		// save index of file where block starts
-		piecesStartIndexes = append(piecesStartIndexes, pieceStartFileIndex)
+		piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
+
+		piecesProcessed++
+
 		progress.Increment()
 		if progressCallback != nil {
 			doneProgress += 3
-			progressCallback(doneProgress, uint64(maxProgress))
+			progressCallback(doneProgress, maxProgress)
 		}
 	}
 	_, _ = progress.Stop()
 
-	return hashes, piecesStartIndexes, nil
+	return hashes, piecesStartFileIndexes, nil
 }
+
+var _emptyHashCell = cell.FromRawUnsafe(cell.RawUnsafeCell{
+	BitsSz: 256,
+	Data:   make([]byte, 32),
+})
 
 func buildMerkleTree(hashes [][]byte, parallelDepth int) *cell.Cell {
 	logN := uint32(0)
@@ -361,16 +472,16 @@ func buildMerkleTree(hashes [][]byte, parallelDepth int) *cell.Cell {
 	cells := make([]*cell.Cell, n)
 
 	for i := 0; i < len(hashes); i++ {
-		cells[i] = cell.BeginCell().MustStoreSlice(hashes[i], 256).EndCell()
+		cells[i] = cell.FromRawUnsafe(cell.RawUnsafeCell{
+			BitsSz: 256,
+			Data:   hashes[i],
+		})
 	}
 
-	emptyCell := cell.BeginCell().MustStoreSlice(make([]byte, 32), 256).EndCell()
-	emptyCell.Hash()
 	for i := len(hashes); i < n; i++ {
-		cells[i] = emptyCell
+		cells[i] = _emptyHashCell
 	}
-	root := createMerkleTreeCell(cells, 1<<parallelDepth)
-	return root
+	return createMerkleTreeCell(cells, 1<<parallelDepth)
 }
 
 func createMerkleTreeCell(cells []*cell.Cell, depthParallel int) *cell.Cell {
@@ -378,24 +489,12 @@ func createMerkleTreeCell(cells []*cell.Cell, depthParallel int) *cell.Cell {
 	case 0:
 		panic("empty cells")
 	case 1:
-		result := cells[0]
-		result.Hash()
-		return result
+		return cells[0]
 	case 2:
-		result := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
-		result.Hash()
-		return result
+		return cell.FromRawUnsafe(cell.RawUnsafeCell{
+			Refs: []*cell.Cell{cells[0], cells[1]},
+		})
 	default:
-		// minor optimization for same pieces
-		if len(cells) == 4 &&
-			bytes.Equal(cells[0].Hash(), cells[2].Hash()) &&
-			bytes.Equal(cells[1].Hash(), cells[3].Hash()) {
-			child := cell.BeginCell().MustStoreRef(cells[0]).MustStoreRef(cells[1]).EndCell()
-			result := cell.BeginCell().MustStoreRef(child).MustStoreRef(child).EndCell()
-			result.Hash()
-			return result
-		}
-
 		var left, right *cell.Cell
 		if len(cells) >= depthParallel {
 			cLeft := make(chan *cell.Cell, 1)
@@ -413,16 +512,15 @@ func createMerkleTreeCell(cells []*cell.Cell, depthParallel int) *cell.Cell {
 			right = createMerkleTreeCell(cells[len(cells)/2:], depthParallel)
 		}
 
-		result := cell.BeginCell().MustStoreRef(left).MustStoreRef(right).EndCell()
-		result.Hash()
-		return result
+		return cell.FromRawUnsafe(cell.RawUnsafeCell{
+			Refs: []*cell.Cell{left, right},
+		})
 	}
 }
 
 func calcHash(cb []byte) []byte {
-	hash := sha256.New()
-	hash.Write(cb)
-	return hash.Sum(nil)
+	hash := sha256.Sum256(cb)
+	return hash[:]
 }
 
 func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell {
@@ -438,13 +536,16 @@ func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell
 	copy(data[1:], root.Hash())
 	binary.BigEndian.PutUint16(data[1+32:], uint16(depth))
 
-	proof := cell.BeginCell().MustStoreSlice(data, uint(len(data)*8))
+	proof := cell.RawUnsafeCell{
+		IsSpecial: true,
+		LevelMask: cell.LevelMask{Mask: 0},
+		BitsSz:    uint(len(data) * 8),
+		Data:      data,
+	}
 
 	if depth == 0 {
 		// nothing to prune
-		proofCell := proof.MustStoreRef(root).EndCell()
-		proofCell.UnsafeModify(cell.LevelMask{Mask: 0}, true)
-		return proofCell
+		return cell.FromRawUnsafe(proof)
 	}
 
 	type pair struct {
@@ -514,10 +615,9 @@ func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell
 		newRootCell.UnsafeModify(cell.LevelMask{Mask: 1}, false)
 	}
 
-	proofCell := proof.MustStoreRef(newRootCell).EndCell()
-	proofCell.UnsafeModify(cell.LevelMask{Mask: 0}, true)
+	proof.Refs = append(proof.Refs, newRootCell)
 
-	return proofCell
+	return cell.FromRawUnsafe(proof)
 }
 
 func fastPrune(toPrune *cell.Cell, depth uint16) *cell.Builder {
@@ -525,6 +625,7 @@ func fastPrune(toPrune *cell.Cell, depth uint16) *cell.Builder {
 	prunedData[0] = 0x01 // pruned type
 	prunedData[1] = 1    // level
 	copy(prunedData[2:], toPrune.Hash())
+
 	binary.BigEndian.PutUint16(prunedData[2+32:], depth) //depth
 	return cell.BeginCell().MustStoreSlice(prunedData, uint(len(prunedData)*8))
 }

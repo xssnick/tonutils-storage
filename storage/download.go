@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -68,12 +69,15 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 }
 
 func (t *Torrent) verify(deep bool) error {
+	tm := time.Now()
+	Logger("[VERIFICATION] PREPARING:", hex.EncodeToString(t.BagID))
+
 	if t.Header == nil {
 		return nil
 	}
 
 	rootPath := t.Path + "/" + string(t.Header.DirName)
-	checked := map[uint32]bool{}
+	checked := make([]bool, t.PiecesNum())
 
 	var files []uint32
 	if t.downloadAll {
@@ -98,24 +102,99 @@ func (t *Torrent) verify(deep bool) error {
 		isDelete := false
 		if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
 			isDelete = true
+			Logger("[VERIFICATION] FAILED FOR FILE:", rootPath+"/"+info.Name, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
 		} else if deep {
-			for i := info.FromPiece; i <= info.ToPiece; i++ {
-				if checked[i] {
-					continue
+			if info.Size > 256*1024*1024 {
+				type jobRes struct {
+					piece uint32
+					err   error
+				}
+				type job struct {
+					piece uint32
+					res   chan jobRes
 				}
 
-				_, err := t.getPieceInternal(i, true)
-				if err != nil {
-					if strings.Contains(err.Error(), "is not downloaded") {
+				jobs := make(chan job, 100)
+				results := make(chan jobRes, 100)
+				ctxWorker, cancel := context.WithCancel(t.globalCtx)
+
+				workers := (runtime.NumCPU() / 3) * 2
+				if workers == 0 {
+					workers = 1
+				}
+
+				for i := 0; i < workers; i++ {
+					go func() {
+						for {
+							select {
+							case <-ctxWorker.Done():
+								return
+							case j := <-jobs:
+								_, err := t.getPieceInternal(j.piece, true)
+								select {
+								case <-ctxWorker.Done():
+									return
+								case j.res <- jobRes{piece: j.piece, err: err}:
+								}
+							}
+						}
+					}()
+				}
+
+				go func() {
+					for i := info.FromPiece; i <= info.ToPiece; i++ {
+						if checked[i] {
+							continue
+						}
+
+						jobs <- job{piece: i, res: results}
+					}
+				}()
+
+				for i := info.FromPiece; i <= info.ToPiece; i++ {
+					if checked[i] {
 						continue
 					}
 
-					isDelete = true
-					break
-				}
+					select {
+					case <-ctxWorker.Done():
+						break
+					case res := <-results:
+						if res.err != nil {
+							if !strings.Contains(res.err.Error(), "is not downloaded") {
+								Logger("[VERIFICATION] FAILED FOR PIECE:", res.piece, "BAG:", hex.EncodeToString(t.BagID), res.err.Error())
+								isDelete = true
+							}
+						}
 
-				// mark only for existing pieces to remove not only 1 file in not exist
-				checked[i] = true
+						// mark only for existing pieces to remove not only 1 file in not exist
+						checked[res.piece] = res.err == nil
+					}
+
+					if isDelete {
+						break
+					}
+				}
+				cancel()
+			} else {
+				for i := info.FromPiece; i <= info.ToPiece; i++ {
+					if checked[i] {
+						continue
+					}
+
+					_, err := t.getPieceInternal(i, true)
+					if err != nil {
+						if strings.Contains(err.Error(), "is not downloaded") {
+							continue
+						}
+
+						isDelete = true
+						break
+					}
+
+					// mark only for existing pieces to remove not only 1 file in not exist
+					checked[i] = true
+				}
 			}
 		}
 
@@ -150,7 +229,7 @@ func (t *Torrent) verify(deep bool) error {
 		})
 	}
 
-	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID))
+	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID), "TOOK", time.Since(tm).String())
 
 	return nil
 }
@@ -349,9 +428,9 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 									notEmptyFile := file.FromPiece != file.ToPiece || file.FromPieceOffset != file.ToPieceOffset
 									if notEmptyFile {
-										fileOff := uint32(0)
+										fileOff := int64(0)
 										if file.FromPiece != piece {
-											fileOff = (piece-file.FromPiece)*t.Info.PieceSize - file.FromPieceOffset
+											fileOff = int64(piece-file.FromPiece)*int64(t.Info.PieceSize) - int64(file.FromPieceOffset)
 										}
 
 										data := currentPiece
@@ -362,7 +441,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 											data = data[file.FromPieceOffset:]
 										}
 
-										_, err = currentFile.WriteAt(data, int64(fileOff))
+										_, err = currentFile.WriteAt(data, fileOff)
 										if err != nil {
 											return fmt.Errorf("failed to write file %s: %w", file.Name, err)
 										}

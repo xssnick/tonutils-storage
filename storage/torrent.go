@@ -70,6 +70,7 @@ type Storage interface {
 	SetPiece(bagId []byte, id uint32, p *PieceInfo) error
 	PiecesMask(bagId []byte, num uint32) []byte
 	UpdateUploadStats(bagId []byte, val uint64) error
+	VerifyOnStartup() bool
 }
 
 type NetConnector interface {
@@ -215,7 +216,7 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 		t.isVerificationInProgress = true
 		go func() {
 			// it will remove corrupted pieces
-			if err = t.verify(true); err != nil {
+			if err = t.verify(t.db.VerifyOnStartup()); err != nil {
 				Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
 			}
 
@@ -434,12 +435,12 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 				return nil
 			}
 
-			fileOff := uint32(0)
+			var fileOff int64 = 0
 			if f.FromPiece != id {
-				fileOff = (id-f.FromPiece)*t.Info.PieceSize - f.FromPieceOffset
+				fileOff = int64(id-f.FromPiece)*int64(t.Info.PieceSize) - int64(f.FromPieceOffset)
 			}
-			err = read(path, int64(fileOff))
-			if err != nil {
+
+			if err = read(path, fileOff); err != nil {
 				return nil, err
 			}
 			fileFrom++
@@ -493,7 +494,7 @@ func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
 	return piece.Proof, nil
 }
 
-func (t *Torrent) SetInfoStats(headerData, rootHash []byte, fileSize, headerSize uint64, description string) {
+func (t *Torrent) SetInfoStats(pieceSize uint32, headerData, rootHash []byte, fileSize, headerSize uint64, description string) {
 	t.Info = &TorrentInfo{
 		PieceSize:  pieceSize,
 		FileSize:   fileSize,

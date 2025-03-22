@@ -116,10 +116,11 @@ func (s *Storage) PiecesMask(bagId []byte, num uint32) []byte {
 	mask := make([]byte, p)
 	iter := s.db.NewIterator(&util.Range{Start: k}, nil)
 	for iter.Next() {
-		if !bytes.HasPrefix(iter.Key(), k) {
+		key := iter.Key()
+		if !bytes.HasPrefix(key, k) {
 			break
 		}
-		id := binary.LittleEndian.Uint32(iter.Key()[len(k):])
+		id := binary.LittleEndian.Uint32(key[len(k):])
 		mask[id/8] |= 1 << (id % 8)
 	}
 	return mask

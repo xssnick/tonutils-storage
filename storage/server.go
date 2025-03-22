@@ -279,14 +279,19 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 							},
 						}
 
+						Logger("[STORAGE] SENDING UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID)
+
 						var updRes Ok
 						if err := stPeer.conn.rldp.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
 							Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID, err.Error())
 							return
 						}
 
+						Logger("[STORAGE] SEND UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID)
+
 						sent += uint32(len(have) * 8)
 					}
+					Logger("[STORAGE] DONE SEND UPDATE INIT", hex.EncodeToString(peer.GetID()), q.SessionID)
 				}()
 			} else {
 				go func() {
@@ -304,19 +309,6 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte, query *rldp.Query) error {
 	return func(transfer []byte, query *rldp.Query) error {
 		req, over := overlay.UnwrapQuery(query.Data)
-
-		switch q := req.(type) {
-		case GetTest:
-			i := uint32(q.PieceID) % 100
-			// println("GT", q.PieceID)
-
-			err := peer.SendAnswer(context.Background(), query.MaxAnswerSize, query.ID, transfer, Test{stub[i : i+128*1024]})
-			if err != nil {
-				return err
-			}
-			return nil
-		default:
-		}
 
 		if s.store == nil {
 			return fmt.Errorf("storage is not yet initialized")
@@ -421,28 +413,44 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				stPeer.lastSentPieces = t.PiecesMask()
 				stPeer.piecesMx.Unlock()
 
-				up := AddUpdate{
-					SessionID: atomic.LoadInt64(&stPeer.sessionId),
-					Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
-					Update: UpdateInit{
-						HavePieces:       stPeer.lastSentPieces,
-						HavePiecesOffset: 0,
-						State: State{
-							WillUpload:   isUpl,
-							WantDownload: true,
-						},
-					},
-				}
+				go func() {
+					const maxPiecesBytesPerRequest = 6000
+					num := t.PiecesNum()
+					sent := uint32(0)
+					for i := uint32(0); sent < num; i++ {
+						have := stPeer.lastSentPieces[i*maxPiecesBytesPerRequest:]
+						if len(have) > maxPiecesBytesPerRequest {
+							have = have[:maxPiecesBytesPerRequest]
+						}
 
-				var updRes Ok
-				err = peer.DoQuery(ctx, query.MaxAnswerSize, overlay.WrapQuery(over, up), &updRes)
-				if err != nil {
-					return err
-				}
+						up := AddUpdate{
+							SessionID: atomic.LoadInt64(&stPeer.sessionId),
+							Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
+							Update: UpdateInit{
+								HavePieces:       have,
+								HavePiecesOffset: int32(sent),
+								State: State{
+									WillUpload:   isUpl,
+									WantDownload: true,
+								},
+							},
+						}
+
+						var updRes Ok
+						if err := peer.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
+							Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(peer.GetADNL().GetID()), q.SessionID, err.Error())
+							return
+						}
+
+						sent += uint32(len(have) * 8)
+					}
+				}()
 			} else {
-				if err = stPeer.updateHavePieces(ctx, t); err != nil {
-					return err
-				}
+				go func() {
+					if err := stPeer.updateHavePieces(context.Background(), t); err != nil {
+						return
+					}
+				}()
 			}
 		case GetTorrentInfo:
 			if !isUpl {
@@ -537,7 +545,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 90*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 10*time.Minute, s.key, 8)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 10*time.Minute, s.key, 0)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
@@ -780,8 +788,12 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 			err = fmt.Errorf("too big header > 20 MB, looks dangerous")
 			return err
 		}
-		if info.PieceSize > 64*1024*1024 {
-			err = fmt.Errorf("too big piece > 64 MB, looks dangerous")
+		if info.PieceSize < 4096 {
+			err = fmt.Errorf("too small piece < 4 KB, cannot be handled")
+			return err
+		}
+		if info.PieceSize > 8*1024*1024 {
+			err = fmt.Errorf("too big piece > 8 MB, cannot be handled")
 			return err
 		}
 
