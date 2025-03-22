@@ -415,7 +415,7 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 	var piece Piece
 	err := func() error {
 		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*3, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
+		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*2, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
@@ -555,7 +555,7 @@ func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) 
 		return fmt.Errorf("piece is out of range %d/%d", piece, piecesNum)
 	}
 
-	tree, err := proof.BeginParse().LoadRef()
+	tree, err := proof.PeekRef(0)
 	if err != nil {
 		return err
 	}
@@ -569,34 +569,25 @@ func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) 
 
 	// check bits from left to right and load branches
 	for i := depth - 1; i >= 0; i-- {
-		isLeft := piece&(1<<i) == 0
-
-		b, err := tree.LoadRef()
-		if err != nil {
-			return err
+		refId := 1
+		if piece&(1<<i) == 0 {
+			refId = 0
 		}
 
-		if isLeft {
-			tree = b
-			continue
-		}
-
-		// we need right branch
-		tree, err = tree.LoadRef()
+		tree, err = tree.PeekRef(refId)
 		if err != nil {
 			return err
 		}
 	}
 
-	branchHash, err := tree.LoadSlice(256)
-	if err != nil {
-		return err
+	branchHash := tree.ToRawUnsafe().Data
+	if len(branchHash) != 32 {
+		return fmt.Errorf("hash in not 32 bytes")
 	}
 
-	dataHash := sha256.New()
-	dataHash.Write(data)
-	if !bytes.Equal(branchHash, dataHash.Sum(nil)) {
-		return fmt.Errorf("incorrect branch hash")
+	h := sha256.Sum256(data)
+	if !bytes.Equal(branchHash, h[:]) {
+		return fmt.Errorf("incorrect branch hash %s | %s", hex.EncodeToString(branchHash), hex.EncodeToString(h[:]))
 	}
 	return nil
 }

@@ -59,12 +59,12 @@ func (f fileInfo) GetSize() uint64 {
 	return f.size
 }
 
-func (f fileInfo) CreateReader() (io.ReadCloser, error) {
+func (f fileInfo) CreateReader() (io.ReaderAt, func() error, error) {
 	fl, err := os.Open(f.path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open file %s: %w", f.path, err)
+		return nil, nil, fmt.Errorf("failed to open file %s: %w", f.path, err)
 	}
-	return fl, nil
+	return fl, fl.Close, nil
 }
 
 func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, _ []storage.FileRef, _ error) {

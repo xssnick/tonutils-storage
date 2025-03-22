@@ -52,6 +52,7 @@ var (
 	IsDaemon            = flag.Bool("daemon", false, "Daemon mode, no command line input")
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 	Version             = flag.Bool("version", false, "Show version and exit")
+	NoVerify            = flag.Bool("no-verify", false, "Skip bags files integrity verification on startup")
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	TunnelConfig        = flag.String("tunnel-config", "", "tunnel config path")
@@ -270,12 +271,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	downloadGate := adnl.NewGateway(cfg.Key)
-	if err = downloadGate.StartClient(); err != nil {
-		pterm.Error.Println("Failed to init downloader gateway:", err.Error())
-		os.Exit(1)
-	}
-
 	providerGate := adnl.NewGateway(cfg.Key)
 	if err = providerGate.StartClient(); err != nil {
 		pterm.Error.Println("Failed to init provider gateway:", err.Error())
@@ -285,7 +280,7 @@ func main() {
 	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
 	Connector = storage.NewConnector(srv)
 
-	Storage, err = db.NewStorage(ldb, Connector, true, nil)
+	Storage, err = db.NewStorage(ldb, Connector, true, *NoVerify, nil)
 	if err != nil {
 		pterm.Error.Println("Failed to init storage:", err.Error())
 		os.Exit(1)
@@ -414,6 +409,7 @@ func main() {
 		syscall.SIGQUIT)
 
 	<-sig
+	pterm.Info.Println("Stopping...")
 }
 
 func download(bagId string) {
@@ -517,6 +513,8 @@ func list() {
 			status = "Inactive"
 		}
 
+		verifyInProgress, _ := t.GetLastVerifiedAt()
+
 		if t.Info != nil {
 			mask := t.PiecesMask()
 			downloadedPieces := 0
@@ -531,13 +529,18 @@ func list() {
 			if downloaded > full { // cut not full last piece
 				downloaded = full
 			}
-			if downloaded == full {
-				status = "Downloaded"
-				if activeUpload {
-					status = "Seeding"
+
+			if !verifyInProgress {
+				if downloaded == full {
+					status = "Downloaded"
+					if activeUpload {
+						status = "Seeding"
+					}
+				} else if activeDownload {
+					status = "Downloading"
 				}
-			} else if activeDownload {
-				status = "Downloading"
+			} else {
+				status = "Verifying"
 			}
 
 			strDownloaded = storage.ToSz(downloaded)
