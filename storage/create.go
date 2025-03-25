@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/pterm/pterm"
 	"github.com/xssnick/tonutils-go/tl"
@@ -43,16 +44,16 @@ func CreateTorrent(ctx context.Context, filesRootPath, dirName, description stri
 		DirName:     []byte(dirName),
 	}
 
-	return CreateTorrentWithInitialHeader(ctx, filesRootPath, description, header, db, connector, files, progressCallback)
+	return CreateTorrentWithInitialHeader(ctx, filesRootPath, description, header, db, connector, files, progressCallback, true)
 }
 
-func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, description string, header *TorrentHeader, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
+func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, description string, header *TorrentHeader, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64), verbose bool) (*Torrent, error) {
 
 	torrent := NewTorrent(filesRootPath, db, connector)
 	torrent.Header = header
 
 	// scanning files to initialize torrent header
-	dataSize, err := initializeTorrentHeader(torrent, files)
+	dataSize, err := initializeTorrentHeader(torrent, files, verbose)
 	if err != nil {
 		return nil, err
 	}
@@ -71,11 +72,15 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 	default:
 		pieceSize = 128 << 10 // 128 KB
 	}
-
-	waiter, _ := pterm.DefaultSpinner.Start("Generating bag header...")
+	var waiter *pterm.SpinnerPrinter
+	if verbose {
+		waiter, _ = pterm.DefaultSpinner.Start("Generating bag header...")
+	}
 	headerData, err := tl.Serialize(torrent.Header, true)
 	if err != nil {
-		waiter.Fail(err.Error())
+		if waiter != nil {
+			waiter.Fail(err.Error())
+		}
 		return nil, fmt.Errorf("failed to serialize header: %w", err)
 	}
 
@@ -89,13 +94,15 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 
 // initializeTorrentHeader will perform a scan on torrent files passed and initialize torrent header. Returning the initialized
 // torrent and the data size.
-func initializeTorrentHeader(torrent *Torrent, files []FileRef) (uint64, error) {
+func initializeTorrentHeader(torrent *Torrent, files []FileRef, verbose bool) (uint64, error) {
 	if len(files) == 0 {
 		return 0, fmt.Errorf("0 files in torrent")
 	}
-
-	// report on waiter that we are scanning files
-	waiter, _ := pterm.DefaultSpinner.Start("Scanning files...")
+	var waiter *pterm.SpinnerPrinter
+	if verbose {
+		// report on waiter that we are scanning files
+		waiter, _ = pterm.DefaultSpinner.Start("Scanning files...")
+	}
 
 	var dataSize uint64
 	// iterate over files to build torrent headers
@@ -115,7 +122,9 @@ func initializeTorrentHeader(torrent *Torrent, files []FileRef) (uint64, error) 
 
 		torrent.Header.DataIndex = append(torrent.Header.DataIndex, dataSize)
 	}
-	waiter.Success()
+	if waiter != nil {
+		waiter.Success()
+	}
 
 	return dataSize, nil
 }
@@ -148,21 +157,25 @@ func computeHashesAndJoinPieces(
 		pieceSize,
 		headerData,
 		files,
-		piecesNum, doneProgress, maxProgress,
+		piecesNum, &doneProgress, maxProgress,
 		waiter,
 		progressCallback,
 	)
 	if err != nil {
 		return err
 	}
-
-	waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
+	if waiter != nil {
+		waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
+	}
 	hashTree := buildMerkleTree(hashes, 9) // 9 is most efficient in most cases
 	rootHash := hashTree.Hash()
-	waiter.Success("Merkle tree successfully built")
-
-	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating proofs...").Start()
-
+	if waiter != nil {
+		waiter.Success("Merkle tree successfully built")
+	}
+	var progress *pterm.ProgressbarPrinter
+	if waiter != nil {
+		progress, _ = pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating proofs...").Start()
+	}
 	pcNumBytes := len(piecesStartIndexes) / 8
 	if len(piecesStartIndexes)%8 != 0 {
 		pcNumBytes++
@@ -174,12 +187,14 @@ func computeHashesAndJoinPieces(
 
 	tCell, err := tlb.ToCell(torrent.Info)
 	if err != nil {
-		waiter.Fail(err.Error())
+		if waiter != nil {
+			waiter.Fail(err.Error())
+		}
 		return err
 	}
 	torrent.BagID = tCell.Hash()
 
-	err = joinTorrentPieces(ctx, torrent, hashTree, files, piecesStartIndexes, doneProgress, maxProgress, progress, progressCallback)
+	err = joinTorrentPieces(ctx, torrent, hashTree, files, piecesStartIndexes, &doneProgress, maxProgress, progress, progressCallback)
 	if err != nil {
 		return err
 	}
@@ -193,7 +208,7 @@ func joinTorrentPieces(
 	hashTree *cell.Cell,
 	files []FileRef,
 	piecesStartIndexes []uint32,
-	doneProgress, maxProgress uint64,
+	doneProgress *uint64, maxProgress uint64,
 	progress *pterm.ProgressbarPrinter,
 	progressCallback func(done uint64, max uint64),
 ) error {
@@ -239,15 +254,18 @@ func joinTorrentPieces(
 	for i, idx := range piecesStartIndexes {
 		select {
 		case <-ctx.Done():
-			_, _ = progress.Stop()
+			if progress != nil {
+				_, _ = progress.Stop()
+			}
 			return ctx.Err()
 		case err := <-toCalcErr:
 			return fmt.Errorf("failed to calc proof for piece: %w", err)
 		case toCalc <- &calcReq{id: uint32(i), startIndex: idx}:
-			progress.Increment()
+			if progress != nil {
+				progress.Increment()
+			}
 			if progressCallback != nil {
-				doneProgress += 1
-				progressCallback(doneProgress, maxProgress)
+				progressCallback(atomic.AddUint64(doneProgress, 1), maxProgress)
 			}
 		}
 	}
@@ -271,7 +289,7 @@ func computeFileHashes(
 	pieceSize uint32,
 	headerData []byte,
 	files []FileRef,
-	piecesNum, doneProgress, maxProgress uint64,
+	piecesNum uint64, doneProgress *uint64, maxProgress uint64,
 	waiter *pterm.SpinnerPrinter,
 	progressCallback func(done uint64, max uint64),
 ) ([][]byte, []uint32, error) {
@@ -363,11 +381,11 @@ func computeFileHashes(
 								cancelWorker()
 								return err
 							}
-
-							progress.Increment()
+							if progress != nil {
+								progress.Increment()
+							}
 							if progressCallback != nil {
-								doneProgress += 3
-								progressCallback(doneProgress, maxProgress)
+								progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
 							}
 						}
 					}
@@ -400,10 +418,11 @@ func computeFileHashes(
 				piecesProcessed++
 
 				cbOffset = 0
-				progress.Increment()
+				if progress != nil {
+					progress.Increment()
+				}
 				if progressCallback != nil {
-					doneProgress += 3
-					progressCallback(doneProgress, maxProgress)
+					progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
 				}
 			}
 		}
@@ -413,16 +432,20 @@ func computeFileHashes(
 		}
 		return nil
 	}
-
-	progress, _ := pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Hashing pieces...").Start()
-
+	var progress *pterm.ProgressbarPrinter
+	if waiter != nil {
+		progress, _ = pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Hashing pieces...").Start()
+	}
 	err := process(true, uint64(len(headerData)), bytes.NewReader(headerData), progress)
 	if err != nil {
-		waiter.Fail(err.Error())
+		if waiter != nil {
+			waiter.Fail(err.Error())
+		}
 		return nil, nil, fmt.Errorf("failed to process header piece: %w", err)
 	}
-	waiter.Success()
-
+	if waiter != nil {
+		waiter.Success()
+	}
 	// add files
 	for _, f := range files {
 		select {
@@ -452,15 +475,16 @@ func computeFileHashes(
 		piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
 
 		piecesProcessed++
-
-		progress.Increment()
+		if progress != nil {
+			progress.Increment()
+		}
 		if progressCallback != nil {
-			doneProgress += 3
-			progressCallback(doneProgress, maxProgress)
+			progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
 		}
 	}
-	_, _ = progress.Stop()
-
+	if progress != nil {
+		_, _ = progress.Stop()
+	}
 	return hashes, piecesStartFileIndexes, nil
 }
 
