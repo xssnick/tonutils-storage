@@ -146,8 +146,10 @@ func (f fileRef) GetSize() uint64 {
 	return f.size
 }
 
-func (f fileRef) CreateReader() (io.ReadCloser, error) {
-	return f.file, nil
+func (f fileRef) CreateReader() (io.ReaderAt, func() error, error) {
+	return f.file, func() error {
+		return f.file.Close()
+	}, nil
 }
 
 func TestInitializeTorrent(t *testing.T) {
@@ -188,7 +190,7 @@ func TestInitializeTorrent(t *testing.T) {
 		},
 	}
 
-	dataSize, err := initializeTorrentHeader(torrent, files)
+	dataSize, err := initializeTorrentHeader(torrent, files, true)
 	if err != nil {
 		t.Fatal(err)
 	}
