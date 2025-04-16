@@ -20,11 +20,6 @@ import (
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
 
-type fileInfoData struct {
-	Path string
-	Name string
-}
-
 type FileRef interface {
 	GetName() string
 	GetSize() uint64
@@ -58,19 +53,27 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 		return nil, err
 	}
 
-	var pieceSize uint32
+	var pieceSize = db.GetForcedPieceSize()
 
-	switch {
-	case dataSize > 100<<30: // > 100 GB
-		pieceSize = 8 << 20 // 8 MB (16MB -1 is bytes TL limit so it is max)
-	case dataSize > 20<<30: // > 20 GB
-		pieceSize = 4 << 20 // 4 MB
-	case dataSize > 1<<30: // > 1 GB
-		pieceSize = 1 << 20 // 1 MB
-	case dataSize > 512<<20: // > 512 MB
-		pieceSize = 256 << 10 // 256 KB
-	default:
-		pieceSize = 128 << 10 // 128 KB
+	if pieceSize == 0 {
+		switch {
+		case dataSize > 100<<30: // > 100 GB
+			pieceSize = 8 << 20 // 8 MB (16MB -1 is bytes TL limit so it is max)
+		case dataSize > 20<<30: // > 20 GB
+			pieceSize = 4 << 20 // 4 MB
+		case dataSize > 10<<30: // > 10 GB
+			pieceSize = 2 << 20 // 2 MB
+		case dataSize > 1<<30: // > 1 GB
+			pieceSize = 1 << 20 // 1 MB
+		case dataSize > 512<<20: // > 512 MB
+			pieceSize = 256 << 10 // 256 KB
+		default:
+			pieceSize = 128 << 10 // 128 KB
+		}
+	}
+
+	if pieceSize > 8<<20 {
+		return nil, fmt.Errorf("too big piece size")
 	}
 	var waiter *pterm.SpinnerPrinter
 	if verbose {
@@ -241,7 +244,7 @@ func joinTorrentPieces(
 
 				err := torrent.setPiece(p.id, &PieceInfo{
 					StartFileIndex: p.startIndex,
-					Proof:          torrent.fastProof(hashTree, p.id, torrent.PiecesNum()).ToBOCWithFlags(false),
+					Proof:          torrent.fastProof(hashTree, p.id, torrent.Info.PiecesNum()).ToBOCWithFlags(false),
 				})
 				if err != nil {
 					toCalcErr <- err

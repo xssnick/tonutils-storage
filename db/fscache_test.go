@@ -35,7 +35,7 @@ func BenchmarkAcquire(b *testing.B) {
 }
 
 func testAcquire(paths []string) error {
-	fs := NewFSControllerCache()
+	fs := NewFSControllerCache(false)
 	// acquire all the fd in tc.paths
 	eg := new(errgroup.Group)
 	for _, p := range paths {

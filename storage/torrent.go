@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"math/bits"
 	"sync"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"github.com/xssnick/tonutils-go/adnl/overlay"
-	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 )
@@ -71,6 +71,7 @@ type Storage interface {
 	PiecesMask(bagId []byte, num uint32) []byte
 	UpdateUploadStats(bagId []byte, val uint64) error
 	VerifyOnStartup() bool
+	GetForcedPieceSize() uint32
 }
 
 type NetConnector interface {
@@ -132,7 +133,7 @@ type Torrent struct {
 
 func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
-	t.pieceMask = t.db.PiecesMask(t.BagID, t.PiecesNum())
+	t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
 	t.maskMx.Unlock()
 }
 
@@ -254,9 +255,9 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	})
 }
 
-func (t *Torrent) PiecesNum() uint32 {
-	piecesNum := t.Info.FileSize / uint64(t.Info.PieceSize)
-	if t.Info.FileSize%uint64(t.Info.PieceSize) != 0 {
+func (t *TorrentInfo) PiecesNum() uint32 {
+	piecesNum := t.FileSize / uint64(t.PieceSize)
+	if t.FileSize%uint64(t.PieceSize) != 0 {
 		piecesNum++
 	}
 	return uint32(piecesNum)
@@ -312,10 +313,11 @@ func (t *Torrent) IsCompleted() bool {
 		return false
 	}
 
+	num := t.Info.PiecesNum()
 	for i, b := range mask {
 		ones := 8
 		if i == len(mask)-1 {
-			if ones = int(t.PiecesNum() % 8); ones == 0 {
+			if ones = int(num % 8); ones == 0 {
 				ones = 8
 			}
 		}
@@ -395,8 +397,8 @@ func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 }
 
 func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
-	if id >= t.PiecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
+	if id >= t.Info.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.Info.PiecesNum())
 	}
 
 	piece, err := t.getPiece(id)
@@ -407,15 +409,18 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 	offset := 0
 	block := make([]byte, t.Info.PieceSize)
 
+	var headerData []byte
 	fileFrom := piece.StartFileIndex
 	for {
 		isHdr := t.Info.HeaderSize > uint64(id)*uint64(t.Info.PieceSize)+uint64(offset)
 
 		// header
 		if isHdr {
-			headerData, err := tl.Serialize(t.Header, true)
-			if err != nil {
-				return nil, fmt.Errorf("failed to serialize header: %w", err)
+			if headerData == nil {
+				headerData, err = tl.Serialize(t.Header, true)
+				if err != nil {
+					return nil, fmt.Errorf("failed to serialize header: %w", err)
+				}
 			}
 			offset += copy(block[offset:], headerData[id*t.Info.PieceSize:])
 		} else {
@@ -482,8 +487,8 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 }
 
 func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
-	if id >= t.PiecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.PiecesNum())
+	if id >= t.Info.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.Info.PiecesNum())
 	}
 
 	piece, err := t.getPieceInternal(id, true)
@@ -506,4 +511,14 @@ func (t *Torrent) SetInfoStats(pieceSize uint32, headerData, rootHash []byte, fi
 			Value:             description,
 		},
 	}
+}
+
+func (t *Torrent) transmitTimeout() time.Duration {
+	timeout := time.Duration(t.Info.PieceSize/(256<<10)) * time.Second
+	if timeout < 7*time.Second {
+		return 7 * time.Second
+	} else if timeout > 60*time.Second {
+		return 60 * time.Second
+	}
+	return timeout
 }

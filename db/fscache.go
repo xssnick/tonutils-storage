@@ -18,15 +18,17 @@ type FDescCache struct {
 
 // FSControllerCache caches file descriptors to avoid unnecessary open/close of most used files
 type FSControllerCache struct {
-	dsc map[string]*FDescCache
-	mx  sync.RWMutex
+	dsc      map[string]*FDescCache
+	mx       sync.RWMutex
+	noRemove bool
 }
 
 var CachedFDLimit = 800
 
-func NewFSControllerCache() *FSControllerCache {
+func NewFSControllerCache(noRemove bool) *FSControllerCache {
 	return &FSControllerCache{
-		dsc: map[string]*FDescCache{},
+		dsc:      map[string]*FDescCache{},
+		noRemove: noRemove,
 	}
 }
 
@@ -108,6 +110,11 @@ func (f *FSControllerCache) clean() bool {
 }
 
 func (f *FSControllerCache) RemoveFile(path string) (err error) {
+	if f.noRemove {
+		log.Println("attempt to remove file skipped because no-remove flag is set, file", path)
+		return nil
+	}
+
 	f.mx.Lock()
 	defer f.mx.Unlock()
 

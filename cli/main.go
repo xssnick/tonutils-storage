@@ -13,10 +13,13 @@ import (
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
 	"github.com/rs/zerolog"
+	"github.com/ton-blockchain/adnl-tunnel/tunnel"
+	"github.com/xssnick/tonutils-go/adnl/rldp"
+
 	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
+	"github.com/syndtr/goleveldb/leveldb/opt"
 	tunnelConfig "github.com/ton-blockchain/adnl-tunnel/config"
-	"github.com/ton-blockchain/adnl-tunnel/tunnel"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	adnlAddress "github.com/xssnick/tonutils-go/adnl/address"
@@ -53,8 +56,10 @@ var (
 	NetworkConfigPath   = flag.String("network-config", "", "Network config path to load from disk")
 	Version             = flag.Bool("version", false, "Show version and exit")
 	NoVerify            = flag.Bool("no-verify", false, "Skip bags files integrity verification on startup")
+	NoRemove            = flag.Bool("no-remove", false, "Do not remove any files even on bag deletion or integrity failure")
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
+	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
 	TunnelConfig        = flag.String("tunnel-config", "", "tunnel config path")
 )
 
@@ -84,9 +89,10 @@ func main() {
 	switch *Verbosity {
 	case 13:
 		adnl.Logger = log.Logger.Println
+		dht.Logger = log.Logger.Println
 		fallthrough
 	case 12:
-		dht.Logger = log.Logger.Println
+		rldp.Logger = log.Logger.Println
 		fallthrough
 	case 11:
 		storage.Logger = log.Logger.Println
@@ -116,7 +122,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	ldb, err := leveldb.OpenFile(*DBPath+"/db", nil)
+	ldb, err := leveldb.OpenFile(*DBPath+"/db", &opt.Options{
+		WriteBuffer: 64 << 20,
+	})
 	if err != nil {
 		pterm.Error.Println("Failed to load db:", err.Error())
 		os.Exit(1)
@@ -193,8 +201,19 @@ func main() {
 			return
 		}
 
+		data, err = os.ReadFile(tunCfg.SharedConfigPath)
+		if err != nil {
+			pterm.Fatal.Println("Failed to load tunnel shared config (nodes pool)", err.Error())
+		}
+
+		var tunSharedCfg tunnelConfig.SharedConfig
+		if err = json.Unmarshal(data, &tunSharedCfg); err != nil {
+			pterm.Fatal.Println("Failed to parse tunnel shared config (nodes pool)", err.Error())
+			return
+		}
+
 		var tun *tunnel.RegularOutTunnel
-		tun, port, ip, err = tunnel.PrepareTunnel(&tunCfg, lsCfg)
+		tun, port, ip, err = tunnel.PrepareTunnel(&tunCfg, &tunSharedCfg, lsCfg, log.Logger)
 		if err != nil {
 			pterm.Fatal.Println(err.Error())
 			return
@@ -216,7 +235,7 @@ func main() {
 	} else {
 		dl, err := adnl.DefaultListener(cfg.ListenAddr)
 		if err != nil {
-			pterm.Fatal.Println(err.Error())
+			pterm.Fatal.Println(cfg.ListenAddr, err.Error())
 			return
 		}
 		netMgr = adnl.NewMultiNetReader(dl)
@@ -280,7 +299,7 @@ func main() {
 	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
 	Connector = storage.NewConnector(srv)
 
-	Storage, err = db.NewStorage(ldb, Connector, true, *NoVerify, nil)
+	Storage, err = db.NewStorage(ldb, Connector, *ForcePieceSize, true, *NoVerify, *NoRemove, nil)
 	if err != nil {
 		pterm.Error.Println("Failed to init storage:", err.Error())
 		os.Exit(1)
