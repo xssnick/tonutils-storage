@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-var DownloadThreads = 32
-var DownloadPrefetch = 200
+var DownloadThreads = runtime.NumCPU() * 2
+var DownloadPrefetch = DownloadThreads * 16
 
 type fileInfo struct {
 	path string
@@ -77,7 +77,7 @@ func (t *Torrent) verify(deep bool) error {
 	}
 
 	rootPath := t.Path + "/" + string(t.Header.DirName)
-	checked := make([]bool, t.PiecesNum())
+	checked := make([]bool, t.Info.PiecesNum())
 
 	var files []uint32
 	if t.downloadAll {
@@ -338,7 +338,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
 		})
 
-		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.PiecesNum()), PiecesToDownload: len(pieces)}})
+		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(pieces)}})
 		if len(pieces) > 0 {
 			if err := t.prepareDownloader(ctx); err != nil {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())

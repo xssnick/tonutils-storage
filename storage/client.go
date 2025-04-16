@@ -208,24 +208,19 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		}
 	}()
 
-	if dow.torrent.Info == nil {
-		// connect to first node and resolve torrent info
-		for {
-			select {
-			case <-ctx.Done():
-				err = fmt.Errorf("failed to find storage nodes for this bag, err: %w", ctx.Err())
-				return nil, err
-			case <-time.After(10 * time.Millisecond):
-			}
-
-			if dow.torrent.Info != nil {
-				// info resolved
-				break
-			}
+	// connect to first node and resolve torrent info
+	for dow.torrent.Info == nil {
+		select {
+		case <-ctx.Done():
+			err = fmt.Errorf("failed to find storage nodes for this bag, err: %w", ctx.Err())
+			return nil, err
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 
 	if dow.torrent.Header == nil {
+		dow.torrent.InitMask()
+
 		hdrPieces := dow.torrent.Info.HeaderSize / uint64(dow.torrent.Info.PieceSize)
 		if dow.torrent.Info.HeaderSize%uint64(dow.torrent.Info.PieceSize) > 0 {
 			// add not full piece
@@ -269,7 +264,6 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		}
 
 		dow.torrent.Header = &header
-		dow.torrent.InitMask()
 
 		for i, proof := range proofs {
 			err = dow.torrent.setPiece(uint32(i), &PieceInfo{
@@ -390,8 +384,8 @@ func (s *storagePeer) pieceNotifier() {
 		s.torrent.newPiecesCond.L.Unlock()
 
 		Logger("[STORAGE] NOTIFYING HAVE PIECES FOR PEER:", hex.EncodeToString(s.nodeId))
-		ctx, cancel := context.WithTimeout(s.globalCtx, 5*time.Second)
-		err := s.updateHavePieces(ctx, s.torrent)
+		ctx, cancel := context.WithTimeout(s.globalCtx, 60*time.Second)
+		err := s.updateHavePieces(ctx)
 		cancel()
 		if err != nil {
 			reportFails++
@@ -414,12 +408,15 @@ func (s *storagePeer) pieceNotifier() {
 func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
 	var piece Piece
 	err := func() error {
-		reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := s.conn.rldp.DoQuery(reqCtx, 4096+int64(s.torrent.Info.PieceSize)*2, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
+		tm := time.Now()
+		reqCtx, cancel := context.WithTimeout(ctx, s.torrent.transmitTimeout())
+		err := s.conn.rldp.DoQuery(reqCtx, 4096+uint64(s.torrent.Info.PieceSize)*2, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 		}
+		Logger("[STORAGE] LOAD PIECE", id, "FROM", s.nodeAddr, "DOWNLOAD TOOK:", time.Since(tm).String())
+		tm = time.Now()
 
 		proof, err := cell.FromBOC(piece.Proof)
 		if err != nil {
@@ -437,6 +434,8 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 		}
 
 		s.torrent.UpdateDownloadedPeer(s, uint64(len(piece.Data)))
+		Logger("[STORAGE] LOAD PIECE", id, "FROM", s.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
+
 		return nil
 	}()
 	if err != nil {
@@ -550,7 +549,7 @@ func (t *torrentDownloader) DownloadPiece(ctx context.Context, pieceIndex uint32
 }
 
 func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) error {
-	piecesNum := t.PiecesNum()
+	piecesNum := t.Info.PiecesNum()
 	if piece >= piecesNum {
 		return fmt.Errorf("piece is out of range %d/%d", piece, piecesNum)
 	}

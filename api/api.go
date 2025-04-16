@@ -449,7 +449,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		}
 
 		if !short {
-			res.BagPiecesNum = t.PiecesNum()
+			res.BagPiecesNum = t.Info.PiecesNum()
 			res.HasPiecesMask = t.PiecesMask()
 		}
 

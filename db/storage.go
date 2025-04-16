@@ -31,23 +31,29 @@ type Storage struct {
 	connector       storage.NetConnector
 	fs              OsFs
 	skipVerify      bool
+	forcePieceSize  uint32
 
 	notifyCh chan Event
 	db       *leveldb.DB
 	mx       sync.RWMutex
 }
 
-func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActiveFilesToo bool, skipVerify bool, notifier chan Event) (*Storage, error) {
+func NewStorage(db *leveldb.DB, connector storage.NetConnector, forcePieceSize int, startWithoutActiveFilesToo bool, skipVerify bool, noRemove bool, notifier chan Event) (*Storage, error) {
+	if forcePieceSize < 0 {
+		return nil, fmt.Errorf("invalid piece size flag")
+	}
+
 	s := &Storage{
 		torrents:        map[string]*storage.Torrent{},
 		torrentsOverlay: map[string]*storage.Torrent{},
 		db:              db,
 		connector:       connector,
 		fs: OsFs{
-			ctrl: NewFSControllerCache(),
+			ctrl: NewFSControllerCache(noRemove),
 		},
-		notifyCh:   notifier,
-		skipVerify: skipVerify,
+		notifyCh:       notifier,
+		skipVerify:     skipVerify,
+		forcePieceSize: uint32(forcePieceSize),
 	}
 
 	err := s.loadTorrents(startWithoutActiveFilesToo)
@@ -60,6 +66,10 @@ func NewStorage(db *leveldb.DB, connector storage.NetConnector, startWithoutActi
 
 func (s *Storage) VerifyOnStartup() bool {
 	return !s.skipVerify
+}
+
+func (s *Storage) GetForcedPieceSize() uint32 {
+	return s.forcePieceSize
 }
 
 func (s *Storage) GetTorrent(hash []byte) *storage.Torrent {
@@ -152,7 +162,8 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	}
 
 	if t.Info != nil {
-		for i := uint32(0); i < t.PiecesNum(); i++ {
+		num := t.Info.PiecesNum()
+		for i := uint32(0); i < num; i++ {
 			_ = s.RemovePiece(t.BagID, i)
 		}
 	}

@@ -257,45 +257,13 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 				stPeer.piecesMx.Unlock()
 
 				go func() {
-					const maxPiecesBytesPerRequest = 6000
-					num := t.PiecesNum()
-					sent := uint32(0)
-					for i := uint32(0); sent < num; i++ {
-						have := stPeer.lastSentPieces[i*maxPiecesBytesPerRequest:]
-						if len(have) > maxPiecesBytesPerRequest {
-							have = have[:maxPiecesBytesPerRequest]
-						}
-
-						up := AddUpdate{
-							SessionID: atomic.LoadInt64(&stPeer.sessionId),
-							Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
-							Update: UpdateInit{
-								HavePieces:       have,
-								HavePiecesOffset: int32(sent),
-								State: State{
-									WillUpload:   isUpl,
-									WantDownload: true,
-								},
-							},
-						}
-
-						Logger("[STORAGE] SENDING UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID)
-
-						var updRes Ok
-						if err := stPeer.conn.rldp.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
-							Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID, err.Error())
-							return
-						}
-
-						Logger("[STORAGE] SEND UPDATE INIT", i, hex.EncodeToString(peer.GetID()), q.SessionID)
-
-						sent += uint32(len(have) * 8)
+					if err := stPeer.updateInitPieces(context.Background()); err != nil {
+						return
 					}
-					Logger("[STORAGE] DONE SEND UPDATE INIT", hex.EncodeToString(peer.GetID()), q.SessionID)
 				}()
 			} else {
 				go func() {
-					if err := stPeer.updateHavePieces(context.Background(), t); err != nil {
+					if err := stPeer.updateHavePieces(context.Background()); err != nil {
 						return
 					}
 				}()
@@ -349,7 +317,13 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		}
 		stPeer.touch()
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		var timeout = 7 * time.Second
+		switch req.(type) {
+		case GetPiece:
+			timeout = t.transmitTimeout()
+		}
+
+		ctx, cancel := context.WithTimeout(t.globalCtx, timeout)
 		defer cancel()
 
 		switch q := req.(type) {
@@ -369,7 +343,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 			t.peersMx.RUnlock()
 
-			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, overlay.NodesList{List: peers})
+			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, overlay.NodesList{List: peers})
 			if err != nil {
 				return err
 			}
@@ -377,6 +351,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			if !isUpl {
 				return fmt.Errorf("bag is not for upload")
 			}
+
+			tm := time.Now()
 
 			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
 			if err != nil {
@@ -390,10 +366,16 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return err
 			}
 
-			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, pc)
+			Logger("[STORAGE] LOADED PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
+
+			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, pc)
 			if err != nil {
+				Logger("[STORAGE] FAIL ANSWER PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
+
 				return err
 			}
+
+			Logger("[STORAGE] SENT PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
 
 			t.UpdateUploadedPeer(stPeer, uint64(len(pc.Data)))
 		case Ping:
@@ -403,7 +385,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				Logger("[STORAGE] NEW SESSION WITH", hex.EncodeToString(adnlId), q.SessionID)
 			}
 
-			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Pong{})
+			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Pong{})
 			if err != nil {
 				return err
 			}
@@ -414,40 +396,13 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				stPeer.piecesMx.Unlock()
 
 				go func() {
-					const maxPiecesBytesPerRequest = 6000
-					num := t.PiecesNum()
-					sent := uint32(0)
-					for i := uint32(0); sent < num; i++ {
-						have := stPeer.lastSentPieces[i*maxPiecesBytesPerRequest:]
-						if len(have) > maxPiecesBytesPerRequest {
-							have = have[:maxPiecesBytesPerRequest]
-						}
-
-						up := AddUpdate{
-							SessionID: atomic.LoadInt64(&stPeer.sessionId),
-							Seqno:     atomic.AddInt64(&stPeer.sessionSeqno, 1),
-							Update: UpdateInit{
-								HavePieces:       have,
-								HavePiecesOffset: int32(sent),
-								State: State{
-									WillUpload:   isUpl,
-									WantDownload: true,
-								},
-							},
-						}
-
-						var updRes Ok
-						if err := peer.DoQuery(context.Background(), 1<<20, overlay.WrapQuery(over, up), &updRes); err != nil {
-							Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(peer.GetADNL().GetID()), q.SessionID, err.Error())
-							return
-						}
-
-						sent += uint32(len(have) * 8)
+					if err := stPeer.updateInitPieces(context.Background()); err != nil {
+						return
 					}
 				}()
 			} else {
 				go func() {
-					if err := stPeer.updateHavePieces(context.Background(), t); err != nil {
+					if err := stPeer.updateHavePieces(context.Background()); err != nil {
 						return
 					}
 				}()
@@ -462,14 +417,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return err
 			}
 
-			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, TorrentInfoContainer{
+			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, TorrentInfoContainer{
 				Data: c.ToBOC(),
 			})
 			if err != nil {
 				return err
 			}
 		case UpdateState:
-			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, Ok{})
+			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Ok{})
 			if err != nil {
 				return err
 			}
@@ -495,8 +450,8 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				}
 				stPeer.piecesMx.Unlock()
 			}
-			// do nothing with this info for now, just ok
-			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.ID, transfer, &Ok{})
+
+			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, &Ok{})
 			if err != nil {
 				return err
 			}
@@ -506,8 +461,51 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 	}
 }
 
-func (s *storagePeer) updateHavePieces(ctx context.Context, t *Torrent) error {
-	mask := t.PiecesMask()
+const maxPiecesBytesPerRequest = 6000
+const maxNewPiecesPerRequest = maxPiecesBytesPerRequest / 4
+
+func (s *storagePeer) updateInitPieces(ctx context.Context) error {
+	num := s.torrent.Info.PiecesNum()
+	isDow, isUpl := s.torrent.IsActive()
+
+	sent := uint32(0)
+	for i := uint32(0); sent < num; i++ {
+		have := s.lastSentPieces[i*maxPiecesBytesPerRequest:]
+		if len(have) > maxPiecesBytesPerRequest {
+			have = have[:maxPiecesBytesPerRequest]
+		}
+
+		up := AddUpdate{
+			SessionID: atomic.LoadInt64(&s.sessionId),
+			Seqno:     atomic.AddInt64(&s.sessionSeqno, 1),
+			Update: UpdateInit{
+				HavePieces:       have,
+				HavePiecesOffset: int32(sent),
+				State: State{
+					WillUpload:   isUpl,
+					WantDownload: isDow,
+				},
+			},
+		}
+
+		var updRes Ok
+
+		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
+		err := s.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(s.overlay, up), &updRes)
+		cancel()
+		if err != nil {
+			Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(s.conn.adnl.GetID()), s.sessionId, err.Error())
+			return fmt.Errorf("failed to send have pieces update: %w", err)
+		}
+
+		sent += uint32(len(have) * 8)
+	}
+
+	return nil
+}
+
+func (s *storagePeer) updateHavePieces(ctx context.Context) error {
+	mask := s.torrent.PiecesMask()
 
 	s.piecesMx.Lock()
 	lastPieces := append([]byte{}, s.lastSentPieces...)
@@ -523,19 +521,32 @@ func (s *storagePeer) updateHavePieces(ctx context.Context, t *Torrent) error {
 	s.lastSentPieces = mask
 	s.piecesMx.Unlock()
 
-	if len(newPieces) > 0 {
+	sent := 0
+	for i := 0; sent < len(newPieces); i++ {
+		have := newPieces[i*maxNewPiecesPerRequest:]
+		if len(have) > maxNewPiecesPerRequest {
+			have = have[:maxNewPiecesPerRequest]
+		}
+
 		up := AddUpdate{
 			SessionID: atomic.LoadInt64(&s.sessionId),
 			Seqno:     atomic.AddInt64(&s.sessionSeqno, 1),
 			Update: UpdateHavePieces{
-				PieceIDs: newPieces,
+				PieceIDs: have,
 			},
 		}
 
-		var res Ok
-		if err := s.conn.rldp.DoQuery(ctx, 1<<25, overlay.WrapQuery(s.overlay, up), &res); err != nil {
+		var updRes Ok
+
+		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
+		err := s.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(s.overlay, up), &updRes)
+		cancel()
+		if err != nil {
+			Logger("[STORAGE] FAILED TO SEND UPDATE HAVE", i, hex.EncodeToString(s.conn.adnl.GetID()), s.sessionId, err.Error())
 			return fmt.Errorf("failed to send have pieces update: %w", err)
 		}
+
+		sent += len(have)
 	}
 
 	return nil
@@ -794,6 +805,10 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 		}
 		if info.PieceSize > 8*1024*1024 {
 			err = fmt.Errorf("too big piece > 8 MB, cannot be handled")
+			return err
+		}
+		if info.PiecesNum() > 32000000 {
+			err = fmt.Errorf("too many pieces > 32000000, cannot be handled")
 			return err
 		}
 
