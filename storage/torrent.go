@@ -123,6 +123,11 @@ type Torrent struct {
 	lastVerified             time.Time
 	isVerificationInProgress bool
 
+	lastDHTStore               time.Time
+	lastPeersSearch            time.Time
+	lastPeersSearchCompletedAt int64
+	lastDHTStoreCompletedAt    int64
+
 	mx            sync.Mutex
 	maskMx        sync.RWMutex
 	newPiecesCond *sync.Cond
@@ -238,8 +243,6 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
 	// t.completedCtx, t.complete = context.WithCancel(context.Background())
-	go t.runPeersMonitor()
-	go t.connector.StartPeerSearcher(t)
 
 	if t.IsCompleted() {
 		//	t.complete()
