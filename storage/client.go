@@ -212,8 +212,6 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 	}
 
 	if dow.torrent.Header == nil {
-		dow.torrent.InitMask()
-
 		hdrPieces := dow.torrent.Info.HeaderSize / uint64(dow.torrent.Info.PieceSize)
 		if dow.torrent.Info.HeaderSize%uint64(dow.torrent.Info.PieceSize) > 0 {
 			// add not full piece

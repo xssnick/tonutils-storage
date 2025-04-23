@@ -773,6 +773,8 @@ func (s *storagePeer) prepareTorrentInfo(t *Torrent) error {
 		t.mx.Lock()
 		t.Info = &info
 		t.mx.Unlock()
+
+		t.InitMask()
 	}
 	return nil
 }

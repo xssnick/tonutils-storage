@@ -60,7 +60,7 @@ var (
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
-	Tunnel              = flag.Bool("enable-tunnel", false, "use tunnel")
+	EnableTunnel        = flag.Bool("enable-tunnel", false, "Enable tunnel mode, to host files with no public ip (should be configured first)")
 )
 
 var GitCommit string
@@ -176,7 +176,7 @@ func main() {
 
 	var netMgr adnl.NetManager
 	var gate *adnl.Gateway
-	if *Tunnel {
+	if *EnableTunnel {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(zerolog.InfoLevel)
 		if *Verbosity >= 3 {
 			log.Logger = log.Logger.Level(zerolog.DebugLevel)
@@ -199,7 +199,7 @@ func main() {
 		}
 
 		events := make(chan any, 1)
-		go tunnel.RunTunnel(cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger, events)
+		go tunnel.RunTunnel(cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger.Level(zerolog.DebugLevel), events)
 
 		initUpd := make(chan tunnel.UpdatedEvent, 1)
 		once := sync.Once{}
