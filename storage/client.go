@@ -65,12 +65,6 @@ type pieceResponse struct {
 	err   error
 }
 
-type pieceRequest struct {
-	index  int32
-	ctx    context.Context
-	result chan<- pieceResponse
-}
-
 type storagePeer struct {
 	torrent      *Torrent
 	nodeAddr     string
@@ -111,7 +105,6 @@ type speedLimit struct {
 
 type TorrentServer interface {
 	GetADNLPrivateKey() ed25519.PrivateKey
-	StartPeerSearcher(t *Torrent)
 }
 
 type Connector struct {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"github.com/pterm/pterm"
+	tunnelConfig "github.com/ton-blockchain/adnl-tunnel/config"
 	"log"
 	"net"
 	"os"
@@ -18,6 +19,8 @@ type Config struct {
 	ExternalIP       string
 	DownloadsPath    string
 	NetworkConfigUrl string
+	Version          uint
+	TunnelConfig     *tunnelConfig.ClientConfig
 }
 
 func checkIPAddress(ip string) string {
@@ -115,6 +118,7 @@ func LoadConfig(dir string) (*Config, error) {
 		}
 	}
 
+	var cfg *Config
 	path := dir + "/config.json"
 	_, err = os.Stat(path)
 	if os.IsNotExist(err) {
@@ -123,12 +127,18 @@ func LoadConfig(dir string) (*Config, error) {
 			return nil, err
 		}
 
-		cfg := &Config{
+		cfg = &Config{
+			Version:          1,
 			Key:              priv,
 			ListenAddr:       "0.0.0.0:17555",
 			ExternalIP:       "",
 			DownloadsPath:    "./downloads/",
 			NetworkConfigUrl: "https://ton-blockchain.github.io/global.config.json",
+		}
+
+		cfg.TunnelConfig, err = tunnelConfig.GenerateClientConfig()
+		if err != nil {
+			return nil, err
 		}
 
 		ip, seed := checkCanSeed()
@@ -148,15 +158,26 @@ func LoadConfig(dir string) (*Config, error) {
 			return nil, err
 		}
 
-		var cfg Config
 		err = json.Unmarshal(data, &cfg)
 		if err != nil {
 			return nil, err
 		}
-		return &cfg, nil
 	}
 
-	return nil, err
+	if cfg.Version < 1 {
+		cfg.Version = 1
+		cfg.TunnelConfig, err = tunnelConfig.GenerateClientConfig()
+		if err != nil {
+			return nil, err
+		}
+
+		err = SaveConfig(cfg, dir)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return cfg, nil
 }
 
 func SaveConfig(cfg *Config, dir string) error {

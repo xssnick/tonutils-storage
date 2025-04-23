@@ -7,8 +7,8 @@ require (
 	github.com/pterm/pterm v0.12.80
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/ton-blockchain/adnl-tunnel v0.0.0-20250416124603-63546e415517
-	github.com/xssnick/tonutils-go v1.12.0
+	github.com/ton-blockchain/adnl-tunnel v0.0.0-20250422150651-7f8bb60f1b7a
+	github.com/xssnick/tonutils-go v1.11.2-0.20250418105758-7783ad538f9b
 	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b
 	golang.org/x/sync v0.13.0
 )
@@ -40,7 +40,7 @@ require (
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/xssnick/raptorq v1.0.0 // indirect
-	github.com/xssnick/ton-payment-network v0.0.0-20250415171941-548f60253c87 // indirect
+	github.com/xssnick/ton-payment-network v0.0.0-20250419144310-23c3f6de09ca // indirect
 	golang.org/x/crypto v0.37.0 // indirect
 	golang.org/x/sys v0.32.0 // indirect
 	golang.org/x/term v0.31.0 // indirect

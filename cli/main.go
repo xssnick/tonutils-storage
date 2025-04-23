@@ -13,17 +13,16 @@ import (
 	"github.com/pterm/pterm"
 	"github.com/pterm/pterm/putils"
 	"github.com/rs/zerolog"
-	"github.com/ton-blockchain/adnl-tunnel/tunnel"
-	"github.com/xssnick/tonutils-go/adnl/rldp"
-
 	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/opt"
 	tunnelConfig "github.com/ton-blockchain/adnl-tunnel/config"
+	"github.com/ton-blockchain/adnl-tunnel/tunnel"
 	"github.com/xssnick/tonutils-go/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	adnlAddress "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
+	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/liteclient"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/ton"
@@ -42,6 +41,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -60,7 +60,7 @@ var (
 	ListenThreads       = flag.Int("threads", 0, "Listen threads")
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
-	TunnelConfig        = flag.String("tunnel-config", "", "tunnel config path")
+	Tunnel              = flag.Bool("enable-tunnel", false, "use tunnel")
 )
 
 var GitCommit string
@@ -176,34 +176,20 @@ func main() {
 
 	var netMgr adnl.NetManager
 	var gate *adnl.Gateway
-	if *TunnelConfig != "" {
+	if *Tunnel {
 		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(zerolog.InfoLevel)
 		if *Verbosity >= 3 {
 			log.Logger = log.Logger.Level(zerolog.DebugLevel)
 		}
 
-		data, err := os.ReadFile(*TunnelConfig)
-		if err != nil {
-			if os.IsNotExist(err) {
-				if _, err = tunnelConfig.GenerateClientConfig(*TunnelConfig); err != nil {
-					pterm.Error.Println("Failed to generate tunnel config", err.Error())
-					os.Exit(1)
-				}
-				pterm.Success.Println("Generated tunnel config; fill it with the desired route and restart")
-				os.Exit(0)
-			}
-			pterm.Fatal.Println("Failed to load tunnel config", err.Error())
-		}
-
-		var tunCfg tunnelConfig.ClientConfig
-		if err = json.Unmarshal(data, &tunCfg); err != nil {
-			pterm.Fatal.Println("Failed to parse tunnel config", err.Error())
+		if cfg.TunnelConfig.NodesPoolConfigPath == "" {
+			pterm.Fatal.Println("Nodes pool config path is empty")
 			return
 		}
 
-		data, err = os.ReadFile(tunCfg.SharedConfigPath)
+		data, err := os.ReadFile(cfg.TunnelConfig.NodesPoolConfigPath)
 		if err != nil {
-			pterm.Fatal.Println("Failed to load tunnel shared config (nodes pool)", err.Error())
+			pterm.Fatal.Println("Failed to load tunnel nodes pool config", err.Error())
 		}
 
 		var tunSharedCfg tunnelConfig.SharedConfig
@@ -212,26 +198,43 @@ func main() {
 			return
 		}
 
-		var tun *tunnel.RegularOutTunnel
-		tun, port, ip, err = tunnel.PrepareTunnel(&tunCfg, &tunSharedCfg, lsCfg, log.Logger)
-		if err != nil {
-			pterm.Fatal.Println(err.Error())
-			return
-		}
-		netMgr = adnl.NewMultiNetReader(tun)
+		events := make(chan any, 1)
+		go tunnel.RunTunnel(cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger, events)
+
+		initUpd := make(chan tunnel.UpdatedEvent, 1)
+		once := sync.Once{}
+		go func() {
+			for event := range events {
+				switch e := event.(type) {
+				case tunnel.UpdatedEvent:
+					log.Info().Msg("tunnel updated")
+
+					e.Tunnel.SetOutAddressChangedHandler(func(addr *net.UDPAddr) {
+						gate.SetAddressList([]*adnlAddress.UDP{
+							{
+								IP:   addr.IP,
+								Port: int32(addr.Port),
+							},
+						})
+					})
+
+					once.Do(func() {
+						initUpd <- e
+					})
+				case tunnel.ConfigurationErrorEvent:
+					log.Err(e.Err).Msg("tunnel configuration error, will retry...")
+				case error:
+					log.Fatal().Err(e).Msg("tunnel failed")
+				}
+			}
+		}()
+
+		upd := <-initUpd
+		netMgr = adnl.NewMultiNetReader(upd.Tunnel)
 
 		gate = adnl.NewGatewayWithNetManager(cfg.Key, netMgr)
 
-		tun.SetOutAddressChangedHandler(func(addr *net.UDPAddr) {
-			gate.SetAddressList([]*adnlAddress.UDP{
-				{
-					IP:   addr.IP,
-					Port: int32(addr.Port),
-				},
-			})
-		})
-
-		pterm.Success.Println("Using tunnel:", ip.String())
+		pterm.Success.Println("Using tunnel:", upd.ExtIP.String())
 	} else {
 		dl, err := adnl.DefaultListener(cfg.ListenAddr)
 		if err != nil {
@@ -308,8 +311,7 @@ func main() {
 
 	Provider = provider.NewClient(Storage, apiClient, transport.NewClient(providerGate, dhtClient))
 
-	pterm.Info.Println("If you use it for commercial purposes please consider", pterm.LightWhite("donation")+". It allows us to develop such products 100% free.")
-	pterm.Info.Println("We also have telegram group, subscribe to stay updated or ask some questions.", pterm.LightBlue("https://t.me/tonrh"))
+	pterm.Info.Println("We have telegram group, subscribe to stay updated or ask some questions.", pterm.LightBlue("https://t.me/tonrh"))
 
 	pterm.Success.Println("Storage started, server mode:", serverMode)
 

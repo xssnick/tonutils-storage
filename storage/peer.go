@@ -114,28 +114,45 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 	return p
 }
 
-func (t *Torrent) runPeersMonitor() {
+func (s *Server) runPeersMonitor() {
 	for {
 		select {
-		case <-t.globalCtx.Done():
-			t.peersMx.Lock()
-			t.peers = map[string]*PeerInfo{}
-			t.peersMx.Unlock()
+		case <-s.closeCtx.Done():
 			return
 		case <-time.After(100 * time.Millisecond):
 		}
 
-		t.peersMx.Lock()
-		for k, p := range t.peers {
-			if p.LastSeenAt.Add(5 * time.Minute).Before(time.Now()) {
-				delete(t.peers, k)
-			}
+		if s.store == nil {
+			continue
 		}
-		t.peersMx.Unlock()
 
-		for _, p := range t.GetPeers() {
-			p.downloadSpeed.calculate(p.Downloaded, 10)
-			p.uploadSpeed.calculate(p.Uploaded, 10)
+		list := s.store.GetAll()
+		for _, t := range list {
+			hasPeers := false
+			if t.peersMx.TryLock() {
+				select {
+				case <-t.globalCtx.Done():
+					if len(t.peers) > 0 {
+						t.peers = map[string]*PeerInfo{}
+					}
+				default:
+					for k, p := range t.peers {
+						if p.LastSeenAt.Add(5 * time.Minute).Before(time.Now()) {
+							delete(t.peers, k)
+						}
+					}
+					hasPeers = len(t.peers) > 0
+				}
+				t.peersMx.Unlock()
+			}
+
+			if hasPeers && t.peersMx.TryRLock() {
+				for _, p := range t.peers {
+					p.downloadSpeed.calculate(p.Downloaded, 10)
+					p.uploadSpeed.calculate(p.Uploaded, 10)
+				}
+				t.peersMx.RUnlock()
+			}
 		}
 	}
 }
