@@ -180,15 +180,24 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	req := struct {
-		Path        string `json:"path"`
-		Description string `json:"description"`
+		Path          string   `json:"path"`
+		Description   string   `json:"description"`
+		KeepOnlyPaths []string `json:"keep_only_paths"`
 	}{}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response(w, http.StatusBadRequest, Error{err.Error()})
 		return
 	}
 
-	rootPath, dirName, files, err := s.store.DetectFileRefs(req.Path)
+	var only map[string]bool
+	if len(req.KeepOnlyPaths) > 0 {
+		only = make(map[string]bool)
+		for _, p := range req.KeepOnlyPaths {
+			only[p] = true
+		}
+	}
+
+	rootPath, dirName, files, err := s.store.DetectFileRefs(req.Path, only)
 	if err != nil {
 		pterm.Error.Println("Failed to read file refs:", err.Error())
 		response(w, http.StatusInternalServerError, Error{err.Error()})

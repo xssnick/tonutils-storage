@@ -67,7 +67,7 @@ func (f fileInfo) CreateReader() (io.ReaderAt, func() error, error) {
 	return fl, fl.Close, nil
 }
 
-func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, _ []storage.FileRef, _ error) {
+func (s *Storage) DetectFileRefs(path string, only ...map[string]bool) (rootPath string, dirName string, _ []storage.FileRef, _ error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return "", "", nil, err
@@ -79,7 +79,7 @@ func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, 
 	}
 
 	if fi.IsDir() {
-		files, err := s.GetAllFilesRefsInDir(path)
+		files, err := s.GetAllFilesRefsInDir(path, only...)
 		if err != nil {
 			return "", "", nil, err
 		}
@@ -91,6 +91,10 @@ func (s *Storage) DetectFileRefs(path string) (rootPath string, dirName string, 
 		}
 
 		return filepath.Dir(path), dir, files, nil
+	}
+
+	if only != nil && only[0] != nil && !only[0][path] {
+		return filepath.Dir(path), "", []storage.FileRef{}, nil
 	}
 
 	file, err := s.GetSingleFileRef(path)
@@ -126,10 +130,15 @@ func (s *Storage) GetSingleFileRef(path string) (storage.FileRef, error) {
 	}, nil
 }
 
-func (s *Storage) GetAllFilesRefsInDir(path string) ([]storage.FileRef, error) {
+func (s *Storage) GetAllFilesRefsInDir(path string, only ...map[string]bool) ([]storage.FileRef, error) {
 	path, err := filepath.Abs(path)
 	if err != nil {
 		return nil, err
+	}
+
+	var keepOnly map[string]bool
+	if len(only) > 0 && only[0] != nil {
+		keepOnly = only[0]
 	}
 
 	var files []storage.FileRef
@@ -139,6 +148,11 @@ func (s *Storage) GetAllFilesRefsInDir(path string) ([]storage.FileRef, error) {
 		}
 
 		if f.IsDir() {
+			return nil
+		}
+
+		if keepOnly != nil && !keepOnly[filePath] {
+			// excluded by filters
 			return nil
 		}
 

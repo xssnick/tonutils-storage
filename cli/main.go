@@ -199,7 +199,7 @@ func main() {
 		}
 
 		events := make(chan any, 1)
-		go tunnel.RunTunnel(cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger.Level(zerolog.DebugLevel), events)
+		go tunnel.RunTunnel(context.Background(), cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger, events)
 
 		initUpd := make(chan tunnel.UpdatedEvent, 1)
 		once := sync.Once{}
@@ -210,6 +210,8 @@ func main() {
 					log.Info().Msg("tunnel updated")
 
 					e.Tunnel.SetOutAddressChangedHandler(func(addr *net.UDPAddr) {
+						log.Info().Str("addr", addr.IP.String()).Int("port", addr.Port).Msg("out updated for storage")
+
 						gate.SetAddressList([]*adnlAddress.UDP{
 							{
 								IP:   addr.IP,

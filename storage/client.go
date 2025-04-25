@@ -77,6 +77,7 @@ type storagePeer struct {
 	lastSentPieces []byte
 	hasPieces      map[uint32]bool
 	piecesMx       sync.RWMutex
+	prepareInfoMx  sync.Mutex
 
 	fails            int32
 	failAt           int64
@@ -270,25 +271,25 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 	return dow, nil
 }
 
-func (s *storagePeer) Close() {
-	s.torrent.RemovePeer(s.nodeId)
-	s.closeOnce.Do(func() {
-		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(s.nodeId), s.nodeAddr)
-		s.stop()
-		s.conn.CloseFor(s)
+func (p *storagePeer) Close() {
+	p.torrent.RemovePeer(p.nodeId)
+	p.closeOnce.Do(func() {
+		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(p.nodeId), p.nodeAddr)
+		p.stop()
+		p.conn.CloseFor(p)
 	})
 }
 
-func (s *storagePeer) touch() {
-	s.torrent.TouchPeer(s)
-	s.activateOnce.Do(func() {
-		go s.pieceNotifier()
+func (p *storagePeer) touch() {
+	p.torrent.TouchPeer(p)
+	p.activateOnce.Do(func() {
+		go p.pieceNotifier()
 	})
 }
 
-func (s *storagePeer) pinger(srv *Server) {
+func (p *storagePeer) pinger(srv *Server) {
 	defer func() {
-		s.Close()
+		p.Close()
 	}()
 
 	var lastPeersReq time.Time
@@ -297,116 +298,116 @@ func (s *storagePeer) pinger(srv *Server) {
 	fails := int32(0)
 	for {
 		wait := 250 * time.Millisecond
-		if s.sessionId != 0 {
+		if p.sessionId != 0 {
 			wait = 10 * time.Second
 			// session should be initialised
 			var pong Pong
-			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
-			err := s.conn.adnl.Query(ctx, overlay.WrapQuery(s.overlay, &Ping{SessionID: s.sessionId}), &pong)
+			ctx, cancel := context.WithTimeout(p.globalCtx, 7*time.Second)
+			err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &Ping{SessionID: p.sessionId}), &pong)
 			cancel()
 			if err != nil {
 				fails++
 				if fails >= 3 {
-					Logger("[STORAGE] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(s.nodeId), s.nodeAddr, err.Error())
-					s.conn.FailedFor(s, true)
+					Logger("[STORAGE] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(p.nodeId), p.nodeAddr, err.Error())
+					p.conn.FailedFor(p, true)
 					return
 				}
 			} else {
 				fails = 0
-				s.conn.FailedFor(s, false)
-				s.touch()
+				p.conn.FailedFor(p, false)
+				p.touch()
 			}
 		} else {
 			if time.Since(startedAt) > 30*time.Second {
 				sesId := rand.Int63()
-				atomic.StoreInt64(&s.sessionId, sesId)
-				atomic.StoreInt64(&s.sessionSeqno, 0)
-				Logger("[STORAGE] FORCE NEW SESSION WITH", hex.EncodeToString(s.nodeId), sesId)
+				atomic.StoreInt64(&p.sessionId, sesId)
+				atomic.StoreInt64(&p.sessionSeqno, 0)
+				Logger("[STORAGE] FORCE NEW SESSION WITH", hex.EncodeToString(p.nodeId), sesId)
 			}
 		}
 
 		if fails == 0 && time.Since(lastPeersReq) > 20*time.Second {
-			Logger("[STORAGE] REQUESTING NODES LIST OF PEER", hex.EncodeToString(s.nodeId), "FOR", hex.EncodeToString(s.torrent.BagID))
+			Logger("[STORAGE] REQUESTING NODES LIST OF PEER", hex.EncodeToString(p.nodeId), "FOR", hex.EncodeToString(p.torrent.BagID))
 			var al overlay.NodesList
-			ctx, cancel := context.WithTimeout(s.globalCtx, 7*time.Second)
-			err := s.conn.adnl.Query(ctx, overlay.WrapQuery(s.overlay, &overlay.GetRandomPeers{}), &al)
+			ctx, cancel := context.WithTimeout(p.globalCtx, 7*time.Second)
+			err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &overlay.GetRandomPeers{}), &al)
 			cancel()
 			if err == nil {
 				for _, n := range al.List {
 					// add known nodes in case we will need them in future to scale
-					srv.addTorrentNode(&n, s.torrent)
+					srv.addTorrentNode(&n, p.torrent)
 				}
 			} else {
-				Logger("[STORAGE] FAILED REQUEST NODES LIST OF PEER", hex.EncodeToString(s.nodeId),
-					"FOR", hex.EncodeToString(s.torrent.BagID), "ERR:", err.Error())
+				Logger("[STORAGE] FAILED REQUEST NODES LIST OF PEER", hex.EncodeToString(p.nodeId),
+					"FOR", hex.EncodeToString(p.torrent.BagID), "ERR:", err.Error())
 			}
 			lastPeersReq = time.Now()
 		}
 
 		select {
-		case <-s.globalCtx.Done():
+		case <-p.globalCtx.Done():
 			return
 		case <-time.After(wait):
 		}
 	}
 }
 
-func (s *storagePeer) pieceNotifier() {
+func (p *storagePeer) pieceNotifier() {
 	lastReported := 0
 	reportFails := 0
 	for {
 		select {
-		case <-s.globalCtx.Done():
+		case <-p.globalCtx.Done():
 			return
 		case <-time.After(300 * time.Millisecond):
 		}
 
-		s.torrent.newPiecesCond.L.Lock()
-		for lastReported == s.torrent.DownloadedPiecesNum() {
-			s.torrent.newPiecesCond.Wait()
+		p.torrent.newPiecesCond.L.Lock()
+		for lastReported == p.torrent.DownloadedPiecesNum() {
+			p.torrent.newPiecesCond.Wait()
 
 			select {
-			case <-s.globalCtx.Done():
-				s.torrent.newPiecesCond.L.Unlock()
+			case <-p.globalCtx.Done():
+				p.torrent.newPiecesCond.L.Unlock()
 				return
 			default:
 			}
 		}
-		s.torrent.newPiecesCond.L.Unlock()
+		p.torrent.newPiecesCond.L.Unlock()
 
-		Logger("[STORAGE] NOTIFYING HAVE PIECES FOR PEER:", hex.EncodeToString(s.nodeId))
-		ctx, cancel := context.WithTimeout(s.globalCtx, 60*time.Second)
-		err := s.updateHavePieces(ctx)
+		Logger("[STORAGE] NOTIFYING HAVE PIECES FOR PEER:", hex.EncodeToString(p.nodeId))
+		ctx, cancel := context.WithTimeout(p.globalCtx, 60*time.Second)
+		err := p.updateHavePieces(ctx)
 		cancel()
 		if err != nil {
 			reportFails++
 			Logger("[STORAGE] NOTIFY HAVE PIECES ERR:", err.Error())
 
 			if reportFails > 3 {
-				Logger("[STORAGE] TOO MANY NOTIFY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
+				Logger("[STORAGE] TOO MANY NOTIFY FAILS FROM", p.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 
-				s.Close()
+				p.Close()
 				return
 			}
 			continue
 		}
 
 		reportFails = 0
-		lastReported = s.torrent.DownloadedPiecesNum()
+		lastReported = p.torrent.DownloadedPiecesNum()
 	}
 }
 
-func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
+func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
 	var piece Piece
 	err := func() error {
 		tm := time.Now()
-		reqCtx, cancel := context.WithTimeout(ctx, s.torrent.transmitTimeout())
-		err := s.conn.rldp.DoQuery(reqCtx, 4096+uint64(s.torrent.Info.PieceSize)*2, overlay.WrapQuery(s.overlay, &GetPiece{int32(id)}), &piece)
+		reqCtx, cancel := context.WithTimeout(ctx, p.torrent.transmitTimeout())
+		err := p.conn.rldp.DoQuery(reqCtx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
 		cancel()
 		if err != nil {
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 		}
-		Logger("[STORAGE] LOAD PIECE", id, "FROM", s.nodeAddr, "DOWNLOAD TOOK:", time.Since(tm).String())
+		Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "DOWNLOAD TOOK:", time.Since(tm).String())
 		tm = time.Now()
 
 		proof, err := cell.FromBOC(piece.Proof)
@@ -414,18 +415,18 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 			return fmt.Errorf("failed to parse BoC of piece %d, err: %w", id, err)
 		}
 
-		err = cell.CheckProof(proof, s.torrent.Info.RootHash)
+		err = cell.CheckProof(proof, p.torrent.Info.RootHash)
 		if err != nil {
 			return fmt.Errorf("proof check of piece %d failed: %w", id, err)
 		}
 
-		err = s.torrent.checkProofBranch(proof, piece.Data, id)
+		err = p.torrent.checkProofBranch(proof, piece.Data, id)
 		if err != nil {
 			return fmt.Errorf("proof branch check of piece %d failed: %w", id, err)
 		}
 
-		s.torrent.UpdateDownloadedPeer(s, uint64(len(piece.Data)))
-		Logger("[STORAGE] LOAD PIECE", id, "FROM", s.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
+		p.torrent.UpdateDownloadedPeer(p, uint64(len(piece.Data)))
+		Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
 
 		return nil
 	}()
@@ -434,27 +435,27 @@ func (s *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 			return nil, err
 		}
 
-		Logger("[STORAGE] LOAD PIECE FROM", s.nodeAddr, "ERR:", err.Error())
+		Logger("[STORAGE] LOAD PIECE FROM", p.nodeAddr, "ERR:", err.Error())
 
 		now := time.Now().Unix()
-		if old := atomic.LoadInt64(&s.failAt); old < time.Now().Unix()-2 {
-			if atomic.CompareAndSwapInt64(&s.failAt, old, now) {
-				atomic.AddInt32(&s.fails, 1)
+		if old := atomic.LoadInt64(&p.failAt); old < time.Now().Unix()-2 {
+			if atomic.CompareAndSwapInt64(&p.failAt, old, now) {
+				atomic.AddInt32(&p.fails, 1)
 			}
 
 			// in case 3 fails with 2s delay in a row, disconnect
-			if atomic.LoadInt32(&s.fails) >= 3 {
-				Logger("[STORAGE] TOO MANY FAILS FROM", s.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
+			if atomic.LoadInt32(&p.fails) >= 3 {
+				Logger("[STORAGE] TOO MANY FAILS FROM", p.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 				// something wrong, close connection, we should reconnect after it
-				s.conn.FailedFor(s, true)
-				s.Close()
+				p.conn.FailedFor(p, true)
+				p.Close()
 			}
 		}
 		return nil, err
 	}
-	atomic.StoreInt32(&s.fails, 0)
-	atomic.StoreInt64(&s.failAt, 0)
-	s.conn.FailedFor(s, false)
+	atomic.StoreInt32(&p.fails, 0)
+	atomic.StoreInt64(&p.failAt, 0)
+	p.conn.FailedFor(p, false)
 
 	return &piece, nil
 }
