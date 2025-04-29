@@ -209,11 +209,16 @@ func (t *Torrent) verify(deep bool) error {
 					return err
 				}
 			}
-			needDownload = true
-			Logger("[VERIFICATION] CORRUPTED, NEED REDOWNLOAD:", hex.EncodeToString(t.BagID))
 
-			if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil {
-				Logger("[VERIFICATION] FAILED TO REMOVE FILE:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID), err.Error())
+			if !t.CreatedLocally {
+				needDownload = true
+				Logger("[VERIFICATION] CORRUPTED, NEED REDOWNLOAD:", hex.EncodeToString(t.BagID))
+
+				if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil {
+					Logger("[VERIFICATION] FAILED TO REMOVE FILE:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID), err.Error())
+				}
+			} else {
+				Logger("[VERIFICATION] CORRUPTED, BUT CREATED LOCALLY AND WE WILL NOT TOUCH FILES :", hex.EncodeToString(t.BagID))
 			}
 		}
 	}

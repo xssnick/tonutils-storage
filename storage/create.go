@@ -46,6 +46,7 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 
 	torrent := NewTorrent(filesRootPath, db, connector)
 	torrent.Header = header
+	torrent.CreatedLocally = true
 
 	// scanning files to initialize torrent header
 	dataSize, err := initializeTorrentHeader(torrent, files, verbose)
@@ -557,6 +558,12 @@ func calcHash(cb []byte) []byte {
 }
 
 func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell {
+	if piecesNum == 1 {
+		//special case
+		pf, _ := root.CreateProof(cell.CreateProofSkeleton())
+		return pf
+	}
+
 	// calc tree depth
 	depth := int(math.Log2(float64(piecesNum)))
 	if piecesNum > uint32(math.Pow(2, float64(depth))) {

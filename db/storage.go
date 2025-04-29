@@ -183,6 +183,7 @@ func (s *Storage) SetTorrent(t *storage.Torrent) error {
 		ActiveDownload:  activeDownload,
 		DownloadAll:     t.IsDownloadAll(),
 		DownloadOrdered: t.IsDownloadOrdered(),
+		CreatedLocally:  t.CreatedLocally,
 	})
 	if err != nil {
 		return err
@@ -215,11 +216,12 @@ func (s *Storage) addTorrent(t *storage.Torrent) error {
 }
 
 type TorrentStored struct {
-	BagID     []byte
-	Path      string
-	Info      *storage.TorrentInfo
-	Header    *storage.TorrentHeader
-	CreatedAt time.Time
+	BagID          []byte
+	Path           string
+	Info           *storage.TorrentInfo
+	Header         *storage.TorrentHeader
+	CreatedAt      time.Time
+	CreatedLocally bool
 
 	ActiveUpload    bool
 	ActiveDownload  bool
@@ -245,6 +247,7 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 		t.Header = tr.Header
 		t.BagID = tr.BagID
 		t.CreatedAt = tr.CreatedAt
+		t.CreatedLocally = tr.CreatedLocally
 
 		uplStat, err := s.db.Get(append([]byte("upl_stat:"), t.BagID...), nil)
 		if err != nil && !errors.Is(err, leveldb.ErrNotFound) {

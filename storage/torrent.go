@@ -91,11 +91,12 @@ type TorrentStats struct {
 }
 
 type Torrent struct {
-	BagID     []byte
-	Path      string
-	Info      *TorrentInfo
-	Header    *TorrentHeader
-	CreatedAt time.Time
+	BagID          []byte
+	Path           string
+	Info           *TorrentInfo
+	Header         *TorrentHeader
+	CreatedAt      time.Time
+	CreatedLocally bool
 
 	activeFiles     []uint32
 	activeUpload    bool
@@ -475,7 +476,7 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 		}
 
 		if err = cell.CheckProof(proof, t.Info.RootHash); err != nil {
-			return nil, fmt.Errorf("proof check of piece %d failed: %w", id, err)
+			return nil, fmt.Errorf("proof check of piece %d failed: %w, %s", id, err, proof.Dump())
 		}
 
 		if err = t.checkProofBranch(proof, block, id); err != nil {
