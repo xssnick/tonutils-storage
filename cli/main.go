@@ -38,11 +38,9 @@ import (
 	"net"
 	"net/netip"
 	"os"
-	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -122,6 +120,9 @@ func main() {
 		os.Exit(1)
 	}
 
+	closerCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+
 	ldb, err := leveldb.OpenFile(*DBPath+"/db", &opt.Options{
 		WriteBuffer: 64 << 20,
 	})
@@ -129,6 +130,7 @@ func main() {
 		pterm.Error.Println("Failed to load db:", err.Error())
 		os.Exit(1)
 	}
+	defer ldb.Close()
 
 	var ip net.IP
 	var port uint16
@@ -155,7 +157,7 @@ func main() {
 			os.Exit(1)
 		}
 	} else {
-		lsCfg, err = liteclient.GetConfigFromUrl(context.Background(), cfg.NetworkConfigUrl)
+		lsCfg, err = liteclient.GetConfigFromUrl(closerCtx, cfg.NetworkConfigUrl)
 		if err != nil {
 			pterm.Warning.Println("Failed to download ton config:", err.Error(), "; We will take it from static cache")
 			lsCfg = &liteclient.GlobalConfig{}
@@ -167,12 +169,14 @@ func main() {
 	}
 
 	lsClient := liteclient.NewConnectionPool()
-	if err = lsClient.AddConnectionsFromConfig(context.Background(), lsCfg); err != nil {
+	if err = lsClient.AddConnectionsFromConfig(closerCtx, lsCfg); err != nil {
 		pterm.Error.Println("Failed to init LS client:", err.Error())
 		os.Exit(1)
 	}
 
 	apiClient := ton.NewAPIClient(lsClient, ton.ProofCheckPolicyFast).WithRetry().WithTimeout(10 * time.Second)
+
+	tunnelCtx, tunnelStop := context.WithCancel(context.Background())
 
 	var netMgr adnl.NetManager
 	var gate *adnl.Gateway
@@ -199,13 +203,16 @@ func main() {
 		}
 
 		events := make(chan any, 1)
-		go tunnel.RunTunnel(context.Background(), cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger, events)
+		go tunnel.RunTunnel(closerCtx, cfg.TunnelConfig, &tunSharedCfg, lsCfg, log.Logger, events)
 
 		initUpd := make(chan tunnel.UpdatedEvent, 1)
 		once := sync.Once{}
 		go func() {
 			for event := range events {
 				switch e := event.(type) {
+				case tunnel.StoppedEvent:
+					tunnelStop()
+					return
 				case tunnel.UpdatedEvent:
 					log.Info().Msg("tunnel updated")
 
@@ -340,12 +347,24 @@ func main() {
 		pterm.Success.Println("Storage HTTP API on", *API)
 	}
 
+	onStop := func() {
+		stop()
+
+		pterm.Info.Println("Stopping...")
+		if *EnableTunnel {
+			pterm.Info.Println("Closing tunnel...")
+			<-tunnelCtx.Done()
+		}
+		pterm.Info.Println("Stopped")
+		os.Exit(0)
+	}
+
 	if !*IsDaemon {
 		go func() {
 			list()
 
 			for {
-				cmd, err := pterm.DefaultInteractiveTextInput.Show("Command")
+				cmd, err := pterm.DefaultInteractiveTextInput.WithOnInterruptFunc(onStop).Show("Command")
 				if err != nil {
 					pterm.Warning.Println("unexpected input:" + err.Error())
 					continue
@@ -383,28 +402,28 @@ func main() {
 						continue
 					}
 
-					listProviders(context.Background(), parts[1], parts[2])
+					listProviders(closerCtx, parts[1], parts[2])
 				case "rent-storage":
 					if len(parts) < 5 {
 						pterm.Error.Println("Usage: rent-storage [bag_id] [owner_address] [provider_id] [amount]")
 						continue
 					}
 
-					rentStorage(context.Background(), parts[1], parts[2], parts[3], parts[4])
+					rentStorage(closerCtx, parts[1], parts[2], parts[3], parts[4])
 				case "rent-withdraw":
 					if len(parts) < 4 {
 						pterm.Error.Println("Usage: rent-withdraw [bag_id] [owner_address] [amount]")
 						continue
 					}
 
-					rentWithdraw(context.Background(), parts[1], parts[2], parts[3])
+					rentWithdraw(closerCtx, parts[1], parts[2], parts[3])
 				case "rent-topup":
 					if len(parts) < 4 {
 						pterm.Error.Println("Usage: rent-topup [bag_id] [owner_address] [amount]")
 						continue
 					}
 
-					rentTopup(context.Background(), parts[1], parts[2], parts[3])
+					rentTopup(closerCtx, parts[1], parts[2], parts[3])
 				default:
 					fallthrough
 				case "help":
@@ -424,15 +443,7 @@ func main() {
 		}()
 	}
 
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig,
-		syscall.SIGHUP,
-		syscall.SIGINT,
-		syscall.SIGTERM,
-		syscall.SIGQUIT)
-
-	<-sig
-	pterm.Info.Println("Stopping...")
+	<-make(chan struct{})
 }
 
 func download(bagId string) {
