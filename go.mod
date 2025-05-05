@@ -8,8 +8,8 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/ton-blockchain/adnl-tunnel v0.0.0-20250429164353-050cce94afa7
-	github.com/xssnick/tonutils-go v1.12.1-0.20250425082124-8d5183ff82da
-	github.com/xssnick/tonutils-storage-provider v0.2.1-0.20240417140301-cd9a5cee4f3b
+	github.com/xssnick/tonutils-go v1.12.1-0.20250504060434-095c0708dea8
+	github.com/xssnick/tonutils-storage-provider v0.3.5
 	golang.org/x/sync v0.13.0
 )
 

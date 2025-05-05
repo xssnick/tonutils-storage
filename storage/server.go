@@ -512,7 +512,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 90*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 10*time.Minute, s.key, 3)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 20*time.Minute, s.key, 3)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
@@ -550,6 +550,7 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 		return err
 	}
 
+	hasExpired := false
 	refreshed := false
 	// refresh if already exists
 	for i := range nodesList.List {
@@ -558,6 +559,10 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 			nodesList.List[i] = *node
 			refreshed = true
 			break
+		}
+
+		if nodesList.List[i].Version < int32(time.Now().Unix()-(30*60)) {
+			hasExpired = true
 		}
 	}
 
@@ -570,8 +575,8 @@ func (s *Server) updateTorrent(ctx context.Context, torrent *Torrent, isServer b
 			refreshed = true
 		} else {
 			if len(nodesList.List) >= 5 {
-				// only allowed to replace when have public ip
-				if isServer {
+				// only allowed to replace when have public ip, or something expired in the list
+				if isServer || hasExpired {
 					sort.Slice(nodesList.List, func(i, j int) bool {
 						return nodesList.List[i].Version < nodesList.List[j].Version
 					})
@@ -788,11 +793,17 @@ func (p *storagePeer) prepareTorrentInfo(t *Torrent) error {
 }
 
 func (s *Server) startPeerSearcher() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+
+	searchSem := make(chan struct{}, 3)
+	updateSem := make(chan struct{}, 9)
+
 	for {
 		select {
 		case <-s.closeCtx.Done():
 			return
-		case <-time.After(100 * time.Millisecond):
+		case <-ticker.C:
 		}
 
 		if s.store == nil {
@@ -814,57 +825,71 @@ func (s *Server) startPeerSearcher() {
 			numPeers := len(t.peers)
 			t.peersMx.RUnlock()
 
-			at := t.lastPeersSearch.Add(30 * time.Second)
-			if completed {
-				at = at.Add(180 * time.Second)
-			}
-			at = at.Add(time.Duration(rand.Intn(5000)) * time.Millisecond)
+			if t.lastPeersSearch.IsZero() || t.lastPeersSearch.UnixNano() < atomic.LoadInt64(&t.lastPeersSearchCompletedAt) {
+				at := t.lastPeersSearch.Add(30 * time.Second)
+				if completed {
+					at = at.Add(3 * time.Minute)
+				}
+				at = at.Add(time.Duration(rand.Intn(10000)) * time.Millisecond)
 
-			if numPeers > 0 {
-				at = at.Add(5 * time.Minute).Add(time.Duration(rand.Intn(60000)) * time.Millisecond)
-			}
+				if numPeers > 0 {
+					at = at.Add(5 * time.Minute).Add(time.Duration(rand.Intn(60000)) * time.Millisecond)
+				}
 
-			if time.Now().After(at) &&
-				(t.lastPeersSearch.IsZero() || t.lastPeersSearch.UnixNano() < atomic.LoadInt64(&t.lastPeersSearchCompletedAt)) {
-				t.lastPeersSearch = time.Now()
-				go func(t *Torrent) {
-					defer func() {
-						atomic.StoreInt64(&t.lastPeersSearchCompletedAt, time.Now().UnixNano())
-					}()
+				if time.Now().After(at) {
+					t.lastPeersSearch = time.Now()
+					// force search peers if we want to download
+					ignoreQueue := !completed && download
 
-					Logger("[STORAGE] SEARCHING PEERS FOR", hex.EncodeToString(t.BagID))
+					go func(t *Torrent) {
+						if !ignoreQueue {
+							searchSem <- struct{}{}
+						}
 
-					ctxFind, cancel := context.WithTimeout(t.globalCtx, time.Duration(60)*time.Second)
-					nodes, _, err := s.dht.FindOverlayNodes(ctxFind, t.BagID, nil)
-					cancel()
-					if err != nil {
-						Logger("[STORAGE] DHT SEARCH PEER ERR", hex.EncodeToString(t.BagID), err.Error())
-						return
-					}
+						defer func() {
+							if !ignoreQueue {
+								<-searchSem
+							}
+							atomic.StoreInt64(&t.lastPeersSearchCompletedAt, time.Now().UnixNano())
+						}()
 
-					for i := range nodes.List {
-						// add known nodes in case we will need them in future to scale
-						s.addTorrentNode(&nodes.List[i], t)
-					}
-				}(t)
+						Logger("[STORAGE] SEARCHING PEERS FOR", hex.EncodeToString(t.BagID))
+
+						ctxFind, cancel := context.WithTimeout(t.globalCtx, time.Duration(60)*time.Second)
+						nodes, _, err := s.dht.FindOverlayNodes(ctxFind, t.BagID, nil)
+						cancel()
+						if err != nil {
+							Logger("[STORAGE] DHT SEARCH PEER ERR", hex.EncodeToString(t.BagID), err.Error())
+							return
+						}
+
+						for i := range nodes.List {
+							// add known nodes in case we will need them in future to scale
+							s.addTorrentNode(&nodes.List[i], t)
+						}
+					}(t)
+				}
 			}
 
 			if upload || !completed {
-				at = t.lastDHTStore.Add(10 * time.Minute)
-				at = at.Add(time.Duration(-rand.Intn(5000)) * time.Millisecond)
+				at := t.lastDHTStore.Add(9 * time.Minute)
+				at = at.Add(time.Duration(rand.Intn(60000)) * time.Millisecond)
 
 				if time.Now().After(at) &&
 					(t.lastDHTStore.IsZero() || t.lastDHTStore.UnixNano() < atomic.LoadInt64(&t.lastDHTStoreCompletedAt)) {
 					t.lastDHTStore = time.Now()
 					go func(t *Torrent) {
+						updateSem <- struct{}{}
+
 						defer func() {
+							<-updateSem
 							atomic.StoreInt64(&t.lastDHTStoreCompletedAt, time.Now().UnixNano())
 						}()
 						tm := time.Now()
 
 						Logger("[STORAGE] STORING BAG DHT RECORD", hex.EncodeToString(t.BagID))
 
-						ctx, cancel := context.WithTimeout(t.globalCtx, time.Duration(180)*time.Second)
+						ctx, cancel := context.WithTimeout(t.globalCtx, time.Duration(90)*time.Second)
 						err := s.updateTorrent(ctx, t, s.serverMode)
 						cancel()
 						if err != nil {

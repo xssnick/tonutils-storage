@@ -408,7 +408,7 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 		}
 		Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "DOWNLOAD TOOK:", time.Since(tm).String())
-		tm = time.Now()
+		// tm = time.Now()
 
 		proof, err := cell.FromBOC(piece.Proof)
 		if err != nil {
@@ -426,7 +426,7 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 		}
 
 		p.torrent.UpdateDownloadedPeer(p, uint64(len(piece.Data)))
-		Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
+		// Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
 
 		return nil
 	}()
