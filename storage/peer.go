@@ -6,17 +6,8 @@ import (
 	"time"
 )
 
-type speedInfo struct {
-	wantReset bool
-	prevBytes uint64
-	buf       []uint64
-	off       uint64
-	speed     uint64
-}
-
 type PeerInfo struct {
 	Addr       string
-	LastSeenAt time.Time
 	Uploaded   uint64
 	Downloaded uint64
 
@@ -52,11 +43,13 @@ func (t *Torrent) UpdateDownloadedPeer(peer *storagePeer, bytes uint64) {
 }
 
 func (t *Torrent) RemovePeer(id []byte) {
+	strId := hex.EncodeToString(id)
+
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	strId := hex.EncodeToString(id)
 	delete(t.peers, strId)
+	delete(t.knownNodes, strId)
 }
 
 func (t *Torrent) GetPeer(id []byte) *PeerInfo {
@@ -74,9 +67,7 @@ func (t *Torrent) ResetDownloadPeer(id []byte) {
 	p := t.peers[strId]
 	if p != nil {
 		p.Downloaded = 0
-		p.downloadSpeed = &speedInfo{
-			buf: make([]uint64, 200),
-		}
+		p.downloadSpeed = &speedInfo{}
 	}
 }
 
@@ -95,89 +86,61 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 	p := t.peers[strId]
 	if p == nil {
 		p = &PeerInfo{
-			uploadSpeed: &speedInfo{
-				buf: make([]uint64, 200),
-			},
-			downloadSpeed: &speedInfo{
-				buf: make([]uint64, 200),
-			},
+			uploadSpeed:   &speedInfo{},
+			downloadSpeed: &speedInfo{},
 		}
-
-		if peer.globalCtx.Err() == nil {
-			// add only if it is alive
-			t.peers[strId] = p
-		}
+		t.peers[strId] = p
 	}
 	p.peer = peer
 	p.Addr = peer.nodeAddr
-	p.LastSeenAt = time.Now()
 	return p
 }
 
-func (s *Server) runPeersMonitor() {
-	for {
-		select {
-		case <-s.closeCtx.Done():
-			return
-		case <-time.After(100 * time.Millisecond):
-		}
-
-		if s.store == nil {
-			continue
-		}
-
-		list := s.store.GetAll()
-		for _, t := range list {
-			hasPeers := false
-			if t.peersMx.TryLock() {
-				select {
-				case <-t.globalCtx.Done():
-					if len(t.peers) > 0 {
-						t.peers = map[string]*PeerInfo{}
-					}
-				default:
-					for k, p := range t.peers {
-						if p.LastSeenAt.Add(5 * time.Minute).Before(time.Now()) {
-							delete(t.peers, k)
-						}
-					}
-					hasPeers = len(t.peers) > 0
-				}
-				t.peersMx.Unlock()
-			}
-
-			if hasPeers && t.peersMx.TryRLock() {
-				for _, p := range t.peers {
-					p.downloadSpeed.calculate(p.Downloaded, 10)
-					p.uploadSpeed.calculate(p.Uploaded, 10)
-				}
-				t.peersMx.RUnlock()
-			}
-		}
-	}
-}
-
-func (s *speedInfo) calculate(nowBytes uint64, amp uint64) {
-	s.buf[s.off%uint64(len(s.buf))] = nowBytes - s.prevBytes
-	s.off++
-
-	m := uint64(len(s.buf))
-	if m > s.off {
-		m = s.off
-	}
-
-	sum := uint64(0)
-	for i := uint64(0); i < m; i++ {
-		sum += s.buf[i]
-	}
-	s.speed = (sum / m) * amp
-	s.prevBytes = nowBytes
-}
-
 func (p *PeerInfo) GetDownloadSpeed() uint64 {
-	return p.downloadSpeed.speed
+	return uint64(p.downloadSpeed.dispSpeed)
 }
 
 func (p *PeerInfo) GetUploadSpeed() uint64 {
-	return p.uploadSpeed.speed
+	return uint64(p.uploadSpeed.dispSpeed)
+}
+
+type speedInfo struct {
+	wantReset bool
+
+	prevBytes uint64
+	lastTime  time.Time
+
+	speed float64
+	init  bool
+
+	dispSpeed float64
+}
+
+func (s *speedInfo) calculate(nowBytes uint64) float64 {
+	now := time.Now()
+
+	if !s.init {
+		s.prevBytes = nowBytes
+		s.lastTime = now
+		s.init = true
+		s.dispSpeed = 0
+		return s.dispSpeed
+	}
+
+	dt := now.Sub(s.lastTime).Seconds()
+	if dt > 0 {
+		const alpha = 0.05
+		delta := float64(nowBytes - s.prevBytes)
+		instant := delta / dt
+		s.speed = alpha*instant + (1-alpha)*s.speed
+	}
+
+	s.prevBytes = nowBytes
+	s.lastTime = now
+
+	// smooth animation
+	const beta = 0.1
+	s.dispSpeed += (s.speed - s.dispSpeed) * beta
+
+	return s.dispSpeed
 }

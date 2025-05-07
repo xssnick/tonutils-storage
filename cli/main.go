@@ -11,7 +11,6 @@ import (
 	"flag"
 	"fmt"
 	"github.com/pterm/pterm"
-	"github.com/pterm/pterm/putils"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
@@ -97,12 +96,7 @@ func main() {
 		provider.Logger = log.Logger.Println
 	}
 
-	_ = pterm.DefaultBigText.WithLetters(
-		putils.LettersFromStringWithStyle("Ton", pterm.FgBlue.ToStyle()),
-		putils.LettersFromStringWithStyle("Utils", pterm.FgLightBlue.ToStyle())).
-		Render()
-
-	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgLightBlue)).Println(pterm.LightWhite("   Storage   "))
+	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgLightBlue)).Println(pterm.LightWhite("    Tonutils Storage   "))
 	pterm.Info.Println("Version:", GitCommit)
 
 	if *CachedFD > 0 {
@@ -255,8 +249,8 @@ func main() {
 	}
 
 	listenThreads := runtime.NumCPU()
-	if listenThreads > 32 {
-		listenThreads = 32
+	if listenThreads > 40 {
+		listenThreads = 40
 	}
 	if *ListenThreads > 0 {
 		listenThreads = *ListenThreads
@@ -597,7 +591,7 @@ func list() {
 	}
 
 	if len(table) > 1 {
-		pterm.Println("Active bags")
+		pterm.Println("Active bags (" + pterm.Cyan(fmt.Sprint(len(table)-1)) + ")")
 		pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(table).Render()
 	}
 }
@@ -674,7 +668,7 @@ func listProviders(ctx context.Context, bagId, strAddr string) {
 			continue
 		}
 
-		isPeer := !peers[strings.ToLower(info.StorageADNL)].LastSeenAt.IsZero()
+		isPeer := peers[strings.ToLower(info.StorageADNL)].Addr != ""
 
 		status := info.Status
 

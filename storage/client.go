@@ -16,7 +16,6 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -43,7 +42,6 @@ type FileInfo struct {
 }
 
 type TorrentDownloader interface {
-	DownloadPiece(ctx context.Context, pieceIndex uint32) (_ []byte, err error)
 	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, peerAddr string, err error)
 	Close()
 	IsActive() bool
@@ -74,6 +72,13 @@ type storagePeer struct {
 	sessionSeqno int64
 	conn         *PeerConnection
 
+	currentPing        int64
+	lastPingAt         time.Time
+	lastNeighboursAt   time.Time
+	sessionInitialized int32
+	sessionInitAt      int64
+	updateInitReceived int32
+
 	lastSentPieces []byte
 	hasPieces      map[uint32]bool
 	piecesMx       sync.RWMutex
@@ -84,10 +89,13 @@ type storagePeer struct {
 	inflight         int32
 	maxInflightScore int32
 
-	activateOnce sync.Once
-	closeOnce    sync.Once
-	globalCtx    context.Context
-	stop         func()
+	closeOnce sync.Once
+
+	sessionCtx  context.Context
+	stopSession func()
+
+	closerCtx context.Context
+	stop      func()
 }
 
 type TorrentInfo struct {
@@ -105,7 +113,9 @@ type speedLimit struct {
 }
 
 type TorrentServer interface {
+	ConnectToNode(ctx context.Context, t *Torrent, node *overlay.Node, addrs *address.List) error
 	GetADNLPrivateKey() ed25519.PrivateKey
+	GetID() []byte
 }
 
 type Connector struct {
@@ -272,129 +282,83 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 }
 
 func (p *storagePeer) Close() {
-	p.torrent.RemovePeer(p.nodeId)
 	p.closeOnce.Do(func() {
-		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(p.nodeId), p.nodeAddr)
+		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(p.nodeId), p.nodeAddr, "BAG", hex.EncodeToString(p.torrent.BagID))
 		p.stop()
 		p.conn.CloseFor(p)
+		p.torrent.RemovePeer(p.nodeId)
 	})
+}
+
+func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) bool {
+	var err error
+	defer func() {
+		if err == nil {
+			atomic.StoreInt32(&p.sessionInitialized, 1)
+
+			Logger("[STORAGE] SESSION INITIALIZED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", atomic.LoadInt64(&p.sessionId))
+			return
+		}
+
+		if atomic.LoadInt64(&p.sessionId) != id {
+			return
+		}
+
+		Logger("[STORAGE] SESSION INITIALIZATION FAILED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", atomic.LoadInt64(&p.sessionId), "ERR", err.Error())
+		p.Close()
+	}()
+
+	if err = p.prepareTorrentInfo(); err != nil {
+		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
+		return false
+	}
+
+	if doPing {
+		qCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		err = p.ping(qCtx)
+		cancel()
+		if err != nil {
+			err = fmt.Errorf("failed to ping: %w", err)
+			return false
+		}
+	}
+
+	if err = p.updateInitPieces(ctx); err != nil {
+		err = fmt.Errorf("failed to send init pieces, err: %w", err)
+		return false
+	}
+
+	return true
 }
 
 func (p *storagePeer) touch() {
 	p.torrent.TouchPeer(p)
-	p.activateOnce.Do(func() {
-		go p.pieceNotifier()
-	})
 }
 
-func (p *storagePeer) pinger(srv *Server) {
-	defer func() {
-		p.Close()
-	}()
-
-	var lastPeersReq time.Time
-
-	startedAt := time.Now()
-	fails := int32(0)
-	for {
-		wait := 250 * time.Millisecond
-		if p.sessionId != 0 {
-			wait = 10 * time.Second
-			// session should be initialised
-			var pong Pong
-			ctx, cancel := context.WithTimeout(p.globalCtx, 7*time.Second)
-			err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &Ping{SessionID: p.sessionId}), &pong)
-			cancel()
-			if err != nil {
-				fails++
-				if fails >= 3 {
-					Logger("[STORAGE] NODE NOT RESPOND 3 PINGS IN A ROW, CLOSING CONNECTION WITH ", hex.EncodeToString(p.nodeId), p.nodeAddr, err.Error())
-					p.conn.FailedFor(p, true)
-					return
-				}
-			} else {
-				fails = 0
-				p.conn.FailedFor(p, false)
-				p.touch()
-			}
-		} else {
-			if time.Since(startedAt) > 30*time.Second {
-				sesId := rand.Int63()
-				atomic.StoreInt64(&p.sessionId, sesId)
-				atomic.StoreInt64(&p.sessionSeqno, 0)
-				Logger("[STORAGE] FORCE NEW SESSION WITH", hex.EncodeToString(p.nodeId), sesId)
-			}
-		}
-
-		if fails == 0 && time.Since(lastPeersReq) > 20*time.Second {
-			Logger("[STORAGE] REQUESTING NODES LIST OF PEER", hex.EncodeToString(p.nodeId), "FOR", hex.EncodeToString(p.torrent.BagID))
-			var al overlay.NodesList
-			ctx, cancel := context.WithTimeout(p.globalCtx, 7*time.Second)
-			err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &overlay.GetRandomPeers{}), &al)
-			cancel()
-			if err == nil {
-				for _, n := range al.List {
-					// add known nodes in case we will need them in future to scale
-					srv.addTorrentNode(&n, p.torrent)
-				}
-			} else {
-				Logger("[STORAGE] FAILED REQUEST NODES LIST OF PEER", hex.EncodeToString(p.nodeId),
-					"FOR", hex.EncodeToString(p.torrent.BagID), "ERR:", err.Error())
-			}
-			lastPeersReq = time.Now()
-		}
-
-		select {
-		case <-p.globalCtx.Done():
-			return
-		case <-time.After(wait):
-		}
+func (p *storagePeer) findNeighbours(ctx context.Context) (*overlay.NodesList, error) {
+	var al overlay.NodesList
+	err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &overlay.GetRandomPeers{}), &al)
+	if err != nil {
+		return nil, err
 	}
+	return &al, nil
 }
 
-func (p *storagePeer) pieceNotifier() {
-	lastReported := 0
-	reportFails := 0
-	for {
-		select {
-		case <-p.globalCtx.Done():
-			return
-		case <-time.After(300 * time.Millisecond):
-		}
-
-		p.torrent.newPiecesCond.L.Lock()
-		for lastReported == p.torrent.DownloadedPiecesNum() {
-			p.torrent.newPiecesCond.Wait()
-
-			select {
-			case <-p.globalCtx.Done():
-				p.torrent.newPiecesCond.L.Unlock()
-				return
-			default:
-			}
-		}
-		p.torrent.newPiecesCond.L.Unlock()
-
-		Logger("[STORAGE] NOTIFYING HAVE PIECES FOR PEER:", hex.EncodeToString(p.nodeId))
-		ctx, cancel := context.WithTimeout(p.globalCtx, 60*time.Second)
-		err := p.updateHavePieces(ctx)
-		cancel()
-		if err != nil {
-			reportFails++
-			Logger("[STORAGE] NOTIFY HAVE PIECES ERR:", err.Error())
-
-			if reportFails > 3 {
-				Logger("[STORAGE] TOO MANY NOTIFY FAILS FROM", p.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
-
-				p.Close()
-				return
-			}
-			continue
-		}
-
-		reportFails = 0
-		lastReported = p.torrent.DownloadedPiecesNum()
+func (p *storagePeer) ping(ctx context.Context) error {
+	ses := atomic.LoadInt64(&p.sessionId)
+	if ses == 0 {
+		return fmt.Errorf("no session id")
 	}
+
+	tm := time.Now()
+	var pong Pong
+	err := p.conn.adnl.Query(ctx, overlay.WrapQuery(p.overlay, &Ping{SessionID: ses}), &pong)
+	if err != nil {
+		return err
+	}
+	atomic.StoreInt64(&p.currentPing, int64(time.Since(tm)/time.Millisecond))
+
+	return nil
 }
 
 func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
@@ -438,7 +402,7 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 		Logger("[STORAGE] LOAD PIECE FROM", p.nodeAddr, "ERR:", err.Error())
 
 		now := time.Now().Unix()
-		if old := atomic.LoadInt64(&p.failAt); old < time.Now().Unix()-2 {
+		if old := atomic.LoadInt64(&p.failAt); old < time.Now().Unix()-1 {
 			if atomic.CompareAndSwapInt64(&p.failAt, old, now) {
 				atomic.AddInt32(&p.fails, 1)
 			}
@@ -447,7 +411,6 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 			if atomic.LoadInt32(&p.fails) >= 3 {
 				Logger("[STORAGE] TOO MANY FAILS FROM", p.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 				// something wrong, close connection, we should reconnect after it
-				p.conn.FailedFor(p, true)
 				p.Close()
 			}
 		}
@@ -455,7 +418,6 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 	}
 	atomic.StoreInt32(&p.fails, 0)
 	atomic.StoreInt64(&p.failAt, 0)
-	p.conn.FailedFor(p, false)
 
 	return &piece, nil
 }
@@ -477,8 +439,12 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 					continue
 				}
 
+				if atomic.LoadInt32(&node.peer.sessionInitialized) == 0 {
+					continue
+				}
+
 				inf := atomic.LoadInt32(&node.peer.inflight)
-				if inf > atomic.LoadInt32(&node.peer.maxInflightScore)/10 {
+				if inf > atomic.LoadInt32(&node.peer.maxInflightScore) {
 					continue
 				}
 
@@ -518,11 +484,15 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 		atomic.AddInt32(&bestNode.inflight, -1)
 		if err != nil {
 			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x > 5 {
-				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x-5)
+				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x-1)
 			}
 
 			skip[string(bestNode.nodeId)] = bestNode
 			continue
+		} else {
+			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x < 60 {
+				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x+1)
+			}
 		}
 
 		if x := atomic.LoadInt32(&bestNode.maxInflightScore); x < DownloadMaxInflightScore {
@@ -531,13 +501,6 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 
 		return pc.Data, pc.Proof, bestNode.nodeId, bestNode.nodeAddr, nil
 	}
-}
-
-// DownloadPiece - downloads piece from one of available nodes.
-// Can be used concurrently to download from multiple nodes in the same time
-func (t *torrentDownloader) DownloadPiece(ctx context.Context, pieceIndex uint32) (_ []byte, err error) {
-	piece, _, _, _, err := t.DownloadPieceDetailed(ctx, pieceIndex)
-	return piece, err
 }
 
 func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) error {
