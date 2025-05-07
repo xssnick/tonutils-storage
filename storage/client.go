@@ -290,7 +290,7 @@ func (p *storagePeer) Close() {
 	})
 }
 
-func (p *storagePeer) initializeSession(ctx context.Context, id int64) {
+func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) bool {
 	var err error
 	defer func() {
 		if err == nil {
@@ -310,15 +310,25 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64) {
 
 	if err = p.prepareTorrentInfo(); err != nil {
 		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
-		return
+		return false
+	}
+
+	if doPing {
+		qCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
+		err = p.ping(qCtx)
+		cancel()
+		if err != nil {
+			err = fmt.Errorf("failed to ping: %w", err)
+			return false
+		}
 	}
 
 	if err = p.updateInitPieces(ctx); err != nil {
 		err = fmt.Errorf("failed to send init pieces, err: %w", err)
-		return
+		return false
 	}
 
-	return
+	return true
 }
 
 func (p *storagePeer) touch() {

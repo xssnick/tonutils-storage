@@ -180,7 +180,7 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 
 			stNode, sessionCtx := t.prepareStoragePeer(over, p, &q.SessionID)
 			if sessionCtx != nil {
-				go stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId))
+				go stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), false)
 			}
 			stNode.touch()
 
@@ -229,7 +229,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		stPeer, sessionCtx := t.prepareStoragePeer(over, p, sesId)
 		if sessionCtx != nil {
-			go stPeer.initializeSession(sessionCtx, atomic.LoadInt64(&stPeer.sessionId))
+			go stPeer.initializeSession(sessionCtx, atomic.LoadInt64(&stPeer.sessionId), sesId == nil)
 		}
 		stPeer.touch()
 
@@ -360,7 +360,6 @@ const maxNewPiecesPerRequest = maxPiecesBytesPerRequest / 4
 func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 	num := p.torrent.Info.PiecesNum()
 	isDow, isUpl := p.torrent.IsActiveRaw()
-	println("DOWNLOAD", isDow, "UPLOAD", isUpl, "NUM", num, "MAX", maxPiecesBytesPerRequest)
 
 	p.piecesMx.Lock()
 	p.lastSentPieces = p.torrent.PiecesMask()
@@ -663,23 +662,20 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		Logger("[STORAGE] HAS ALREADY ACTIVE PEER FOR NODE ", hex.EncodeToString(adnlID), "ADDR", peer.adnl.RemoteAddr(), "ADDING FOR", hex.EncodeToString(t.BagID))
 	}
 
-	stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, peer, nil)
+	go func() {
+		stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, peer, nil)
 
-	qCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
-	err = stNode.ping(qCtx)
-	cancel()
-	if err != nil {
-		stNode.Close()
-		return fmt.Errorf("failed to ping: %w", err)
-	}
+		success := true
+		if sessionCtx != nil {
+			success = stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), true)
+		}
 
-	if sessionCtx != nil {
-		go stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId))
-	}
+		if success {
+			stNode.touch()
 
-	stNode.touch()
-
-	Logger("[STORAGE] PEER CONNECTED", hex.EncodeToString(adnlID), peer.adnl.RemoteAddr(), "FOR", hex.EncodeToString(t.BagID), "PING", atomic.LoadInt64(&stNode.currentPing), "MS")
+			Logger("[STORAGE] PEER CONNECTED", hex.EncodeToString(adnlID), peer.adnl.RemoteAddr(), "FOR", hex.EncodeToString(t.BagID), "PING", atomic.LoadInt64(&stNode.currentPing), "MS")
+		}
+	}()
 
 	return nil
 }
@@ -692,7 +688,7 @@ func (p *storagePeer) prepareTorrentInfo() error {
 	hasInfo := p.torrent.Info != nil
 	p.torrent.mx.Unlock()
 
-	if !hasInfo || true {
+	if !hasInfo {
 		tm := time.Now()
 		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(p.nodeId), p.nodeAddr, "FOR", hex.EncodeToString(p.torrent.BagID))
 
