@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"github.com/pterm/pterm"
 	"github.com/xssnick/tonutils-go/tl"
+	"github.com/xssnick/tonutils-storage-provider/pkg/transport"
 	"github.com/xssnick/tonutils-storage/db"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
@@ -315,7 +316,7 @@ func (s *Server) handleSignProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := tl.Serialize(storage.ADNLProofScheme{
+	res, err := tl.Serialize(transport.ADNLProofScheme{
 		Key: providerId,
 	}, true)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"fmt"
+	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"math/bits"
@@ -75,6 +76,7 @@ type Storage interface {
 }
 
 type NetConnector interface {
+	GetID() []byte
 	GetADNLPrivateKey() ed25519.PrivateKey
 	SetDownloadLimit(bytesPerSec uint64)
 	SetUploadLimit(bytesPerSec uint64)
@@ -83,6 +85,7 @@ type NetConnector interface {
 	ThrottleDownload(ctx context.Context, sz uint64) error
 	ThrottleUpload(ctx context.Context, sz uint64) error
 	CreateDownloader(ctx context.Context, t *Torrent) (_ TorrentDownloader, err error)
+	ConnectToNode(ctx context.Context, t *Torrent, node *overlay.Node, addrList *address.List) error
 	TorrentServer
 }
 
@@ -124,14 +127,14 @@ type Torrent struct {
 	lastVerified             time.Time
 	isVerificationInProgress bool
 
-	lastDHTStore               time.Time
-	lastPeersSearch            time.Time
-	lastPeersSearchCompletedAt int64
-	lastDHTStoreCompletedAt    int64
+	lastDHTStore            time.Time
+	lastDHTStoreCompletedAt int64
+	lastDHTStoreFailed      int32
 
-	mx            sync.Mutex
-	maskMx        sync.RWMutex
-	newPiecesCond *sync.Cond
+	signalNewPieces chan struct{}
+
+	mx     sync.Mutex
+	maskMx sync.RWMutex
 
 	currentDownloadFlag *bool
 	stopDownload        func()
@@ -139,7 +142,9 @@ type Torrent struct {
 
 func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
-	t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
+	if len(t.pieceMask) == 0 {
+		t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
+	}
 	t.maskMx.Unlock()
 }
 
@@ -149,13 +154,13 @@ func (t *Torrent) GetConnector() NetConnector {
 
 func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t := &Torrent{
-		Path:          path,
-		CreatedAt:     time.Now(),
-		peers:         map[string]*PeerInfo{},
-		knownNodes:    map[string]*overlay.Node{},
-		db:            db,
-		connector:     connector,
-		newPiecesCond: sync.NewCond(&sync.Mutex{}),
+		Path:            path,
+		CreatedAt:       time.Now(),
+		peers:           map[string]*PeerInfo{},
+		knownNodes:      map[string]*overlay.Node{},
+		db:              db,
+		connector:       connector,
+		signalNewPieces: make(chan struct{}, 1),
 	}
 
 	// create as stopped
@@ -243,7 +248,8 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	}
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
-	// t.completedCtx, t.complete = context.WithCancel(context.Background())
+
+	go t.peersManager(t.globalCtx)
 
 	if t.IsCompleted() {
 		//	t.complete()
@@ -257,6 +263,111 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 			currPause()
 		}
 	})
+}
+
+func (t *Torrent) peersManager(workerCtx context.Context) {
+	defer Logger("[STORAGE_PEERS] PEER MANAGER STOPPED", "BAG", hex.EncodeToString(t.BagID))
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		var updatePieces bool
+		select {
+		case <-workerCtx.Done():
+			t.peersMx.RLock()
+			peers := make([]*storagePeer, 0, len(t.peers))
+			for _, peer := range t.peers {
+				peers = append(peers, peer.peer)
+			}
+			t.peersMx.RUnlock()
+
+			for _, peer := range peers {
+				peer.Close()
+			}
+
+			return
+		case <-t.signalNewPieces:
+			updatePieces = true
+		case <-ticker.C:
+		}
+		ticker.Reset(time.Second)
+
+		t.peersMx.RLock()
+		peers := make([]*storagePeer, 0, len(t.peers))
+		for _, peer := range t.peers {
+			peers = append(peers, peer.peer)
+		}
+		t.peersMx.RUnlock()
+
+		wg := sync.WaitGroup{}
+		for _, peer := range peers {
+			if atomic.LoadInt32(&peer.sessionInitialized) == 0 {
+				continue
+			}
+
+			if atomic.LoadInt32(&peer.updateInitReceived) == 0 && time.Now().Unix()-atomic.LoadInt64(&peer.sessionInitAt) > 45 {
+				Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(peer.nodeId), "HAS NOT SENT UPDATE INIT, SOMETHING WRONG, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+				peer.Close()
+				continue
+			}
+
+			if updatePieces {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+
+					Logger("[STORAGE_PEERS] DOING UPDATE HAVE PIECES FOR PEER", hex.EncodeToString(peer.nodeId), "BAG", hex.EncodeToString(t.BagID))
+
+					if err := peer.updateHavePieces(workerCtx); err != nil && atomic.AddInt32(&peer.fails, 1) > 3 {
+						Logger("[STORAGE_PEERS] UPDATE HAVE PIECES FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+						peer.Close()
+						return
+					}
+					atomic.StoreInt32(&peer.fails, 0)
+				}()
+			}
+
+			if time.Since(peer.lastPingAt) > 15*time.Second {
+				peer.lastPingAt = time.Now()
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+
+					qCtx, cancel := context.WithTimeout(workerCtx, 5*time.Second)
+					defer cancel()
+
+					if err := peer.ping(qCtx); err != nil && atomic.AddInt32(&peer.fails, 1) > 3 {
+						Logger("[STORAGE_PEERS] PING FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+						peer.Close()
+						return
+					}
+					atomic.StoreInt32(&peer.fails, 0)
+				}()
+			} else if time.Since(peer.lastNeighboursAt) > 30*time.Second {
+				peer.lastNeighboursAt = time.Now()
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+
+					qCtx, cancel := context.WithTimeout(workerCtx, 5*time.Second)
+					defer cancel()
+
+					nodes, err := peer.findNeighbours(qCtx)
+					if err != nil && atomic.AddInt32(&peer.fails, 1) > 3 {
+						Logger("[STORAGE_PEERS] FIND NEIGHBOURS FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+						peer.Close()
+					} else if err == nil {
+						atomic.StoreInt32(&peer.fails, 0)
+						for _, node := range nodes.List {
+							t.addNode(node)
+						}
+					}
+				}()
+			}
+		}
+		wg.Wait()
+	}
 }
 
 func (t *TorrentInfo) PiecesNum() uint32 {
@@ -295,11 +406,10 @@ func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
 	}
 
 	// notify peers about our new pieces
-	t.newPiecesCond.Broadcast()
-
-	//if t.IsCompleted() {
-	//	t.complete()
-	//}
+	select {
+	case t.signalNewPieces <- struct{}{}:
+	default:
+	}
 
 	return nil
 }

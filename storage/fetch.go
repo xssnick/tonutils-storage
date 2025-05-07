@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"github.com/pterm/pterm"
 	"sync"
@@ -21,7 +22,6 @@ type PreFetcher struct {
 	pieces     map[uint32]*piecePack
 	tasks      chan uint32
 	piecesList []uint32
-	speed      uint64
 
 	downloaded uint64
 	report     func(Event)
@@ -36,7 +36,7 @@ type Progress struct {
 	Speed      string
 }
 
-func NewPreFetcher(ctx context.Context, torrent *Torrent, downloader TorrentDownloader, report func(Event), downloaded uint64, threads, prefetch int, pieces []uint32) *PreFetcher {
+func NewPreFetcher(ctx context.Context, torrent *Torrent, downloader TorrentDownloader, report func(Event), prefetch int, pieces []uint32) *PreFetcher {
 	if prefetch > len(pieces) {
 		prefetch = len(pieces)
 	}
@@ -46,18 +46,11 @@ func NewPreFetcher(ctx context.Context, torrent *Torrent, downloader TorrentDown
 		torrent:    torrent,
 		report:     report,
 		piecesList: pieces,
-		downloaded: downloaded,
 		offset:     prefetch - 1,
 		pieces:     map[uint32]*piecePack{},
 		tasks:      make(chan uint32, prefetch),
 	}
 	ff.ctx, ff.close = context.WithCancel(ctx)
-
-	for i := 0; i < threads; i++ {
-		go ff.worker()
-	}
-
-	// go ff.speedometer()
 
 	for _, piece := range pieces {
 		// mark pieces as existing
@@ -68,6 +61,8 @@ func NewPreFetcher(ctx context.Context, torrent *Torrent, downloader TorrentDown
 	for i := 0; i < prefetch; i++ {
 		ff.tasks <- ff.piecesList[i]
 	}
+
+	go ff.scaling()
 
 	return ff
 }
@@ -115,10 +110,85 @@ func (f *PreFetcher) Free(piece uint32) {
 	}
 }
 
-func (f *PreFetcher) worker() {
+func (f *PreFetcher) scaling() {
+	const (
+		minWorkers      = 8
+		perScaleWorkers = 2
+		maxWorkers      = 120
+		windowSize      = 35
+		interval        = time.Millisecond * 100
+	)
+
+	cancels := make([]context.CancelFunc, 0, maxWorkers)
+
+	for i := 0; i < 8; i++ {
+		ctx, cancel := context.WithCancel(f.ctx)
+		cancels = append(cancels, cancel)
+		go f.worker(ctx)
+	}
+
+	piecesPerFrame := make([]uint64, 0, windowSize)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	var prevDownloaded uint64
+	var maxInPeriod uint64
+	for {
+		select {
+		case <-f.ctx.Done():
+			return
+		case <-ticker.C:
+			workers := len(cancels)
+			if workers == 0 {
+				continue
+			}
+
+			dn := atomic.LoadUint64(&f.downloaded)
+			downloaded := dn - prevDownloaded
+			prevDownloaded = dn
+
+			if len(piecesPerFrame) >= windowSize {
+				piecesPerFrame = piecesPerFrame[1:]
+			}
+			piecesPerFrame = append(piecesPerFrame, downloaded)
+
+			if len(piecesPerFrame) == windowSize {
+				// moving avg
+				var totalInPeriod uint64
+				for _, v := range piecesPerFrame {
+					totalInPeriod += v
+				}
+
+				if totalInPeriod > 0 && totalInPeriod > maxInPeriod && workers < maxWorkers {
+					maxInPeriod = totalInPeriod
+					for i := 0; i < perScaleWorkers; i++ {
+						ctx, cancel := context.WithCancel(f.ctx)
+						cancels = append(cancels, cancel)
+						go f.worker(ctx)
+					}
+					piecesPerFrame = piecesPerFrame[len(piecesPerFrame)-len(piecesPerFrame)/8:]
+					Logger("[STORAGE_SCALER] ADDED WORKER, TOTAL:", len(cancels), "BAG", hex.EncodeToString(f.torrent.BagID), "MAX", maxInPeriod)
+				} else if totalInPeriod < maxInPeriod-maxInPeriod/4 && workers > minWorkers {
+					maxInPeriod = totalInPeriod
+					for i := 0; i < perScaleWorkers; i++ {
+						last := len(cancels) - 1
+						cancels[last]()
+						cancels = cancels[:last]
+					}
+					piecesPerFrame = piecesPerFrame[:0]
+					Logger("[STORAGE_SCALER] CLOSED WORKER, TOTAL:", len(cancels), "BAG", hex.EncodeToString(f.torrent.BagID), "MAX", maxInPeriod)
+				}
+			}
+		}
+	}
+}
+
+func (f *PreFetcher) worker(downscaleCtx context.Context) {
 	for {
 		var task uint32
 		select {
+		case <-downscaleCtx.Done():
+			return
 		case <-f.ctx.Done():
 			return
 		case task = <-f.tasks:

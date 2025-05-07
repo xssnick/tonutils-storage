@@ -2,7 +2,6 @@ package storage
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -13,9 +12,7 @@ func init() {
 	tl.Register(TorrentInfoContainer{}, "storage.torrentInfo data:bytes = storage.TorrentInfo")
 	tl.Register(GetTorrentInfo{}, "storage.getTorrentInfo = storage.TorrentInfo")
 	tl.Register(Piece{}, "storage.piece proof:bytes data:bytes = storage.Piece")
-	tl.Register(Test{}, "storage.test data:bytes = storage.Test")
 	tl.Register(GetPiece{}, "storage.getPiece piece_id:int = storage.Piece")
-	tl.Register(GetTest{}, "storage.getTest piece_id:int = storage.test")
 	tl.Register(Ping{}, "storage.ping session_id:long = storage.Pong")
 	tl.Register(Pong{}, "storage.pong = storage.Pong")
 	tl.Register(AddUpdate{}, "storage.addUpdate session_id:long seqno:int update:storage.Update = Ok")
@@ -32,8 +29,6 @@ func init() {
 		"name_index:(files_count * [uint64]) data_index:(files_count * [uint64]) "+
 		"names:(file_names_size * [uint8]) data:(tot_data_size * [uint8]) "+
 		"= TorrentHeader")
-
-	tl.Register(ADNLProofScheme{}, "storage.tonutils.adnlProviderProof provider_key:int256 = storage.tonutils.AdnlProviderProof")
 }
 
 type AddUpdate struct {
@@ -54,20 +49,6 @@ type Piece struct {
 }
 
 type GetPiece struct {
-	PieceID int32 `tl:"int"`
-}
-
-type Test struct {
-	Data []byte `tl:"bytes"`
-}
-
-var stub = func() []byte {
-	b := make([]byte, 100*128*1024)
-	_, _ = rand.Read(b)
-	return b
-}()
-
-type GetTest struct {
 	PieceID int32 `tl:"int"`
 }
 
@@ -99,10 +80,6 @@ type UpdateState struct {
 type Ok struct{}
 
 type FECInfoNone struct{}
-
-type ADNLProofScheme struct {
-	Key []byte `tl:"int256"`
-}
 
 type TorrentHeader struct {
 	FilesCount    uint32

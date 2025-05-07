@@ -3,15 +3,16 @@ package storage
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
 )
 
-var DownloadThreads = runtime.NumCPU() * 2
-var DownloadPrefetch = DownloadThreads * 16
+var DownloadPrefetch = runtime.NumCPU() * 2 * 16
 
 type fileInfo struct {
 	path string
@@ -102,7 +103,7 @@ func (t *Torrent) verify(deep bool) error {
 		isDelete := false
 		if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
 			isDelete = true
-			Logger("[VERIFICATION] FAILED FOR FILE:", rootPath+"/"+info.Name, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
+			// Logger("[VERIFICATION] FAILED FOR FILE:", rootPath+"/"+info.Name, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
 		} else if deep {
 			if info.Size > 256*1024*1024 {
 				type jobRes struct {
@@ -212,9 +213,9 @@ func (t *Torrent) verify(deep bool) error {
 
 			if !t.CreatedLocally {
 				needDownload = true
-				Logger("[VERIFICATION] CORRUPTED, NEED REDOWNLOAD:", hex.EncodeToString(t.BagID))
+				Logger("[VERIFICATION] NEED DOWNLOAD:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID))
 
-				if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil {
+				if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil && !errors.Is(err, fs.ErrNotExist) {
 					Logger("[VERIFICATION] FAILED TO REMOVE FILE:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID), err.Error())
 				}
 			} else {
@@ -351,7 +352,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, t.downloader, report, downloaded, DownloadThreads, DownloadPrefetch, pieces)
+				fetch := NewPreFetcher(ctx, t, t.downloader, report, DownloadPrefetch, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -371,7 +372,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 						ready <- event.Value.(uint32)
 					}
 					report(event)
-				}, downloaded, DownloadThreads, DownloadPrefetch, pieces)
+				}, DownloadPrefetch, pieces)
 				defer fetch.Stop()
 
 				var currentFile FSFile
