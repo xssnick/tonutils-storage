@@ -308,11 +308,6 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 		p.Close()
 	}()
 
-	if err = p.prepareTorrentInfo(); err != nil {
-		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
-		return false
-	}
-
 	if doPing {
 		qCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
 		err = p.ping(qCtx)
@@ -321,6 +316,11 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 			err = fmt.Errorf("failed to ping: %w", err)
 			return false
 		}
+	}
+
+	if err = p.prepareTorrentInfo(); err != nil {
+		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
+		return false
 	}
 
 	if err = p.updateInitPieces(ctx); err != nil {

@@ -309,11 +309,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			if err != nil {
 				return err
 			}
-		case UpdateState:
-			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Ok{})
-			if err != nil {
-				return err
-			}
 		case AddUpdate:
 			if q.SessionID != atomic.LoadInt64(&stPeer.sessionId) {
 				Logger("UPDATE SESSION MISSMATCH", q.SessionID, atomic.LoadInt64(&stPeer.sessionId), hex.EncodeToString(adnlId), hex.EncodeToString(t.BagID))
@@ -324,10 +319,28 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			case UpdateInit:
 				atomic.StoreInt32(&stPeer.updateInitReceived, 1)
 
-				Logger("[STORAGE] NODE REPORTED INITPIECES INFO", hex.EncodeToString(adnlId), q.SessionID, q.Seqno)
-				stPeer.piecesMx.Lock()
+				Logger("[STORAGE] NODE REPORTED INIT PIECES INFO", hex.EncodeToString(adnlId), q.SessionID, q.Seqno)
 				off := uint32(u.HavePiecesOffset)
+
+				var piecesNum *uint32
+				t.mx.RLock()
+				if t.Info != nil {
+					pn := t.Info.PiecesNum()
+					piecesNum = &pn
+				}
+				t.mx.RUnlock()
+
+				if piecesNum != nil && uint32(u.HavePiecesOffset)+uint32(len(u.HavePieces)) > *piecesNum { // approx is enough
+					return fmt.Errorf("invalid pieces offset")
+				}
+
+				// TODO: bitmask
+				stPeer.piecesMx.Lock()
 				for i := 0; i < len(u.HavePieces); i++ {
+					if u.HavePieces[i] == 0 {
+						continue
+					}
+
 					for y := 0; y < 8; y++ {
 						if u.HavePieces[i]&(1<<y) > 0 {
 							stPeer.hasPieces[off+uint32(i*8+y)] = true
@@ -336,9 +349,22 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				}
 				stPeer.piecesMx.Unlock()
 			case UpdateHavePieces:
+				var piecesNum *uint32
+				t.mx.RLock()
+				if t.Info != nil {
+					pn := t.Info.PiecesNum()
+					piecesNum = &pn
+				}
+				t.mx.RUnlock()
+
 				Logger("[STORAGE] NODE HAS NEW PIECES", hex.EncodeToString(adnlId))
 				stPeer.piecesMx.Lock()
 				for _, d := range u.PieceIDs {
+					if piecesNum != nil && uint32(d) > *piecesNum {
+						// stop process it
+						break
+					}
+
 					stPeer.hasPieces[uint32(d)] = true
 				}
 				stPeer.piecesMx.Unlock()
@@ -390,7 +416,7 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 
 		var updRes Ok
 
-		ctxReq, cancel := context.WithTimeout(ctx, 12*time.Second)
+		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
 		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
 		cancel()
 		if err != nil {
@@ -684,9 +710,9 @@ func (p *storagePeer) prepareTorrentInfo() error {
 	p.prepareInfoMx.Lock() // to not request one peer in parallel
 	defer p.prepareInfoMx.Unlock()
 
-	p.torrent.mx.Lock()
+	p.torrent.mx.RLock()
 	hasInfo := p.torrent.Info != nil
-	p.torrent.mx.Unlock()
+	p.torrent.mx.RUnlock()
 
 	if !hasInfo {
 		tm := time.Now()
@@ -880,7 +906,8 @@ func (t *Torrent) prepareStoragePeer(over []byte, conn *PeerConnection, sessionI
 		sessionInitAt:    time.Now().Unix(),
 		overlay:          over,
 		maxInflightScore: 50,
-		hasPieces:        map[uint32]bool{},
+		// TODO: bitmask
+		hasPieces: map[uint32]bool{},
 	}
 	stNode.closerCtx, stNode.stop = context.WithCancel(t.globalCtx)
 

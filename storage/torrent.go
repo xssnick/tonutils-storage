@@ -133,7 +133,7 @@ type Torrent struct {
 
 	signalNewPieces chan struct{}
 
-	mx     sync.Mutex
+	mx     sync.RWMutex
 	maskMx sync.RWMutex
 
 	currentDownloadFlag *bool
