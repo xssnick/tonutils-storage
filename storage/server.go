@@ -23,12 +23,13 @@ import (
 )
 
 type Server struct {
-	key        ed25519.PrivateKey
-	dht        *dht.Client
-	gate       *adnl.Gateway
-	store      Storage
-	closeCtx   context.Context
-	serverMode bool
+	key            ed25519.PrivateKey
+	dht            *dht.Client
+	gate           *adnl.Gateway
+	store          Storage
+	closeCtx       context.Context
+	serverMode     bool
+	dhtParallelism int
 
 	bootstrapped map[string]*PeerConnection
 	mx           sync.RWMutex
@@ -36,13 +37,14 @@ type Server struct {
 	closer func()
 }
 
-func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool) *Server {
+func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool, dhtParallelism int) *Server {
 	s := &Server{
-		key:          key,
-		dht:          dht,
-		gate:         gate,
-		bootstrapped: map[string]*PeerConnection{},
-		serverMode:   serverMode,
+		key:            key,
+		dht:            dht,
+		gate:           gate,
+		bootstrapped:   map[string]*PeerConnection{},
+		serverMode:     serverMode,
+		dhtParallelism: dhtParallelism,
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
 	s.gate.SetConnectionHandler(s.bootstrapPeerWrap)
@@ -525,6 +527,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isServer bool) error {
 	Logger("[STORAGE_DHT] CHECKING BAG OVERLAY FOR", hex.EncodeToString(torrent.BagID))
 
+	tm := time.Now()
 	nodesList, _, err := s.dht.FindOverlayNodes(ctx, torrent.BagID)
 	if err != nil && !errors.Is(err, dht.ErrDHTValueIsNotFound) {
 		Logger("[STORAGE_DHT] FAILED TO FIND DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
@@ -539,7 +542,7 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 		}
 	}
 
-	Logger("[STORAGE_DHT] FOUND", len(nodesList.List), "OVERLAY NODES FOR", hex.EncodeToString(torrent.BagID))
+	Logger("[STORAGE_DHT] FOUND", len(nodesList.List), "OVERLAY NODES FOR", hex.EncodeToString(torrent.BagID), "TOOK", time.Since(tm).String())
 
 	node, err := overlay.NewNode(torrent.BagID, s.key)
 	if err != nil {
@@ -599,14 +602,15 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 	if refreshed && !tooEarly {
 		Logger("[STORAGE] STORING BAG DHT RECORD", hex.EncodeToString(torrent.BagID))
 
+		tm = time.Now()
 		ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
-		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 30*time.Minute, 3)
+		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 45*time.Minute, 3)
 		cancel()
 		if err != nil && stored == 0 {
 			Logger("[STORAGE_DHT] FAILED TO STORE DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
 			return err
 		}
-		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID))
+		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID), "TOOK", time.Since(tm).String())
 	}
 
 	return nil
@@ -779,7 +783,7 @@ func (s *Server) startPeerSearcher() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
-	updateSem := make(chan struct{}, 12)
+	updateSem := make(chan struct{}, s.dhtParallelism)
 
 	for {
 		select {
@@ -830,6 +834,7 @@ func (s *Server) startPeerSearcher() {
 					t.lastDHTStore = time.Now()
 
 					go func(t *Torrent) {
+						// TODO: fair queue
 						if !activeDownload {
 							updateSem <- struct{}{}
 						}

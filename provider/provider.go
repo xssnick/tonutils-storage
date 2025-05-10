@@ -351,3 +351,108 @@ func checkProofBranch(proof *cell.Cell, piece, piecesNum uint32) error {
 	}
 	return nil
 }
+
+type Offer struct {
+	Span          uint32
+	Every         string
+	RatePerMBNano *big.Int
+	PerDayNano    *big.Int
+	PerProofNano  *big.Int
+}
+
+func CalculateBestProviderOffer(r *ProviderRates) Offer {
+	const minStep = 15 * 60
+
+	if r.MinSpan < minStep {
+		r.MinSpan = minStep
+	}
+	if r.MaxSpan < r.MinSpan {
+		r.MaxSpan = r.MinSpan
+	}
+
+	step := (r.MaxSpan - r.MinSpan) / 300
+	if step < minStep {
+		step = minStep
+	}
+
+	var best Offer
+	var bestCost *big.Int
+
+	better := func(o Offer) bool {
+		if bestCost == nil || o.PerDayNano.Cmp(bestCost) < 0 {
+			return true
+		}
+		return o.PerDayNano.Cmp(bestCost) == 0 && o.Span < best.Span
+	}
+
+	for span := r.MinSpan; span <= r.MaxSpan; span += step {
+		if o := calcOffer(span, r); better(o) {
+			best, bestCost = o, o.PerDayNano
+		}
+	}
+
+	if best.Span != r.MaxSpan {
+		if o := calcOffer(r.MaxSpan, r); better(o) {
+			best = o
+		}
+	}
+
+	return best
+}
+
+func calcOffer(span uint32, r *ProviderRates) Offer {
+	const secPerDay = 86400.0
+
+	ratePerMB := new(big.Float).SetInt(r.RatePerMBDay.Nano())
+	minBounty := new(big.Float).SetInt(r.MinBounty.Nano())
+
+	szMB := new(big.Float).Quo(
+		new(big.Float).SetUint64(r.Size),
+		big.NewFloat(1024*1024),
+	)
+
+	interval := new(big.Float).Quo(
+		new(big.Float).SetUint64(uint64(span)),
+		big.NewFloat(secPerDay),
+	) // interval = span / 86400
+
+	perProof := new(big.Float).Mul(
+		new(big.Float).Mul(ratePerMB, szMB), // base per-day
+		interval,                            // * span/86400
+	)
+
+	if perProof.Cmp(minBounty) < 0 {
+		coeff := new(big.Float).Quo(minBounty, perProof)
+		coeff = coeff.Add(coeff, big.NewFloat(0.005)) // +0.5 %
+		ratePerMB.Mul(ratePerMB, coeff)
+		perProof.Mul(perProof, coeff)
+	}
+
+	proofsPerDay := new(big.Float).Quo(
+		big.NewFloat(secPerDay),
+		new(big.Float).SetUint64(uint64(span)),
+	)
+	effPerDay := new(big.Float).Mul(perProof, proofsPerDay)
+
+	ratePerMBNano, _ := ratePerMB.Int(nil)
+	perProofNano, _ := perProof.Int(nil)
+	effPerDayNano, _ := effPerDay.Int(nil)
+
+	var every string
+	switch {
+	case span < 3600:
+		every = fmt.Sprintf("%d Minutes", span/60)
+	case span < 100*3600:
+		every = fmt.Sprintf("%d Hours", span/3600)
+	default:
+		every = fmt.Sprintf("%d Days", span/86400)
+	}
+
+	return Offer{
+		Span:          span,
+		Every:         every,
+		RatePerMBNano: ratePerMBNano,
+		PerDayNano:    effPerDayNano,
+		PerProofNano:  perProofNano,
+	}
+}
