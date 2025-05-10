@@ -441,11 +441,11 @@ func calcOffer(span uint32, r *ProviderRates) Offer {
 	var every string
 	switch {
 	case span < 3600:
-		every = fmt.Sprintf("%d minutes", span/60)
+		every = fmt.Sprintf("%d Minutes", span/60)
 	case span < 100*3600:
-		every = fmt.Sprintf("%d hours", span/3600)
+		every = fmt.Sprintf("%d Hours", span/3600)
 	default:
-		every = fmt.Sprintf("%d days", span/86400)
+		every = fmt.Sprintf("%d Days", span/86400)
 	}
 
 	return Offer{
