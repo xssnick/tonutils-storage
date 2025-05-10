@@ -58,6 +58,7 @@ var (
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
 	EnableTunnel        = flag.Bool("enable-tunnel", false, "Enable tunnel mode, to host files with no public ip (should be configured first)")
+	DHTParallelism      = flag.Int("dht-parallelism", 12, "Max parallel threads to search/update dht records of bags")
 )
 
 var GitCommit string
@@ -302,7 +303,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode)
+	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, *DHTParallelism)
 	Connector = storage.NewConnector(srv)
 
 	Storage, err = db.NewStorage(ldb, Connector, *ForcePieceSize, true, *NoVerify, *NoRemove, nil)
@@ -842,41 +843,10 @@ func rentStorage(ctx context.Context, bagId, addrStr, providerId, amount string)
 		return
 	}
 
-	span := uint32(86400)
-	if span > rates.MaxSpan {
-		span = rates.MaxSpan
-	} else if span < rates.MinSpan {
-		span = rates.MinSpan
-	}
+	offer := provider.CalculateBestProviderOffer(rates)
 
-	every := ""
-	if span < 3600 {
-		every = fmt.Sprint(span/60) + " minutes"
-	} else if span < 100*3600 {
-		every = fmt.Sprint(span/3600) + " hours"
-	} else {
-		every = fmt.Sprint(span/86400) + " days"
-	}
-
-	ratePerMB := new(big.Float).SetInt(rates.RatePerMBDay.Nano())
-	min := new(big.Float).SetInt(rates.MinBounty.Nano())
-
-	szMB := new(big.Float).Quo(new(big.Float).SetUint64(rates.Size), big.NewFloat(1024*1024))
-	perDay := new(big.Float).Mul(ratePerMB, szMB)
-	if perDay.Cmp(min) < 0 {
-		// increase reward to fit min bounty
-		coff := new(big.Float).Quo(min, perDay)
-		coff = coff.Add(coff, big.NewFloat(0.01)) // increase a bit to not be less than needed
-
-		ratePerMB = new(big.Float).Mul(ratePerMB, coff)
-		perDay = new(big.Float).Mul(ratePerMB, szMB)
-	}
-
-	ratePerMBNano, _ := ratePerMB.Int(nil)
-	perDayNano, _ := perDay.Int(nil)
-
-	pterm.Success.Println("Storage rate for hosting this bag of provider is: " + pterm.Cyan(tlb.FromNanoTON(perDayNano).String()+" TON") + " per day." +
-		"\nProvider will proof to contract every " + pterm.Cyan(every) +
+	pterm.Success.Println("Storage rate for hosting this bag of provider is: " + pterm.Cyan(tlb.FromNanoTON(offer.PerDayNano).String()+" TON") + " per day." +
+		"\nProvider will proof to contract every " + pterm.Cyan(offer.Every) +
 		"\nIf you agree, please type " + pterm.LightGreen("YES"))
 
 	cmd, err := pterm.DefaultInteractiveTextInput.Show("You agree?")
@@ -899,8 +869,8 @@ func rentStorage(ctx context.Context, bagId, addrStr, providerId, amount string)
 	providers := []provider.NewProviderData{
 		{
 			Address:       address.NewAddress(0, 0, prv),
-			MaxSpan:       span,
-			PricePerMBDay: tlb.FromNanoTON(ratePerMBNano),
+			MaxSpan:       offer.Span,
+			PricePerMBDay: tlb.FromNanoTON(offer.RatePerMBNano),
 		},
 	}
 
