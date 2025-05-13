@@ -225,6 +225,9 @@ func (t *Torrent) Stop() {
 }
 
 func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
+	return t.StartWithCallback(withUpload, downloadAll, downloadOrdered, nil)
+}
+func (t *Torrent) StartWithCallback(withUpload, downloadAll, downloadOrdered bool, report func(event Event)) (err error) {
 	t.activeUpload = withUpload
 
 	t.mx.Lock()
@@ -276,6 +279,9 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	return t.startDownload(func(event Event) {
 		if event.Name == EventErr && currFlag == t.currentDownloadFlag {
 			currPause()
+		}
+		if report != nil {
+			report(event)
 		}
 	})
 }
