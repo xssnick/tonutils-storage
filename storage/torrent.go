@@ -359,12 +359,16 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 					err := peer.ping(qCtx)
 					if err != nil && atomic.AddInt32(&peer.fails, 1) > 3 {
 						Logger("[STORAGE_PEERS] PING FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+						peer.conn.FailedFor(peer, err, true)
 						peer.Close()
+						return
 					} else if err == nil {
 						atomic.StoreInt32(&peer.fails, 0)
+						peer.conn.FailedFor(peer, nil, true)
 					}
 				}()
-			} else if time.Since(peer.lastNeighboursAt) > 30*time.Second {
+			}
+			if time.Since(peer.lastNeighboursAt) > 30*time.Second {
 				peer.lastNeighboursAt = time.Now()
 				wg.Add(1)
 				go func() {

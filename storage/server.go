@@ -133,6 +133,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		usedByBags:    map[string]*storagePeer{},
 		rldpQueue:     make(chan struct{}, 10),
 		bagsInitQueue: make(chan struct{}, 8),
+		failedBags:    map[string]bool{},
 	}
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
