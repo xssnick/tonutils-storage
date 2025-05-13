@@ -380,7 +380,7 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 					} else if err == nil {
 						atomic.StoreInt32(&peer.fails, 0)
 						for _, node := range nodes.List {
-							t.addNode(node)
+							t.addNode(node, nil)
 						}
 					}
 				}()
