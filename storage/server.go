@@ -931,7 +931,7 @@ func (s *Server) startPeerSearcher() {
 
 					Logger("[STORAGE] TIME TO MAKE BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID), "PRIORITIZED:", prioritized)
 
-					go func(t *Torrent) {
+					func(t *Torrent) {
 						isPr := false
 						// TODO: fair queue
 						if !prioritized {

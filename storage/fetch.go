@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/pterm/pterm"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -90,7 +91,7 @@ func (f *PreFetcher) Get(ctx context.Context, piece uint32) ([]byte, []byte, err
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-time.After(5 * time.Millisecond):
+		case <-time.After(100 * time.Millisecond):
 		}
 	}
 }
@@ -114,10 +115,10 @@ func (f *PreFetcher) scaling() {
 	const (
 		minWorkers      = 8
 		perScaleWorkers = 2
-		maxWorkers      = 120
 		windowSize      = 35
 		interval        = time.Millisecond * 100
 	)
+	var maxWorkers = runtime.NumCPU() * 10
 
 	cancels := make([]context.CancelFunc, 0, maxWorkers)
 
@@ -198,7 +199,7 @@ func (f *PreFetcher) worker(downscaleCtx context.Context) {
 					select {
 					case <-f.ctx.Done():
 						return
-					case <-time.After(5 * time.Millisecond):
+					case <-time.After(100 * time.Millisecond):
 						continue
 					}
 				}

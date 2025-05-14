@@ -491,7 +491,7 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			select {
 			case <-ctx.Done():
 				return nil, nil, nil, "", ctx.Err()
-			case <-time.After(100 * time.Millisecond):
+			case <-time.After(500 * time.Millisecond):
 				skip = map[string]*storagePeer{}
 				// no nodes, wait
 			}
