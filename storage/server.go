@@ -145,8 +145,8 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 			return fmt.Errorf("bag not found")
 		}
 
-		_, isUpl := t.IsActive()
-		if !isUpl {
+		isDow, isUpl := t.IsActive()
+		if !isUpl && !isDow {
 			return fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID))
 		}
 
@@ -826,19 +826,44 @@ func (s *Server) startPeerSearcher() {
 						at = at.Add(7 * time.Second)
 					}
 				} else {
-					at = at.Add(9*time.Minute + time.Duration(rand.Intn(60000))*time.Millisecond)
+					if numPeers > 0 {
+						at = at.Add(10*time.Minute + time.Duration(rand.Intn(60000))*time.Millisecond)
+					} else {
+						if !s.serverMode {
+							tt := 15 * time.Second
+
+							tt *= time.Duration(atomic.LoadUint32(&t.searchesWithZeroPeersNum) + 1)
+
+							if tt > 7*time.Minute {
+								tt = 7 * time.Minute
+							}
+
+							at = at.Add(tt + time.Duration(rand.Intn(5000))*time.Millisecond)
+						} else {
+							at = at.Add(5*time.Minute + time.Duration(rand.Intn(30000))*time.Millisecond)
+						}
+					}
 				}
 
 				if time.Now().After(at) &&
 					(t.lastDHTStore.IsZero() || atomic.LoadInt32(&t.lastDHTStoreFailed) != 0 || t.lastDHTStore.UnixNano() < atomic.LoadInt64(&t.lastDHTStoreCompletedAt)) {
 					t.lastDHTStore = time.Now()
 
+					atomic.StoreInt32(&t.lastDHTStoreFailed, 0)
+
+					if numPeers == 0 {
+						atomic.AddUint32(&t.searchesWithZeroPeersNum, 1)
+					} else {
+						atomic.StoreUint32(&t.searchesWithZeroPeersNum, 0)
+					}
+
+					Logger("[STORAGE] TIME TO MAKE BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID))
+
 					go func(t *Torrent) {
 						// TODO: fair queue
 						if !activeDownload {
 							updateSem <- struct{}{}
 						}
-						atomic.StoreInt32(&t.lastDHTStoreFailed, 0)
 
 						defer func() {
 							if !activeDownload {

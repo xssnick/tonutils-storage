@@ -131,6 +131,8 @@ type Torrent struct {
 	lastDHTStoreCompletedAt int64
 	lastDHTStoreFailed      int32
 
+	searchesWithZeroPeersNum uint32
+
 	signalNewPieces chan struct{}
 
 	mx     sync.RWMutex
