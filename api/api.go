@@ -62,6 +62,7 @@ type Bag struct {
 	Description   string `json:"description"`
 	Downloaded    uint64 `json:"downloaded"`
 	Size          uint64 `json:"size"`
+	HeaderSize    uint64 `json:"header_size"`
 	Peers         uint64 `json:"peers"`
 	DownloadSpeed uint64 `json:"download_speed"`
 	UploadSpeed   uint64 `json:"upload_speed"`
@@ -421,7 +422,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 	}
 
 	var desc, dirName string
-	var full, downloaded, filesCount uint64
+	var headerSz, full, downloaded, filesCount uint64
 	completed, infoLoaded, headerLoaded := false, false, false
 	if t.Info != nil {
 		infoLoaded = true
@@ -436,6 +437,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 			downloaded = 0
 		}
 
+		headerSz = t.Info.HeaderSize
 		full = t.Info.FileSize - t.Info.HeaderSize
 		if downloaded > full { // cut not full last piece
 			downloaded = full
@@ -500,6 +502,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		Description:   desc,
 		Downloaded:    downloaded,
 		Size:          full,
+		HeaderSize:    headerSz,
 		Peers:         num,
 		DownloadSpeed: dow,
 		UploadSpeed:   upl,
