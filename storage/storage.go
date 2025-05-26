@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+
 	"github.com/xssnick/tonutils-go/tl"
 )
 
@@ -178,6 +179,10 @@ func (t *Torrent) calcFileIndexes() error {
 	// already calculated
 	if t.filesIndex != nil {
 		return nil
+	}
+
+	if t.Header == nil {
+		return fmt.Errorf("corrupted header, no header data")
 	}
 
 	t.filesIndex = map[string]uint32{}
