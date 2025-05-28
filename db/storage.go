@@ -310,3 +310,14 @@ func (s *Storage) notify(e Event) {
 		}
 	}
 }
+
+func (s *Storage) Close() {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+
+	for _, t := range s.torrents {
+		t.Stop()
+	}
+
+	s.db.Close()
+}

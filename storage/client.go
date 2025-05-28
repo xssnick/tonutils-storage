@@ -116,6 +116,7 @@ type TorrentServer interface {
 	ConnectToNode(ctx context.Context, t *Torrent, node *overlay.Node, addrs *address.List) error
 	GetADNLPrivateKey() ed25519.PrivateKey
 	GetID() []byte
+	Stop()
 }
 
 type Connector struct {
