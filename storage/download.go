@@ -378,12 +378,6 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				var currentFile FSFile
 				var currentFileId uint32
 
-				defer func() {
-					if currentFile != nil {
-						currentFile.Close()
-					}
-				}()
-
 				for i := 0; i < left; i++ {
 					select {
 					case e := <-ready:
@@ -458,6 +452,10 @@ func (t *Torrent) startDownload(report func(Event)) error {
 								if err != nil {
 									return err
 								}
+							}
+
+							if i == left-1 && currentFile != nil {
+								currentFile.Close()
 							}
 
 							err = t.setPiece(piece, &PieceInfo{
