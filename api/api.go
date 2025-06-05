@@ -442,27 +442,39 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		if downloaded > full { // cut not full last piece
 			downloaded = full
 		}
-		completed = downloaded == full
+		completed = uint32(downloadedPieces) == t.Info.PiecesNum()
 
-		if !completed && !t.IsDownloadAll() {
+		if !completed && !t.IsDownloadAll() && len(mask) > 0 {
+			completed = true
+
 			var wantSz uint64
 			files := t.GetActiveFilesIDs()
+
 			for _, f := range files {
 				off, err := t.GetFileOffsetsByID(f)
 				if err == nil {
 					wantSz += off.Size
+
+					if completed {
+						for pc := off.FromPiece; pc <= off.ToPiece; pc++ {
+							if mask[pc/8]&(1<<(pc%8)) == 0 {
+								completed = false
+								break
+							}
+						}
+					}
 				}
 			}
 
+			// TODO: better calc for not all files
 			if downloaded > wantSz { // cut not full last piece
 				downloaded = wantSz
 			}
-			completed = downloaded == wantSz
 		}
 
 		if !short {
 			res.BagPiecesNum = t.Info.PiecesNum()
-			res.HasPiecesMask = t.PiecesMask()
+			res.HasPiecesMask = mask
 		}
 
 		desc = t.Info.Description.Value
