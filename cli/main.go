@@ -533,6 +533,7 @@ func list() {
 		{"Bag ID", "Description", "Downloaded", "Size", "Peers", "Download", "Upload", "Status", "Uploaded"},
 	}
 
+	var totalDow, totalUpl uint64
 	for _, t := range Storage.GetAll() {
 		var strDownloaded, uploaded, strFull, description = "0 Bytes", "0 Bytes", "???", "???"
 		status := "Resolving"
@@ -585,6 +586,8 @@ func list() {
 			upl += p.GetUploadSpeed()
 			num++
 		}
+		totalDow += dow
+		totalUpl += upl
 
 		table = append(table, []string{hex.EncodeToString(t.BagID), description,
 			strDownloaded, strFull, fmt.Sprint(num),
@@ -594,6 +597,7 @@ func list() {
 	if len(table) > 1 {
 		pterm.Println("Active bags (" + pterm.Cyan(fmt.Sprint(len(table)-1)) + ")")
 		pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(table).Render()
+		pterm.Println("Total speed: D " + pterm.Cyan(fmt.Sprint(storage.ToSpeed(totalDow))) + " U " + pterm.Cyan(fmt.Sprint(storage.ToSpeed(totalUpl))))
 	}
 }
 

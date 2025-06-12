@@ -319,7 +319,7 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 		}
 	}
 
-	if err = p.prepareTorrentInfo(); err != nil {
+	if err = p.prepareTorrentInfo(ctx); err != nil {
 		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
 		return false
 	}
@@ -433,6 +433,7 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 
 		var bestNode *storagePeer
 
+		const maxPerPeer = 120
 		t.mx.Lock()
 		{
 			for _, node := range peers {
@@ -453,6 +454,10 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 					continue
 				}
 
+				if fl := atomic.LoadInt32(&node.peer.conn.inflightPieces); fl >= maxPerPeer {
+					continue
+				}
+
 				node.peer.piecesMx.RLock()
 				hasPiece := node.peer.hasPieces[pieceIndex]
 				node.peer.piecesMx.RUnlock()
@@ -463,7 +468,11 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 			}
 
 			if bestNode != nil {
-				atomic.AddInt32(&bestNode.inflight, 1)
+				if was := atomic.LoadInt32(&bestNode.conn.inflightPieces); was >= maxPerPeer || !atomic.CompareAndSwapInt32(&bestNode.conn.inflightPieces, was, was+1) {
+					bestNode = nil
+				} else {
+					atomic.AddInt32(&bestNode.inflight, 1)
+				}
 			}
 		}
 		t.mx.Unlock()
@@ -481,6 +490,7 @@ func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceInde
 
 		// tm := time.Now()
 		pc, err := bestNode.downloadPiece(ctx, pieceIndex)
+		atomic.AddInt32(&bestNode.conn.inflightPieces, -1)
 		// log.Println("DW", pieceIndex, bestNode.nodeAddr, time.Since(tm).String(), err)
 		atomic.AddInt32(&bestNode.inflight, -1)
 		if err != nil {

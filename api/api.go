@@ -11,6 +11,8 @@ import (
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
 	"net/http"
+	"path/filepath"
+	"sort"
 	"strconv"
 )
 
@@ -190,11 +192,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		response(w, http.StatusBadRequest, Error{err.Error()})
 		return
 	}
-
+	
+	var order map[string]int
 	var only map[string]bool
 	if len(req.KeepOnlyPaths) > 0 {
 		only = make(map[string]bool)
-		for _, p := range req.KeepOnlyPaths {
+		order = make(map[string]int)
+		for i, p := range req.KeepOnlyPaths {
+			order[p] = i
 			only[p] = true
 		}
 	}
@@ -204,6 +209,27 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		pterm.Error.Println("Failed to read file refs:", err.Error())
 		response(w, http.StatusInternalServerError, Error{err.Error()})
 		return
+	}
+
+	if len(req.KeepOnlyPaths) > 0 {
+		// Sort files based on the `order` map's order, ascending
+		sort.Slice(files, func(i, j int) bool {
+			iOrder, iExists := order[filepath.Join(rootPath, dirName, files[i].GetName())]
+			jOrder, jExists := order[filepath.Join(rootPath, dirName, files[j].GetName())]
+
+			if iExists && jExists {
+				return iOrder < jOrder
+			}
+			// Files not in the `order` map should appear after ordered files
+			if iExists {
+				return true
+			}
+			if jExists {
+				return false
+			}
+			// Default fallback comparison based on file names
+			return files[i].GetName() < files[j].GetName()
+		})
 	}
 
 	it, err := storage.CreateTorrent(r.Context(), rootPath, dirName, req.Description, s.store, s.connector, files, nil)

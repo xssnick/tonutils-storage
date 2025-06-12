@@ -123,9 +123,11 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	})
 
 	p := &PeerConnection{
-		rldp:       rl,
-		adnl:       client,
-		usedByBags: map[string]*storagePeer{},
+		rldp:          rl,
+		adnl:          client,
+		usedByBags:    map[string]*storagePeer{},
+		rldpQueue:     make(chan struct{}, 10),
+		bagsInitQueue: make(chan struct{}, 8),
 	}
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
@@ -418,9 +420,14 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 
 		var updRes Ok
 
+		if err := p.conn.AcquireQueueSlotWait(ctx); err != nil {
+			return fmt.Errorf("failed to acquire queue slot: %w", err)
+		}
+
 		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
 		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
 		cancel()
+		p.conn.FreeQueueSlot()
 		if err != nil {
 			Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(p.conn.adnl.GetID()), p.sessionId, err.Error())
 			return fmt.Errorf("failed to send have pieces update: %w", err)
@@ -466,9 +473,14 @@ func (p *storagePeer) updateHavePieces(ctx context.Context) error {
 
 		var updRes Ok
 
+		if err := p.conn.AcquireQueueSlot(); err != nil {
+			return fmt.Errorf("failed to acquire queue slot: %w", err)
+		}
+
 		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
 		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
 		cancel()
+		p.conn.FreeQueueSlot()
 		if err != nil {
 			Logger("[STORAGE] FAILED TO SEND UPDATE HAVE", i, hex.EncodeToString(p.conn.adnl.GetID()), p.sessionId, err.Error())
 			return fmt.Errorf("failed to send have pieces update: %w", err)
@@ -492,10 +504,15 @@ func (p *storagePeer) updateState(ctx context.Context) error {
 		},
 	}
 
+	if err := p.conn.AcquireQueueSlotWait(ctx); err != nil {
+		return fmt.Errorf("failed to acquire queue slot: %w", err)
+	}
+
 	var res Ok
 	ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
 	err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &res)
 	cancel()
+	p.conn.FreeQueueSlot()
 	if err != nil {
 		Logger("[STORAGE] FAILED TO SEND UPDATE STATE", hex.EncodeToString(p.conn.adnl.GetID()), err.Error())
 		return fmt.Errorf("failed to send state update: %w", err)
@@ -692,25 +709,51 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		Logger("[STORAGE] HAS ALREADY ACTIVE PEER FOR NODE ", hex.EncodeToString(adnlID), "ADDR", peer.adnl.RemoteAddr(), "ADDING FOR", hex.EncodeToString(t.BagID))
 	}
 
-	go func() {
-		stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, peer, nil)
+	stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, peer, nil)
 
-		success := true
-		if sessionCtx != nil {
-			success = stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), true)
+	select {
+	case <-ctx.Done():
+		stNode.Close()
+		return ctx.Err()
+	case peer.bagsInitQueue <- struct{}{}:
+		defer func() { <-peer.bagsInitQueue }()
+	}
+
+	success := true
+	if sessionCtx != nil {
+		success = stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), true)
+	}
+
+	if success {
+		stNode.touch()
+
+		Logger("[STORAGE] PEER CONNECTED", hex.EncodeToString(adnlID), peer.adnl.RemoteAddr(), "FOR", hex.EncodeToString(t.BagID), "PING", atomic.LoadInt64(&stNode.currentPing), "MS")
+
+		startAt := time.Now().Unix()
+		for {
+			rcv := atomic.LoadInt32(&stNode.updateInitReceived) == 1
+			if !rcv && time.Now().Unix()-startAt > 45 {
+				Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(stNode.nodeId), "HAS NOT SENT UPDATE INIT, SOMETHING WRONG, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+				stNode.Close()
+				return fmt.Errorf("peer has not sent update init")
+			} else if rcv {
+				Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(stNode.nodeId), "SENT UPDATE INIT, CONNECTION IS OK, BAG", hex.EncodeToString(t.BagID))
+				break
+			}
+
+			select {
+			case <-ctx.Done():
+				stNode.Close()
+				return ctx.Err()
+			case <-time.After(25 * time.Millisecond):
+			}
 		}
-
-		if success {
-			stNode.touch()
-
-			Logger("[STORAGE] PEER CONNECTED", hex.EncodeToString(adnlID), peer.adnl.RemoteAddr(), "FOR", hex.EncodeToString(t.BagID), "PING", atomic.LoadInt64(&stNode.currentPing), "MS")
-		}
-	}()
+	}
 
 	return nil
 }
 
-func (p *storagePeer) prepareTorrentInfo() error {
+func (p *storagePeer) prepareTorrentInfo(ctx context.Context) error {
 	p.prepareInfoMx.Lock() // to not request one peer in parallel
 	defer p.prepareInfoMx.Unlock()
 
@@ -722,10 +765,15 @@ func (p *storagePeer) prepareTorrentInfo() error {
 		tm := time.Now()
 		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(p.nodeId), p.nodeAddr, "FOR", hex.EncodeToString(p.torrent.BagID))
 
+		if err := p.conn.AcquireQueueSlotWait(ctx); err != nil {
+			return fmt.Errorf("failed to acquire queue slot: %w", err)
+		}
+
 		var res TorrentInfoContainer
 		infCtx, cancel := context.WithTimeout(p.closerCtx, 20*time.Second)
 		err := p.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(p.overlay, &GetTorrentInfo{}), &res)
 		cancel()
+		p.conn.FreeQueueSlot()
 		if err != nil {
 			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(p.nodeId), p.nodeAddr, "FOR", hex.EncodeToString(p.torrent.BagID))
 			return err
@@ -784,6 +832,7 @@ func (s *Server) startPeerSearcher() {
 	defer ticker.Stop()
 
 	updateSem := make(chan struct{}, s.dhtParallelism)
+	updatePrioritySem := make(chan struct{}, s.dhtParallelism)
 
 	for {
 		select {
@@ -857,17 +906,32 @@ func (s *Server) startPeerSearcher() {
 						atomic.StoreUint32(&t.searchesWithZeroPeersNum, 0)
 					}
 
-					Logger("[STORAGE] TIME TO MAKE BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID))
+					prioritized := activeDownload
+					if t.CreatedLocally && t.CreatedAt.Add(15*time.Minute).After(time.Now()) {
+						// ignore queue to made just created torrents available faster
+						prioritized = true
+					}
+
+					Logger("[STORAGE] TIME TO MAKE BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID), "PRIORITIZED:", prioritized)
 
 					go func(t *Torrent) {
+						isPr := false
 						// TODO: fair queue
-						if !activeDownload {
+						if !prioritized {
 							updateSem <- struct{}{}
+						} else {
+							select {
+							case updateSem <- struct{}{}:
+							case updatePrioritySem <- struct{}{}:
+								isPr = true
+							}
 						}
 
 						defer func() {
-							if !activeDownload {
+							if !isPr {
 								<-updateSem
+							} else {
+								<-updatePrioritySem
 							}
 							atomic.StoreInt64(&t.lastDHTStoreCompletedAt, time.Now().UnixNano())
 						}()
