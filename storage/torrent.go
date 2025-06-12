@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/tl"
@@ -227,19 +228,21 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	}
 
 	if !t.isVerificationInProgress && t.lastVerified.Before(time.Now().Add(-30*time.Second)) {
-		t.isVerificationInProgress = true
-		go func() {
-			// it will remove corrupted pieces
-			if err = t.verify(t.db.VerifyOnStartup()); err != nil {
-				Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
-			}
+		if t.db.VerifyOnStartup() {
+			t.isVerificationInProgress = true
+			go func() {
+				// it will remove corrupted pieces
+				if err = t.verify(t.db.VerifyOnStartup()); err != nil {
+					Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
+				}
 
-			t.mx.Lock()
-			defer t.mx.Unlock()
+				t.mx.Lock()
+				defer t.mx.Unlock()
 
-			t.lastVerified = time.Now()
-			t.isVerificationInProgress = false
-		}()
+				t.lastVerified = time.Now()
+				t.isVerificationInProgress = false
+			}()
+		}
 	}
 
 	t.downloadAll = downloadAll
@@ -308,12 +311,6 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 				continue
 			}
 
-			if atomic.LoadInt32(&peer.updateInitReceived) == 0 && time.Now().Unix()-atomic.LoadInt64(&peer.sessionInitAt) > 45 {
-				Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(peer.nodeId), "HAS NOT SENT UPDATE INIT, SOMETHING WRONG, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
-				peer.Close()
-				continue
-			}
-
 			if updatePieces {
 				wg.Add(1)
 				go func() {
@@ -321,12 +318,15 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 
 					Logger("[STORAGE_PEERS] DOING UPDATE HAVE PIECES FOR PEER", hex.EncodeToString(peer.nodeId), "BAG", hex.EncodeToString(t.BagID))
 
-					if err := peer.updateHavePieces(workerCtx); err != nil && atomic.AddInt32(&peer.fails, 1) > 3 {
-						Logger("[STORAGE_PEERS] UPDATE HAVE PIECES FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
-						peer.Close()
-						return
+					if err := peer.updateHavePieces(workerCtx); err != nil {
+						if !errors.Is(err, ErrQueueIsBusy) && atomic.AddInt32(&peer.fails, 1) > 3 {
+							Logger("[STORAGE_PEERS] UPDATE HAVE PIECES FAILED FOR PEER", hex.EncodeToString(peer.nodeId), "AND TOO MANY FAILS, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
+							peer.Close()
+							return
+						}
+					} else {
+						atomic.StoreInt32(&peer.fails, 0)
 					}
-					atomic.StoreInt32(&peer.fails, 0)
 				}()
 			}
 

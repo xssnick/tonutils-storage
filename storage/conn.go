@@ -1,15 +1,20 @@
 package storage
 
 import (
+	"context"
 	"encoding/hex"
+	"errors"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"sync"
 )
 
 type PeerConnection struct {
-	rldp overlay.RLDP
-	adnl adnl.Peer
+	rldp           overlay.RLDP
+	adnl           adnl.Peer
+	rldpQueue      chan struct{}
+	bagsInitQueue  chan struct{}
+	inflightPieces int32
 
 	mx         sync.RWMutex
 	usedByBags map[string]*storagePeer
@@ -42,4 +47,28 @@ func (c *PeerConnection) GetFor(id []byte) *storagePeer {
 	defer c.mx.RUnlock()
 
 	return c.usedByBags[string(id)]
+}
+
+var ErrQueueIsBusy = errors.New("queue is busy")
+
+func (c *PeerConnection) AcquireQueueSlotWait(ctx context.Context) error {
+	select {
+	case c.rldpQueue <- struct{}{}:
+	case <-ctx.Done():
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) AcquireQueueSlot() error {
+	select {
+	case c.rldpQueue <- struct{}{}:
+	default:
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) FreeQueueSlot() {
+	<-c.rldpQueue
 }
