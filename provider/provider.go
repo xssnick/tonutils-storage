@@ -401,40 +401,36 @@ func CalculateBestProviderOffer(r *ProviderRates) Offer {
 }
 
 func calcOffer(span uint32, r *ProviderRates) Offer {
-	const secPerDay = 86400.0
+	const mbMulDay = 86400 * 1024 * 1024
 
-	ratePerMB := new(big.Float).SetInt(r.RatePerMBDay.Nano())
-	minBounty := new(big.Float).SetInt(r.MinBounty.Nano())
+	size := new(big.Int).SetUint64(r.Size)
+	spanBI := big.NewInt(int64(span))
 
-	szMB := new(big.Float).Quo(
-		new(big.Float).SetUint64(r.Size),
-		big.NewFloat(1024*1024),
-	)
+	ratePerMBNano := new(big.Int).Set(r.RatePerMBDay.Nano())
 
-	interval := new(big.Float).Quo(
-		new(big.Float).SetUint64(uint64(span)),
-		big.NewFloat(secPerDay),
-	) // interval = span / 86400
+	num := new(big.Int).Mul(r.MinBounty.Nano(), big.NewInt(mbMulDay))
+	den := new(big.Int).Mul(size, spanBI)
 
-	perProof := new(big.Float).Mul(
-		new(big.Float).Mul(ratePerMB, szMB), // base per-day
-		interval,                            // * span/86400
-	)
-
-	if perProof.Cmp(minBounty) < 0 {
-		coeff := new(big.Float).Quo(minBounty, perProof)
-		coeff = coeff.Add(coeff, big.NewFloat(0.005)) // +0.5 %
-		ratePerMB.Mul(ratePerMB, coeff)
-		perProof.Mul(perProof, coeff)
+	minRate := new(big.Int).Div(num, den)
+	if new(big.Int).Mod(num, den).Sign() != 0 {
+		minRate.Add(minRate, big.NewInt(1))
 	}
 
+	if ratePerMBNano.Cmp(minRate) < 0 {
+		ratePerMBNano = minRate
+	}
+
+	bounty := new(big.Int).Mul(ratePerMBNano, size)
+	bounty.Mul(bounty, spanBI).Div(bounty, big.NewInt(mbMulDay))
+
 	proofsPerDay := new(big.Float).Quo(
-		big.NewFloat(secPerDay),
+		big.NewFloat(86400),
 		new(big.Float).SetUint64(uint64(span)),
 	)
+
+	perProof := new(big.Float).SetInt(bounty)
 	effPerDay := new(big.Float).Mul(perProof, proofsPerDay)
 
-	ratePerMBNano, _ := ratePerMB.Int(nil)
 	perProofNano, _ := perProof.Int(nil)
 	effPerDayNano, _ := effPerDay.Int(nil)
 
