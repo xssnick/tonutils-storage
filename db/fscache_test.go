@@ -20,7 +20,7 @@ func TestAcquire(t *testing.T) {
 			defer cleanTmpFiles(tc.paths)
 			err := testAcquire(tc.paths)
 			if err != nil {
-				t.Fatal(fmt.Sprintf("error acquiring error: %s", err.Error()))
+				t.Fatalf("error acquiring error: %s", err.Error())
 			}
 		})
 	}

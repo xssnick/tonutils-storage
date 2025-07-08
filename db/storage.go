@@ -2,29 +2,31 @@ package db
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
 	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/util"
 	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/storage"
-	"path/filepath"
-	"sort"
-	"sync"
-	"time"
 )
 
 type Config struct {
-	Key           ed25519.PrivateKey
-	ListenAddr    string
-	ExternalIP    string
-	DownloadsPath string
+	ForcePieceSize             uint32
+	StartWithoutActiveFilesToo bool
+	SkipVerify                 bool
+	NoRemove                   bool
+	DisableTorrentLoading      bool // if true, torrents will not be loaded from db on startup.
+	Notifier                   chan *Event
 }
 
 type EventType int
@@ -52,27 +54,27 @@ type Storage struct {
 	mx       sync.RWMutex
 }
 
-func NewStorage(db *leveldb.DB, connector storage.NetConnector, forcePieceSize int, startWithoutActiveFilesToo bool, skipVerify bool, noRemove bool, notifier chan *Event) (*Storage, error) {
-	if forcePieceSize < 0 {
-		return nil, fmt.Errorf("invalid piece size flag")
-	}
-
+func NewStorage(db *leveldb.DB, connector storage.NetConnector, config Config) (*Storage, error) {
 	s := &Storage{
 		torrents:        map[string]*storage.Torrent{},
 		torrentsOverlay: map[string]*storage.Torrent{},
 		db:              db,
 		connector:       connector,
 		fs: OsFs{
-			ctrl: NewFSControllerCache(noRemove),
+			ctrl: NewFSControllerCache(config.NoRemove),
 		},
-		notifyCh:       notifier,
-		skipVerify:     skipVerify,
-		forcePieceSize: uint32(forcePieceSize),
+		notifyCh:       config.Notifier,
+		skipVerify:     config.SkipVerify,
+		forcePieceSize: config.ForcePieceSize,
 	}
 
-	err := s.loadTorrents(startWithoutActiveFilesToo)
+	if config.DisableTorrentLoading {
+		return s, nil
+	}
+
+	err := s.LoadTorrents(config.StartWithoutActiveFilesToo)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load torrents from db: %w", err)
 	}
 
 	return s, nil
@@ -258,7 +260,7 @@ type TorrentStored struct {
 	DownloadOrdered bool
 }
 
-func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
+func (s *Storage) LoadTorrents(startWithoutActiveFilesToo bool) error {
 	iter := s.db.NewIterator(&util.Range{Start: []byte("bags:")}, nil)
 	for iter.Next() {
 		if !bytes.HasPrefix(iter.Key(), []byte("bags:")) {

@@ -2,7 +2,6 @@ package storage
 
 import (
 	"crypto/rand"
-	"fmt"
 	"io"
 	"os"
 	"testing"
@@ -196,7 +195,7 @@ func TestInitializeTorrent(t *testing.T) {
 	}
 
 	if dataSize != 1024*1000 {
-		t.Fatal(fmt.Sprintf("expected 1024 * 1000, got : %d", dataSize))
+		t.Fatalf("expected 1024 * 1000, got : %d", dataSize)
 	}
 
 	if torrent.Header.FilesCount != 1000 {
