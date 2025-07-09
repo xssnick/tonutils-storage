@@ -35,12 +35,15 @@ import (
 	"math/big"
 	"math/bits"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 	"time"
+
+	_ "net/http/pprof"
 )
 
 var (
@@ -59,6 +62,7 @@ var (
 	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
 	EnableTunnel        = flag.Bool("enable-tunnel", false, "Enable tunnel mode, to host files with no public ip (should be configured first)")
 	DHTParallelism      = flag.Int("dht-parallelism", 12, "Max parallel threads to search/update dht records of bags")
+	PprofEnableAddr     = flag.String("pprof-addr", "", "Enable pprof HTTP server for performance profiling on specified addr")
 )
 
 var GitCommit string
@@ -113,6 +117,16 @@ func main() {
 	if err != nil {
 		pterm.Error.Println("Failed to load config:", err.Error())
 		os.Exit(1)
+	}
+
+	if *PprofEnableAddr != "" {
+		go func() {
+			pterm.Info.Println("Starting pprof HTTP server on", *PprofEnableAddr)
+			err := http.ListenAndServe(*PprofEnableAddr, nil)
+			if err != nil {
+				pterm.Fatal.Println("Failed to start pprof server:", err.Error())
+			}
+		}()
 	}
 
 	closerCtx, stop := context.WithCancel(context.Background())
