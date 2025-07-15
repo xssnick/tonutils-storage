@@ -38,6 +38,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -70,6 +71,7 @@ var GitCommit string
 var Storage *db.Storage
 var Provider *provider.Client
 var Connector storage.NetConnector
+var Config *config.Config
 
 func main() {
 	flag.Parse()
@@ -118,6 +120,7 @@ func main() {
 		pterm.Error.Println("Failed to load config:", err.Error())
 		os.Exit(1)
 	}
+	Config = cfg
 
 	if *PprofEnableAddr != "" {
 		go func() {
@@ -334,7 +337,7 @@ func main() {
 	pterm.Success.Println("Storage started, server mode:", serverMode)
 
 	if *API != "" {
-		a := api.NewServer(Connector, Storage)
+		a := api.NewServer(Connector, Storage, Config.DownloadsPath)
 
 		if *CredentialsLogin != "" && *CredentialsPassword != "" {
 			a.SetCredentials(&api.Credentials{
@@ -469,7 +472,7 @@ func download(bagId string) {
 
 	tor := Storage.GetTorrent(bag)
 	if tor == nil {
-		tor = storage.NewTorrent(*DBPath+"/downloads/"+bagId, Storage, Connector)
+		tor = storage.NewTorrent(filepath.Join(Config.DownloadsPath, bagId), Storage, Connector)
 		tor.BagID = bag
 
 		if err = tor.Start(true, true, false); err != nil {
