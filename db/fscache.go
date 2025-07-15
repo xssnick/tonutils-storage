@@ -125,8 +125,17 @@ func (f *FSControllerCache) RemoveFile(path string) (err error) {
 		delete(f.dsc, path)
 	}
 
+	path = filepath.Clean(path)
+
+	remove := func() error {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+
 	if runtime.GOOS == "windows" {
-		if err = os.Remove(filepath.Clean(path)); err == nil {
+		if err = remove(); err == nil {
 			return
 		}
 
@@ -134,8 +143,7 @@ func (f *FSControllerCache) RemoveFile(path string) (err error) {
 		go func() {
 			// windows can still hold a file for some time, so we retry
 			for i := 0; i < 4; i++ {
-				err = os.Remove(filepath.Clean(path))
-				if err == nil {
+				if err = remove(); err == nil {
 					log.Println("removed asynchronously", path)
 					return
 				}
@@ -147,5 +155,5 @@ func (f *FSControllerCache) RemoveFile(path string) (err error) {
 		return nil
 	}
 
-	return os.Remove(filepath.Clean(path))
+	return remove()
 }

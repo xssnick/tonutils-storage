@@ -7,18 +7,18 @@ require (
 	github.com/pterm/pterm v0.12.81
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
-	github.com/ton-blockchain/adnl-tunnel v0.1.5
-	github.com/xssnick/tonutils-go v1.13.1
-	github.com/xssnick/tonutils-storage-provider v0.3.8
-	golang.org/x/sync v0.15.0
+	github.com/ton-blockchain/adnl-tunnel v0.1.6
+	github.com/xssnick/tonutils-go v1.14.0
+	github.com/xssnick/tonutils-storage-provider v0.3.9
+	golang.org/x/sync v0.16.0
 )
 
 require (
 	atomicgo.dev/schedule v0.1.0 // indirect
+	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/oasisprotocol/curve25519-voi v0.0.0-20230904125328-1f23a7beb09a // indirect
 	github.com/prometheus/client_golang v1.22.0 // indirect
 	github.com/prometheus/client_model v0.6.1 // indirect
 	github.com/prometheus/common v0.62.0 // indirect
@@ -39,10 +39,10 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/xssnick/raptorq v1.0.0
-	github.com/xssnick/ton-payment-network v0.2.1 // indirect
-	golang.org/x/crypto v0.39.0 // indirect
-	golang.org/x/sys v0.33.0 // indirect
-	golang.org/x/term v0.32.0 // indirect
-	golang.org/x/text v0.26.0 // indirect; indirects
+	github.com/xssnick/raptorq v1.0.0 // indirect
+	github.com/xssnick/ton-payment-network v0.3.0 // indirect
+	golang.org/x/crypto v0.40.0 // indirect
+	golang.org/x/sys v0.34.0 // indirect
+	golang.org/x/term v0.33.0 // indirect
+	golang.org/x/text v0.27.0 // indirect; indirects
 )
