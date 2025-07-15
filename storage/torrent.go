@@ -141,6 +141,8 @@ type Torrent struct {
 
 	currentDownloadFlag *bool
 	stopDownload        func()
+
+	opWg sync.WaitGroup
 }
 
 func (t *Torrent) InitMask() {
@@ -172,6 +174,10 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 	t.pause()
 
 	return t
+}
+
+func (t *Torrent) Wait() {
+	t.opWg.Wait()
 }
 
 func (t *Torrent) IsDownloadAll() bool {
@@ -230,7 +236,9 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	if !t.isVerificationInProgress && t.lastVerified.Before(time.Now().Add(-30*time.Second)) {
 		if t.db.VerifyOnStartup() {
 			t.isVerificationInProgress = true
+			t.opWg.Add(1)
 			go func() {
+				defer t.opWg.Done()
 				// it will remove corrupted pieces
 				if err = t.verify(t.db.VerifyOnStartup()); err != nil {
 					Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
@@ -254,6 +262,7 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 
 	t.globalCtx, t.pause = context.WithCancel(context.Background())
 
+	t.opWg.Add(1)
 	go t.peersManager(t.globalCtx)
 
 	if t.IsCompleted() {
@@ -271,6 +280,7 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 }
 
 func (t *Torrent) peersManager(workerCtx context.Context) {
+	defer t.opWg.Done()
 	defer Logger("[STORAGE_PEERS] PEER MANAGER STOPPED", "BAG", hex.EncodeToString(t.BagID))
 
 	ticker := time.NewTicker(5 * time.Millisecond)

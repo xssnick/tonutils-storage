@@ -137,6 +137,7 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	s.mx.Unlock()
 
 	t.Stop()
+	t.Wait()
 
 	b := &leveldb.Batch{}
 	b.Delete(append([]byte("bags:"), t.BagID...))

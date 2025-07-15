@@ -258,7 +258,9 @@ func (t *Torrent) startDownload(report func(Event)) error {
 	ctx, stop = context.WithCancel(t.globalCtx)
 	t.stopDownload = stop
 
+	t.opWg.Add(1)
 	go func() {
+		defer t.opWg.Done()
 		defer func() {
 			if stop != nil {
 				stop()

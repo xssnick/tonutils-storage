@@ -91,15 +91,17 @@ type Credentials struct {
 }
 
 type Server struct {
-	credentials *Credentials
-	connector   storage.NetConnector
-	store       *db.Storage
+	credentials   *Credentials
+	connector     storage.NetConnector
+	store         *db.Storage
+	downloadsPath string
 }
 
-func NewServer(connector storage.NetConnector, store *db.Storage) *Server {
+func NewServer(connector storage.NetConnector, store *db.Storage, downloadsPath string) *Server {
 	return &Server{
-		connector: connector,
-		store:     store,
+		connector:     connector,
+		store:         store,
+		downloadsPath: downloadsPath,
 	}
 }
 
@@ -145,7 +147,11 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 
 	tor := s.store.GetTorrent(bag)
 	if tor == nil {
-		tor = storage.NewTorrent(req.Path+"/"+hex.EncodeToString(bag), s.store, s.connector)
+		path := req.Path
+		if path == "" {
+			path = s.downloadsPath
+		}
+		tor = storage.NewTorrent(filepath.Join(path, hex.EncodeToString(bag)), s.store, s.connector)
 		tor.BagID = bag
 
 		if err = tor.Start(true, req.DownloadAll, false); err != nil {
@@ -192,7 +198,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		response(w, http.StatusBadRequest, Error{err.Error()})
 		return
 	}
-	
+
 	var order map[string]int
 	var only map[string]bool
 	if len(req.KeepOnlyPaths) > 0 {
