@@ -10,6 +10,7 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/tl"
@@ -572,8 +573,8 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 	tooEarly := false
 	// refresh if already exists
 	for i := range nodesList.List {
-		id, ok := nodesList.List[i].ID.(adnl.PublicKeyED25519)
-		if ok && id.Key.Equal(node.ID.(adnl.PublicKeyED25519).Key) {
+		id, ok := nodesList.List[i].ID.(keys.PublicKeyED25519)
+		if ok && id.Key.Equal(node.ID.(keys.PublicKeyED25519).Key) {
 			if nodesList.List[i].Version > int32(time.Now().Unix()-(3*60)) {
 				tooEarly = true
 			} else {
@@ -674,7 +675,7 @@ func (t *Torrent) addNode(node overlay.Node) {
 }
 
 func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.Node, addrs *address.List) error {
-	key, ok := node.ID.(adnl.PublicKeyED25519)
+	key, ok := node.ID.(keys.PublicKeyED25519)
 	if !ok {
 		return fmt.Errorf("invalid node type")
 	}

@@ -7,9 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/rs/zerolog/log"
 	"github.com/syndtr/goleveldb/leveldb"
 	"github.com/syndtr/goleveldb/leveldb/util"
-	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage/storage"
 	"path/filepath"
@@ -127,7 +128,7 @@ func (s *Storage) GetSpeedLimits() (download uint64, upload uint64, err error) {
 }
 
 func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
-	id, err := tl.Hash(adnl.PublicKeyOverlay{Key: t.BagID})
+	id, err := tl.Hash(keys.PublicKeyOverlay{Key: t.BagID})
 	if err != nil {
 		return err
 	}
@@ -152,13 +153,19 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 			list, err := t.ListFiles()
 			if err == nil {
 				for _, f := range list {
-					path := filepath.Clean(t.Path + "/" + string(t.Header.DirName) + "/" + f)
+					path := filepath.Join(t.Path, string(t.Header.DirName), f)
 					if errR := s.fs.GetController().RemoveFile(path); errR != nil {
-						println("remove err, skip", path, errR.Error())
+						log.Warn().Str("path", path).Err(errR).Msg("remove err, skip")
 					}
 				}
 			}
-			recursiveEmptyDelete(buildTreeFromDir(t.Path+"/"+string(t.Header.DirName)), s.fs.GetController())
+
+			path := filepath.Clean(t.Path)
+			if t.CreatedLocally {
+				path = filepath.Join(path, string(t.Header.DirName))
+			}
+
+			recursiveEmptyDelete(buildTreeFromDir(filepath.Clean(path)), s.fs.GetController())
 		}
 	}
 
@@ -203,7 +210,7 @@ func (s *Storage) SetTorrent(t *storage.Torrent) error {
 }
 
 func (s *Storage) addTorrent(t *storage.Torrent) error {
-	id, err := tl.Hash(adnl.PublicKeyOverlay{Key: t.BagID})
+	id, err := tl.Hash(keys.PublicKeyOverlay{Key: t.BagID})
 	if err != nil {
 		return err
 	}

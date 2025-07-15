@@ -6,3 +6,4 @@ tonutils-storage-db*
 *.json
 payments-db
 *.png
+downloads
