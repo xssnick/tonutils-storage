@@ -135,6 +135,7 @@ func NewConnector(srv TorrentServer) *Connector {
 
 func (s *speedLimit) SetLimit(bytesPerSec uint64) {
 	if bytesPerSec == 0 {
+		atomic.StoreUint64(&s.bytesPerSec, 0)
 		atomic.StorePointer(&s.bucket, unsafe.Pointer(nil))
 		return
 	}
