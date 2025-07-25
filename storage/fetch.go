@@ -121,7 +121,7 @@ func (f *PreFetcher) scaling() {
 
 	cancels := make([]context.CancelFunc, 0, maxWorkers)
 
-	for i := 0; i < 8; i++ {
+	for range minWorkers {
 		ctx, cancel := context.WithCancel(f.ctx)
 		cancels = append(cancels, cancel)
 		go f.worker(ctx)
