@@ -161,7 +161,7 @@ func (f *PreFetcher) scaling() {
 
 				if totalInPeriod > 0 && totalInPeriod > maxInPeriod && workers < maxWorkers {
 					maxInPeriod = totalInPeriod
-					for i := 0; i < perScaleWorkers; i++ {
+					for range perScaleWorkers {
 						ctx, cancel := context.WithCancel(f.ctx)
 						cancels = append(cancels, cancel)
 						go f.worker(ctx)
@@ -170,7 +170,7 @@ func (f *PreFetcher) scaling() {
 					Logger("[STORAGE_SCALER] ADDED WORKER, TOTAL:", len(cancels), "BAG", hex.EncodeToString(f.torrent.BagID), "MAX", maxInPeriod)
 				} else if totalInPeriod < maxInPeriod-maxInPeriod/4 && workers > minWorkers {
 					maxInPeriod = totalInPeriod
-					for i := 0; i < perScaleWorkers; i++ {
+					for range perScaleWorkers {
 						last := len(cancels) - 1
 						cancels[last]()
 						cancels = cancels[:last]
