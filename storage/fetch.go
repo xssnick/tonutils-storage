@@ -118,7 +118,7 @@ func (f *PreFetcher) scaling() {
 		windowSize      = 35
 		interval        = time.Millisecond * 100
 	)
-	var maxWorkers = runtime.NumCPU() * 10
+	var maxWorkers = runtime.NumCPU() * 120
 
 	cancels := make([]context.CancelFunc, 0, maxWorkers)
 

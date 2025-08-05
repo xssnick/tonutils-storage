@@ -430,7 +430,7 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 			return fmt.Errorf("failed to acquire queue slot: %w", err)
 		}
 
-		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
+		ctxReq, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
 		cancel()
 		p.conn.FreeQueueSlot()
