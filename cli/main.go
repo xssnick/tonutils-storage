@@ -584,7 +584,11 @@ func list() {
 						status = "Seeding"
 					}
 				} else if activeDownload {
-					status = "Downloading"
+					if len(t.GetActiveFilesIDs()) == 0 && !t.IsDownloadAll() {
+						status = "Header downloaded"
+					} else {
+						status = "Downloading"
+					}
 				}
 			} else {
 				status = "Verifying"

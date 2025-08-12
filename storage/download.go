@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -69,15 +70,16 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	}
 }
 
-func (t *Torrent) verify(deep bool) error {
+func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error) {
 	tm := time.Now()
 	Logger("[VERIFICATION] PREPARING:", hex.EncodeToString(t.BagID))
 
+	intact = true
 	if t.Header == nil {
-		return nil
+		return intact, nil
 	}
 
-	rootPath := t.Path + "/" + string(t.Header.DirName)
+	rootPath := filepath.Join(t.Path, string(t.Header.DirName))
 	checked := make([]bool, t.Info.PiecesNum())
 
 	var files []uint32
@@ -89,7 +91,7 @@ func (t *Torrent) verify(deep bool) error {
 		files = t.GetActiveFilesIDs()
 	}
 
-	Logger("[VERIFICATION] STARTED:", hex.EncodeToString(t.BagID), "FILES:", len(files))
+	Logger("[VERIFICATION] STARTED:", hex.EncodeToString(t.BagID), "FILES:", len(files), "DOWNLOAD ALL:", t.downloadAll)
 
 	needDownload := false
 	for _, f := range files {
@@ -100,10 +102,12 @@ func (t *Torrent) verify(deep bool) error {
 			continue
 		}
 
+		path := filepath.Join(rootPath, info.Name)
+
 		isDelete := false
-		if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
+		if !t.db.GetFS().Exists(path) {
 			isDelete = true
-			// Logger("[VERIFICATION] FAILED FOR FILE:", rootPath+"/"+info.Name, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
+			Logger("[VERIFICATION] FAILED FOR FILE:", path, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
 		} else if deep {
 			if info.Size > 256*1024*1024 {
 				type jobRes struct {
@@ -117,7 +121,7 @@ func (t *Torrent) verify(deep bool) error {
 
 				jobs := make(chan job, 100)
 				results := make(chan jobRes, 100)
-				ctxWorker, cancel := context.WithCancel(t.globalCtx)
+				ctxWorker, cancel := context.WithCancel(ctx)
 
 				workers := (runtime.NumCPU() / 3) * 2
 				if workers == 0 {
@@ -159,7 +163,8 @@ func (t *Torrent) verify(deep bool) error {
 
 					select {
 					case <-ctxWorker.Done():
-						break
+						cancel()
+						return false, ctxWorker.Err()
 					case res := <-results:
 						if res.err != nil {
 							if !strings.Contains(res.err.Error(), "is not downloaded") {
@@ -183,6 +188,10 @@ func (t *Torrent) verify(deep bool) error {
 						continue
 					}
 
+					if ctx.Err() != nil {
+						return false, ctx.Err()
+					}
+
 					_, err := t.getPieceInternal(i, true)
 					if err != nil {
 						if strings.Contains(err.Error(), "is not downloaded") {
@@ -200,6 +209,7 @@ func (t *Torrent) verify(deep bool) error {
 		}
 
 		if isDelete {
+			intact = false
 			// we delete whole file because size can be > than expected
 			// and just replace of piece will be not enough
 			for i := info.FromPiece; i <= info.ToPiece; i++ {
@@ -207,16 +217,16 @@ func (t *Torrent) verify(deep bool) error {
 				if err = t.removePiece(i); err != nil {
 					Logger("[VERIFICATION] REMOVE PIECE ERR:", hex.EncodeToString(t.BagID), i, err.Error())
 
-					return err
+					return false, err
 				}
 			}
 
 			if !t.CreatedLocally {
 				needDownload = true
-				Logger("[VERIFICATION] NEED DOWNLOAD:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID))
+				Logger("[VERIFICATION] NEED DOWNLOAD:", path, hex.EncodeToString(t.BagID))
 
-				if err = t.db.GetFS().Delete(rootPath + "/" + info.Name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					Logger("[VERIFICATION] FAILED TO REMOVE FILE:", rootPath+"/"+info.Name, hex.EncodeToString(t.BagID), err.Error())
+				if err = t.db.GetFS().Delete(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+					Logger("[VERIFICATION] FAILED TO REMOVE FILE:", path, hex.EncodeToString(t.BagID), err.Error())
 				}
 			} else {
 				Logger("[VERIFICATION] CORRUPTED, BUT CREATED LOCALLY AND WE WILL NOT TOUCH FILES :", hex.EncodeToString(t.BagID))
@@ -235,9 +245,9 @@ func (t *Torrent) verify(deep bool) error {
 		})
 	}
 
-	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID), "TOOK", time.Since(tm).String())
+	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID), "NEED DOWNLOAD:", needDownload, "INTACT:", intact, "TOOK:", time.Since(tm).String())
 
-	return nil
+	return intact, nil
 }
 
 func (t *Torrent) startDownload(report func(Event)) error {
@@ -275,16 +285,16 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
 				return
 			}
+		}
 
-			// update torrent in db
-			if err := t.db.SetTorrent(t); err != nil {
-				Logger("failed to set torrent in db", hex.EncodeToString(t.BagID), "err: ", err.Error())
-				return
-			}
+		// update torrent in db
+		if err := t.db.SetTorrent(t); err != nil {
+			Logger("failed to set torrent in db", hex.EncodeToString(t.BagID), "err: ", err.Error())
+			return
 		}
 
 		var downloaded uint64
-		rootPath := t.Path + "/" + string(t.Header.DirName)
+		rootPath := filepath.Join(t.Path, string(t.Header.DirName))
 
 		var files []uint32
 		if t.downloadAll {
@@ -309,7 +319,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 			needFile := false
 
-			if !t.db.GetFS().Exists(rootPath + "/" + info.Name) {
+			if !t.db.GetFS().Exists(filepath.Join(rootPath, info.Name)) {
 				needFile = true
 				for i := info.FromPiece; i <= info.ToPiece; i++ {
 					piecesMap[i] = true
@@ -414,7 +424,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 										for x := 1; x <= 5; x++ {
 											// we retry because on Windows close file behaves
 											// like async, and it may throw that file still opened
-											currentFile, err = t.db.GetFS().Open(rootPath+"/"+file.Name, OpenModeWrite)
+											currentFile, err = t.db.GetFS().Open(filepath.Join(rootPath, file.Name), OpenModeWrite)
 											if err != nil {
 												Logger(fmt.Errorf("failed to create or open file %s: %w", file.Name, err).Error())
 												time.Sleep(time.Duration(x*50) * time.Millisecond)
@@ -517,7 +527,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 				return fmt.Errorf("malicious file %q", off.path)
 			}
 
-			f, err := t.db.GetFS().Open(rootPath+"/"+off.path, OpenModeWrite)
+			f, err := t.db.GetFS().Open(filepath.Join(rootPath, off.path), OpenModeWrite)
 			if err != nil {
 				return fmt.Errorf("failed to create file %s: %w", off.path, err)
 			}

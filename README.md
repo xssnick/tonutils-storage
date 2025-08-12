@@ -234,6 +234,27 @@ Response:
 }
 ```
 
+#### POST /api/v1/verify
+
+Verify files integrity
+
+Request:
+```json
+{
+   "bag_id": "85d0998dcf325b6fee4f529d4dcf66fb253fc39c59687c82a0ef7fc96fed4c9f",
+   "only_files_existence": false
+}
+```
+
+Response:
+```json
+{
+   "ok": true
+}
+```
+
+Ok = true means files are intact, when false download process starts automatically.
+
 <!-- Badges -->
 [ton-svg]: https://img.shields.io/badge/Based%20on-TON-blue
 [join-svg]: https://img.shields.io/badge/Join%20-Telegram-blue

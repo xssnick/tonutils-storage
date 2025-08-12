@@ -7,3 +7,4 @@ tonutils-storage-db*
 payments-db
 *.png
 downloads
+db/files

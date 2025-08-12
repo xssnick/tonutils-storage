@@ -119,10 +119,10 @@ github.com/xssnick/raptorq v1.0.0 h1:l77lntIV/W/SV9rZjF4wRpIhikQm8nBHtB3h+qiu2cM
 github.com/xssnick/raptorq v1.0.0/go.mod h1:kgEVVsZv2hP+IeV7C7985KIFsDdvYq2ARW234SBA9Q4=
 github.com/xssnick/ton-payment-network v1.0.0 h1:vdQhIFVD4Xwo01/L5+1qchIrd1pz7Zj0O4u8KtpBesQ=
 github.com/xssnick/ton-payment-network v1.0.0/go.mod h1:ZI0Ihq2ziUOUlQOc74jtEN40Yg98hBlAoz+WdelwNws=
-github.com/xssnick/tonutils-go v1.14.1-0.20250724113246-0e768032bcd2 h1:TiBNMHMza0RoW7XJsV18nKy7SNSGlW2HNDZ1YcUgx9Y=
-github.com/xssnick/tonutils-go v1.14.1-0.20250724113246-0e768032bcd2/go.mod h1:68xwWjpoGGqiTbLJ0gT63sKu1Z1moCnDLLzA+DKanIg=
-github.com/xssnick/tonutils-storage-provider v0.3.10 h1:XrFD/3JOCiw+zxgv+nIwS7/AiE9vbYHcxIDjSb3sNqE=
-github.com/xssnick/tonutils-storage-provider v0.3.10/go.mod h1:h0BPPAuCUJonMtOD8xuINe8T3Bg/DXUBTP9jOyhpDxc=
+github.com/xssnick/tonutils-go v1.14.1 h1:zV/iVYl/h3hArS+tPsd9XrSFfGert3r21caMltPSeHg=
+github.com/xssnick/tonutils-go v1.14.1/go.mod h1:68xwWjpoGGqiTbLJ0gT63sKu1Z1moCnDLLzA+DKanIg=
+github.com/xssnick/tonutils-storage-provider v0.3.11 h1:njbOKR+VHgzQnbKn4YHrdoKZ3XV/ytVnX/as1q+QkY4=
+github.com/xssnick/tonutils-storage-provider v0.3.11/go.mod h1:h0BPPAuCUJonMtOD8xuINe8T3Bg/DXUBTP9jOyhpDxc=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
 golang.org/x/crypto v0.0.0-20190308221718-c2843e01d9a2/go.mod h1:djNgcEr1/C05ACkg1iLfiJU5Ep61QUkGW8qpdssI0+w=
 golang.org/x/crypto v0.0.0-20210921155107-089bfa567519/go.mod h1:GvvjBRRGRdwPK5ydBHafDWAxML/pGHZbMvKqRZ5+Abc=

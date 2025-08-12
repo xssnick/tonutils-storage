@@ -21,7 +21,8 @@ type Error struct {
 }
 
 type Ok struct {
-	Ok bool `json:"ok"`
+	Ok    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 type ADNLProofResponse struct {
@@ -75,6 +76,7 @@ type Bag struct {
 	InfoLoaded    bool   `json:"info_loaded"`
 	Active        bool   `json:"active"`
 	Seeding       bool   `json:"seeding"`
+	DownloadAll   bool   `json:"download_all"`
 }
 
 type List struct {
@@ -112,6 +114,7 @@ func (s *Server) SetCredentials(credentials *Credentials) {
 func (s *Server) Start(addr string) error {
 	m := http.NewServeMux()
 	m.HandleFunc("/api/v1/details", s.withAuth(s.handleDetails))
+	m.HandleFunc("/api/v1/verify", s.withAuth(s.handleVerify))
 	m.HandleFunc("/api/v1/add", s.withAuth(s.handleAdd))
 	m.HandleFunc("/api/v1/create", s.withAuth(s.handleCreate))
 	m.HandleFunc("/api/v1/remove", s.withAuth(s.handleRemove))
@@ -185,7 +188,7 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 		pterm.Success.Println("Bag active files updated", hex.EncodeToString(bag))
 	}
 
-	response(w, http.StatusOK, Ok{true})
+	response(w, http.StatusOK, Ok{Ok: true})
 }
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -280,10 +283,13 @@ func (s *Server) handlePieceProof(w http.ResponseWriter, r *http.Request) {
 
 	if tor := s.store.GetTorrent(bag); tor != nil {
 		proof, err := tor.GetPieceProof(uint32(piece))
-		if err == nil {
-			response(w, http.StatusOK, ProofResponse{proof})
+		if err != nil {
+			response(w, http.StatusNotFound, Ok{Ok: false, Error: err.Error()})
 			return
 		}
+
+		response(w, http.StatusOK, ProofResponse{proof})
+		return
 	}
 	response(w, http.StatusNotFound, Ok{Ok: false})
 }
@@ -380,6 +386,44 @@ func (s *Server) handleDetails(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response(w, http.StatusNotFound, Ok{Ok: false})
+}
+
+func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		response(w, http.StatusMethodNotAllowed, Error{"Method not allowed"})
+		return
+	}
+
+	req := struct {
+		BagID              string `json:"bag_id"`
+		OnlyFilesExistence bool   `json:"only_files_existence"`
+	}{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response(w, http.StatusBadRequest, Error{err.Error()})
+		return
+	}
+
+	bag, err := hex.DecodeString(req.BagID)
+	if err != nil {
+		response(w, http.StatusBadRequest, Error{"Invalid bag id"})
+		return
+	}
+	if len(bag) != 32 {
+		response(w, http.StatusBadRequest, Error{"Invalid bag id"})
+		return
+	}
+
+	if tor := s.store.GetTorrent(bag); tor != nil {
+		intact, err := tor.Verify(r.Context(), !req.OnlyFilesExistence)
+		if err != nil {
+			pterm.Error.Println("Failed to verify bag:", err.Error())
+			response(w, http.StatusInternalServerError, Error{err.Error()})
+		}
+
+		response(w, http.StatusOK, Ok{Ok: intact})
+		return
+	}
+	response(w, http.StatusBadRequest, Error{"Bag is unknown"})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -557,6 +601,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		InfoLoaded:    infoLoaded,
 		Active:        active,
 		Seeding:       seeding,
+		DownloadAll:   t.IsDownloadAll(),
 	}
 
 	return res

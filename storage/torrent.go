@@ -10,6 +10,7 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"math/bits"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -240,7 +241,7 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 			go func() {
 				defer t.opWg.Done()
 				// it will remove corrupted pieces
-				if err = t.verify(t.db.VerifyOnStartup()); err != nil {
+				if _, err = t.Verify(t.globalCtx, true); err != nil {
 					Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
 				}
 
@@ -555,7 +556,12 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 				return nil, fmt.Errorf("offsets for %d %d are not exists (%w)", id, fileFrom, err)
 			}
 
-			path := t.Path + "/" + string(t.Header.DirName) + "/" + f.Name
+			path := filepath.Join(t.Path, string(t.Header.DirName), f.Name)
+			path, err = filepath.Abs(path)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get absolute path for %s: %w", path, err)
+			}
+
 			read := func(path string, from int64) error {
 				n, err := t.db.GetFS().GetController().AcquireRead(path, block[offset:], from)
 				if err != nil && err != io.EOF {
