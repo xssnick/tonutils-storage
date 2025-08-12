@@ -557,10 +557,6 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 			}
 
 			path := filepath.Join(t.Path, string(t.Header.DirName), f.Name)
-			path, err = filepath.Abs(path)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get absolute path for %s: %w", path, err)
-			}
 
 			read := func(path string, from int64) error {
 				n, err := t.db.GetFS().GetController().AcquireRead(path, block[offset:], from)
