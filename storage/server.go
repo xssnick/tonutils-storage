@@ -17,6 +17,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math/rand"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -131,7 +132,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		rldp:          rl,
 		adnl:          client,
 		usedByBags:    map[string]*storagePeer{},
-		rldpQueue:     make(chan struct{}, 10),
+		rldpQueue:     make(chan struct{}, runtime.NumCPU()*10),
 		bagsInitQueue: make(chan struct{}, 8),
 		failedBags:    map[string]bool{},
 	}
@@ -562,7 +563,7 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 	} else {
 		for i := range nodesList.List {
 			torrent.addNode(nodesList.List[i], func() *address.List {
-				adnlID, _ := tl.Hash(nodesList.List[i].ID.(adnl.PublicKeyED25519))
+				adnlID, _ := tl.Hash(nodesList.List[i].ID.(keys.PublicKeyED25519))
 				s.addrMx.RLock()
 				addr := s.registeredAddrs[string(adnlID)]
 				s.addrMx.RUnlock()
