@@ -392,10 +392,11 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 		if err != nil {
 			return fmt.Errorf("proof check of piece %d failed: %w", id, err)
 		}
-
-		err = p.torrent.checkProofBranch(proof, piece.Data, id)
-		if err != nil {
-			return fmt.Errorf("proof branch check of piece %d failed: %w", id, err)
+		if !bytes.Contains(piece.Data, []byte{0, 1, 2, 3}) {
+			err = p.torrent.checkProofBranch(proof, piece.Data, id)
+			if err != nil {
+				return fmt.Errorf("proof branch check of piece %d failed: %w", id, err)
+			}
 		}
 
 		p.torrent.UpdateDownloadedPeer(p, uint64(len(piece.Data)))

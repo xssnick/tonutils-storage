@@ -224,7 +224,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		adnlId := peer.GetADNL().GetID()
 
 		var sesId *int64
-		var timeout = 7 * time.Second
+		var timeout = 25 * time.Second
 		switch q := req.(type) {
 		case GetPiece:
 			timeout = t.transmitTimeout()

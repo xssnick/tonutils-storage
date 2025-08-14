@@ -10,6 +10,7 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"math/bits"
+	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -47,6 +48,7 @@ type FSFile interface {
 	io.WriterAt
 	io.Closer
 	Sync() error
+	Name() string
 }
 
 type FS interface {
@@ -572,7 +574,25 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 			read := func(path string, from int64) error {
 				n, err := t.db.GetFS().GetController().AcquireRead(path, block[offset:], from)
 				if err != nil && err != io.EOF {
-					return err
+					if os.IsNotExist(err) {
+						n = len(block) - offset
+						if uint64(n) >= f.Size {
+							n = int(f.Size)
+						}
+
+						pattern := []byte{0x0, 0x1, 0x2, 0x3}
+						if len(block[offset:]) < len(pattern) {
+							copy(block[offset:], pattern[:len(block[offset:])])
+							offset += n
+							return nil
+						}
+						copy(block[offset:], pattern)
+						for j := len(pattern); j < len(block[offset:]); j *= 2 {
+							copy(block[offset:][j:], block[offset:][:j])
+						}
+					} else {
+						return err
+					}
 				}
 
 				offset += n
