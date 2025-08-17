@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ed25519"
@@ -10,6 +11,19 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math/big"
+	"math/bits"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mattn/go-isatty"
 	"github.com/pterm/pterm"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
@@ -32,17 +46,6 @@ import (
 	"github.com/xssnick/tonutils-storage/db"
 	"github.com/xssnick/tonutils-storage/provider"
 	"github.com/xssnick/tonutils-storage/storage"
-	"math/big"
-	"math/bits"
-	"net"
-	"net/http"
-	"net/netip"
-	"os"
-	"path/filepath"
-	"runtime"
-	"strings"
-	"sync"
-	"time"
 
 	_ "net/http/pprof"
 )
@@ -376,7 +379,16 @@ func main() {
 			list()
 
 			for {
-				cmd, err := pterm.DefaultInteractiveTextInput.WithOnInterruptFunc(onStop).Show("Command")
+				var cmd string
+				var err error
+				if !isatty.IsTerminal(os.Stdout.Fd()) {
+					fmt.Print("Command: ")
+					in := bufio.NewReader(os.Stdin)
+					cmd, err = in.ReadString('\n')
+				} else {
+					cmd, err = pterm.DefaultInteractiveTextInput.WithOnInterruptFunc(onStop).Show("Command")
+				}
+
 				if err != nil {
 					pterm.Warning.Println("unexpected input:" + err.Error())
 					continue
