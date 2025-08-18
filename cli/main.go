@@ -382,9 +382,9 @@ func main() {
 				var cmd string
 				var err error
 				if !isatty.IsTerminal(os.Stdout.Fd()) {
-					fmt.Print("Command: ")
 					in := bufio.NewReader(os.Stdin)
 					cmd, err = in.ReadString('\n')
+					cmd = strings.TrimSpace(cmd)
 				} else {
 					cmd, err = pterm.DefaultInteractiveTextInput.WithOnInterruptFunc(onStop).Show("Command")
 				}
