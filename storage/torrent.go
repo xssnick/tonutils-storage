@@ -407,7 +407,14 @@ func (t *Torrent) removePiece(id uint32) error {
 	return t.db.RemovePiece(t.BagID, id)
 }
 
-func (t *Torrent) setPiece(id uint32, p *PieceInfo) error {
+func (t *Torrent) setPiece(id uint32, p *PieceInfo, onlyHeader bool) error {
+	if onlyHeader && t.Info.HeaderSize%uint64(t.Info.PieceSize) != 0 {
+		if id == uint32(t.Info.HeaderSize/uint64(t.Info.PieceSize)) {
+			// we should set an edge piece only when data is downloaded
+			return nil
+		}
+	}
+
 	i := id / 8
 	y := id % 8
 

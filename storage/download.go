@@ -473,7 +473,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 							err = t.setPiece(piece, &PieceInfo{
 								StartFileIndex: pieceFiles[0].Index,
 								Proof:          currentProof,
-							})
+							}, false)
 							if err != nil {
 								return fmt.Errorf("failed to save piece %d to db: %w", piece, err)
 							}
@@ -547,7 +547,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 							err = t.setPiece(currentPieceId, &PieceInfo{
 								StartFileIndex: pieceStartFileIndex,
 								Proof:          currentProof,
-							})
+							}, false)
 							if err != nil {
 								return fmt.Errorf("failed to save piece %d to db: %w", currentPieceId, err)
 							}
@@ -599,7 +599,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 		err := t.setPiece(currentPieceId, &PieceInfo{
 			StartFileIndex: pieceStartFileIndex,
 			Proof:          currentProof,
-		})
+		}, false)
 		if err != nil {
 			return fmt.Errorf("failed to save piece %d to db: %w", currentPieceId, err)
 		}

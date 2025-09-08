@@ -273,7 +273,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 			err = dow.torrent.setPiece(uint32(i), &PieceInfo{
 				StartFileIndex: 0,
 				Proof:          proof,
-			})
+			}, true)
 			if err != nil {
 				return nil, err
 			}

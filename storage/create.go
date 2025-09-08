@@ -58,14 +58,10 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 
 	if pieceSize == 0 {
 		switch {
-		case dataSize > 100<<30: // > 100 GB
-			pieceSize = 8 << 20 // 8 MB (16MB -1 is bytes TL limit so it is max)
-		case dataSize > 20<<30: // > 20 GB
-			pieceSize = 4 << 20 // 4 MB
 		case dataSize > 10<<30: // > 10 GB
-			pieceSize = 2 << 20 // 2 MB
-		case dataSize > 1<<30: // > 1 GB
 			pieceSize = 1 << 20 // 1 MB
+		case dataSize > 2<<30: // > 2 GB
+			pieceSize = 512 << 10 // 512 KB
 		case dataSize > 512<<20: // > 512 MB
 			pieceSize = 256 << 10 // 256 KB
 		default:
@@ -246,7 +242,7 @@ func joinTorrentPieces(
 				err := torrent.setPiece(p.id, &PieceInfo{
 					StartFileIndex: p.startIndex,
 					Proof:          torrent.fastProof(hashTree, p.id, torrent.Info.PiecesNum()).ToBOCWithFlags(false),
-				})
+				}, false)
 				if err != nil {
 					toCalcErr <- err
 					return
