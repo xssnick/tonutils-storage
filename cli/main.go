@@ -97,6 +97,7 @@ func main() {
 		fallthrough
 	case 12:
 		rldp.Logger = log.Logger.Println
+		rldp.BBRLogger = log.Logger.Println
 		fallthrough
 	case 11:
 		storage.Logger = log.Logger.Println

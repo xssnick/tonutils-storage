@@ -130,6 +130,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		rldpQueue:     make(chan struct{}, 10),
 		bagsInitQueue: make(chan struct{}, 8),
 	}
+	p.maxInflightPieces.Store(1)
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
 	return p
@@ -353,6 +354,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 					}
 				}
 				stPeer.piecesMx.Unlock()
+				t.wake.fire()
 			case UpdateHavePieces:
 				var piecesNum *uint32
 				t.mx.RLock()
@@ -373,6 +375,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 					stPeer.hasPieces[uint32(d)] = true
 				}
 				stPeer.piecesMx.Unlock()
+				t.wake.fire()
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, &Ok{})
@@ -645,8 +648,10 @@ func (t *Torrent) addNode(node overlay.Node) {
 		return
 	}
 
+	strId := hex.EncodeToString(nodeId)
+
 	if bytes.Equal(nodeId, t.connector.GetID()) {
-		Logger("[STORAGE] SKIP OURSELF", hex.EncodeToString(nodeId))
+		Logger("[STORAGE] SKIP OURSELF", strId)
 
 		// skip ourself
 		return
@@ -655,9 +660,23 @@ func (t *Torrent) addNode(node overlay.Node) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	if t.knownNodes[hex.EncodeToString(nodeId)] == nil {
-		Logger("[STORAGE] ADD KNOWN NODE ", hex.EncodeToString(nodeId), "for", hex.EncodeToString(t.BagID))
-		t.knownNodes[hex.EncodeToString(nodeId)] = &node
+	const retryAfterSec = 75
+
+	// cleanup
+	for n, at := range t.triedNodes {
+		if at < time.Now().Unix()-retryAfterSec {
+			delete(t.triedNodes, n)
+		}
+	}
+
+	if t.knownNodes[strId] == nil {
+		if _, ok := t.triedNodes[strId]; ok {
+			Logger("[STORAGE] SKIP ALREADY TRIED AND FAILED NODE", strId, "WILL RETRY LATER")
+			return
+		}
+
+		Logger("[STORAGE] ADD KNOWN NODE ", strId, "FOR", hex.EncodeToString(t.BagID))
+		t.knownNodes[strId] = &node
 
 		go func() {
 			ctx, cancel := context.WithTimeout(t.globalCtx, 120*time.Second)
@@ -665,12 +684,17 @@ func (t *Torrent) addNode(node overlay.Node) {
 
 			err := t.connector.ConnectToNode(ctx, t, &node, nil)
 			if err != nil {
-				Logger("[STORAGE] FAILED TO CONNECT TO NODE", hex.EncodeToString(nodeId), "FOR", hex.EncodeToString(t.BagID), err.Error())
+				t.peersMx.Lock()
+				t.triedNodes[strId] = time.Now().Unix()
+				delete(t.knownNodes, strId)
+				t.peersMx.Unlock()
+
+				Logger("[STORAGE] FAILED TO CONNECT TO NODE", strId, "FOR", hex.EncodeToString(t.BagID), err.Error())
 				return
 			}
 		}()
 	} else {
-		// Logger("[STORAGE] ALREADY KNOWN NODE", hex.EncodeToString(nodeId))
+		Logger("[STORAGE] SKIP ALREADY KNOWN NODE", strId)
 	}
 }
 
@@ -993,14 +1017,13 @@ func (t *Torrent) prepareStoragePeer(over []byte, conn *PeerConnection, sessionI
 	}
 
 	stNode := &storagePeer{
-		torrent:          t,
-		nodeAddr:         conn.adnl.RemoteAddr(),
-		nodeId:           conn.adnl.GetID(),
-		conn:             conn,
-		sessionId:        *sessionId,
-		sessionInitAt:    time.Now().Unix(),
-		overlay:          over,
-		maxInflightScore: 50,
+		torrent:       t,
+		nodeAddr:      conn.adnl.RemoteAddr(),
+		nodeId:        conn.adnl.GetID(),
+		conn:          conn,
+		sessionId:     *sessionId,
+		sessionInitAt: time.Now().Unix(),
+		overlay:       over,
 		// TODO: bitmask
 		hasPieces: map[uint32]bool{},
 	}

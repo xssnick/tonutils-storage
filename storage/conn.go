@@ -7,14 +7,17 @@ import (
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"sync"
+	"sync/atomic"
 )
 
 type PeerConnection struct {
-	rldp           overlay.RLDP
-	adnl           adnl.Peer
-	rldpQueue      chan struct{}
-	bagsInitQueue  chan struct{}
-	inflightPieces int32
+	rldp          overlay.RLDP
+	adnl          adnl.Peer
+	rldpQueue     chan struct{}
+	bagsInitQueue chan struct{}
+
+	inflightPieces    atomic.Int32
+	maxInflightPieces atomic.Int32
 
 	mx         sync.RWMutex
 	usedByBags map[string]*storagePeer

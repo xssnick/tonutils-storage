@@ -113,6 +113,7 @@ type Torrent struct {
 	downloader TorrentDownloader
 
 	knownNodes map[string]*overlay.Node
+	triedNodes map[string]int64
 	peers      map[string]*PeerInfo
 	peersMx    sync.RWMutex
 
@@ -143,6 +144,8 @@ type Torrent struct {
 	currentDownloadFlag *bool
 	stopDownload        func()
 
+	wake *wakeSig
+
 	opWg sync.WaitGroup
 }
 
@@ -164,9 +167,11 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 		CreatedAt:       time.Now(),
 		peers:           map[string]*PeerInfo{},
 		knownNodes:      map[string]*overlay.Node{},
+		triedNodes:      map[string]int64{},
 		db:              db,
 		connector:       connector,
 		signalNewPieces: make(chan struct{}, 1),
+		wake:            newWakeSig(),
 	}
 
 	// create as stopped
@@ -220,12 +225,16 @@ func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
 }
 
 func (t *Torrent) Stop() {
+	defer t.wake.fire()
+
 	t.activeUpload = false
 	t.pause()
 }
 
 func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
 	t.activeUpload = withUpload
+
+	defer t.wake.fire()
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
@@ -287,8 +296,8 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
+	var lastUpdatePiecesSeqno int64
 	for {
-		var updatePieces bool
 		select {
 		case <-workerCtx.Done():
 			t.peersMx.RLock()
@@ -303,9 +312,12 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 			}
 
 			return
-		case <-t.signalNewPieces:
-			updatePieces = true
 		case <-ticker.C:
+			select {
+			case <-t.signalNewPieces:
+				lastUpdatePiecesSeqno++
+			default:
+			}
 		}
 		ticker.Reset(time.Second)
 
@@ -316,13 +328,19 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 		}
 		t.peersMx.RUnlock()
 
+		var updates = 0
+		now := time.Now().UnixMilli()
 		wg := sync.WaitGroup{}
 		for _, peer := range peers {
 			if atomic.LoadInt32(&peer.sessionInitialized) == 0 {
 				continue
 			}
 
-			if updatePieces {
+			if updates < 3 && peer.lastUpdatePiecesSeqno < lastUpdatePiecesSeqno && peer.lastUpdatePiecesAt+1000 < now {
+				peer.lastUpdatePiecesAt = now
+				peer.lastUpdatePiecesSeqno = lastUpdatePiecesSeqno
+				updates++ // limit per cycle to not overload network
+
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
