@@ -116,6 +116,9 @@ type nodeRTTInfo struct {
 	thrEMA     float64
 	lastThr    float64
 	thrSample  time.Time
+	rampStart  time.Time
+	rampUntil  time.Time
+	rampFactor float64
 }
 
 func (n *nodeRTTInfo) onSuccessSample(rttMs int64, payload int, now time.Time) {
@@ -181,9 +184,16 @@ func (n *nodeRTTInfo) calcTimeout() time.Duration {
 		return 15 * time.Second
 	}
 
-	rtoMs := 500 + 2*srtt + 8*rttvar
+	if rttvar < srtt*0.12 {
+		rttvar = srtt * 0.12
+	}
+
+	rtoMs := srtt + 8*rttvar
 	if rtoMs > 15000 {
 		rtoMs = 15000
+	}
+	if rtoMs < 2000 {
+		rtoMs = 2000
 	}
 	return time.Duration(rtoMs) * time.Millisecond
 }
@@ -199,6 +209,20 @@ func (f *PreFetcher) balancer() {
 	rttInfoMap := map[string]*nodeRTTInfo{}
 
 	defer f.torrent.wake.fire()
+
+	go func() {
+		tk := time.NewTicker(150 * time.Millisecond)
+		defer tk.Stop()
+
+		for {
+			select {
+			case <-f.ctx.Done():
+				return
+			case <-tk.C:
+				f.torrent.wake.fire()
+			}
+		}
+	}()
 
 	scoreOf := func(ok bool, rtt, fails, upStreak, downStreak, lowRate int64, inflight, max int32) float64 {
 		if rtt <= 0 {
@@ -287,21 +311,23 @@ func (f *PreFetcher) balancer() {
 			}
 
 			srtt, _, _, _, fails := rttInfo.snapshot()
-			cooldownMs := int64(srtt)
-			if cooldownMs < 100 {
-				cooldownMs = 100
-			}
-
-			if fails > 1 {
-				extra := cooldownMs * (1 << (fails - 1)) // 2^k
-				if extra > 2000 {
-					extra = 2000
+			if len(peersList) > 1 { // TODO: better condition to skip cooldown
+				cooldownMs := int64(srtt)
+				if cooldownMs < 100 {
+					cooldownMs = 100
 				}
-				cooldownMs += extra
-			}
 
-			if !rttInfo.IsLastSuccess.Load() && nowMs-rttInfo.LastChange.Load() < cooldownMs {
-				continue
+				if fails > 1 {
+					extra := cooldownMs * (1 << (fails - 1)) // 2^k
+					if extra > 2000 {
+						extra = 2000
+					}
+					cooldownMs += extra
+				}
+
+				if !rttInfo.IsLastSuccess.Load() && nowMs-rttInfo.LastChange.Load() < cooldownMs {
+					continue
+				}
 			}
 
 			available := (f.processed.Load() + int32(f.prefetch)) - f.ready.Load()
@@ -400,7 +426,9 @@ func (f *PreFetcher) balancer() {
 			defer f.torrent.wake.fire()
 			defer bestNode.conn.inflightPieces.Add(-1)
 
-			ctx, cancel := context.WithTimeout(f.ctx, bestNodeRttInfo.calcTimeout())
+			tou := bestNodeRttInfo.calcTimeout()
+
+			ctx, cancel := context.WithTimeout(f.ctx, tou)
 			pc, rtt, err := bestNode.downloadPiece(ctx, piece)
 			cancel()
 
@@ -410,7 +438,7 @@ func (f *PreFetcher) balancer() {
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
 					srtt, _, _, _, _ := bestNodeRttInfo.snapshot()
-					minChangeMs := int64(srtt * 1.2)
+					minChangeMs := int64(srtt * 2)
 					if minChangeMs < 50 {
 						minChangeMs = 50
 					}
@@ -421,7 +449,13 @@ func (f *PreFetcher) balancer() {
 
 						fmt.Println("-- FAIL", bestNode.nodeAddr, rtt, curMax)
 
-						if bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, curMax-1) {
+						newMax := curMax - 1
+						if nm := curMax / 10; nm > 1 {
+							// 10% reduce
+							newMax = curMax - nm
+						}
+
+						if bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, newMax) {
 							bestNodeRttInfo.LastChange.Store(time.Now().UnixMilli())
 						}
 					}
@@ -483,14 +517,14 @@ func (f *PreFetcher) balancer() {
 				if !lowRate && float64(rtt) <= incThresh && queueMs <= 0.25*srtt {
 					stable := bestNodeRttInfo.StableCount.Add(1)
 
-					minChangeMs := int64(srtt * 1.1)
+					minChangeMs := int64(srtt * 2)
 					if minChangeMs < 50 {
 						minChangeMs = 50
 					}
 
 					need := curMax
-					if need < 1 {
-						need = 1
+					if need < 2 {
+						need = 2
 					}
 
 					if stable >= int64(need) && lastChange < nowMs-minChangeMs {
@@ -504,11 +538,11 @@ func (f *PreFetcher) balancer() {
 							bestNodeRttInfo.StableCount.Store(0)
 						}
 					}
-				} else if lowRate || float64(rtt) >= decThresh || queueMs > 0.8*srtt {
+				} else if lowRate || float64(rtt) >= decThresh || queueMs > 0.8*minrtt {
 					bestNodeRttInfo.DownStreak.Add(1)
 					bestNodeRttInfo.UpStreak.Store(0)
 
-					fmt.Println("-- DOWN", bestNode.nodeAddr, rtt, rttvar, srtt, queueMs, incThresh, decThresh, curMax)
+					fmt.Println("-- DOWN", bestNode.nodeAddr, lowRate, rtt, rttvar, srtt, queueMs, incThresh, decThresh, curMax)
 
 					if curMax > 1 && bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, curMax-1) {
 						bestNodeRttInfo.LastChange.Store(nowMs)
