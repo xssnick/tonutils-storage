@@ -11,6 +11,7 @@ import (
 	"io"
 	"math/bits"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -328,6 +329,10 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 		}
 		t.peersMx.RUnlock()
 
+		sort.Slice(peers, func(i, j int) bool {
+			return peers[i].lastUpdatePiecesSeqno < peers[j].lastUpdatePiecesSeqno
+		})
+		
 		var updates = 0
 		now := time.Now().UnixMilli()
 		wg := sync.WaitGroup{}

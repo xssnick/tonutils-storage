@@ -105,6 +105,7 @@ type nodeRTTInfo struct {
 	LastChange    atomic.Int64
 	UpStreak      atomic.Int64
 	DownStreak    atomic.Int64
+	LowRateStreak atomic.Int64
 
 	mu         sync.Mutex
 	srttMs     float64
@@ -112,9 +113,12 @@ type nodeRTTInfo struct {
 	minRttMs   float64
 	lastSample time.Time
 	failStreak int
+	thrEMA     float64
+	lastThr    float64
+	thrSample  time.Time
 }
 
-func (n *nodeRTTInfo) onSuccessSample(rttMs int64, now time.Time) {
+func (n *nodeRTTInfo) onSuccessSample(rttMs int64, payload int, now time.Time) {
 	const a = 1.0 / 8.0 //  srtt
 	const b = 1.0 / 4.0 //  rttvar
 	rm := float64(rttMs)
@@ -137,6 +141,18 @@ func (n *nodeRTTInfo) onSuccessSample(rttMs int64, now time.Time) {
 	}
 	n.lastSample = now
 	n.failStreak = 0
+
+	if payload > 0 && rttMs > 0 {
+		thr := (float64(payload) * 1000.0) / float64(rttMs)
+		const c = 1.0 / 5.0
+		if n.thrEMA == 0 {
+			n.thrEMA = thr
+		} else {
+			n.thrEMA = (1-c)*n.thrEMA + c*thr
+		}
+		n.lastThr = thr
+		n.thrSample = now
+	}
 }
 
 func (n *nodeRTTInfo) onFailure(now time.Time) {
@@ -150,6 +166,13 @@ func (n *nodeRTTInfo) snapshot() (srtt, rttvar, minrtt float64, last time.Time, 
 	defer n.mu.Unlock()
 
 	return n.srttMs, n.rttvarMs, n.minRttMs, n.lastSample, n.failStreak
+}
+
+func (n *nodeRTTInfo) throughputSnapshot() (ema, last float64, sampleAt time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	return n.thrEMA, n.lastThr, n.thrSample
 }
 
 func (n *nodeRTTInfo) calcTimeout() time.Duration {
@@ -177,7 +200,7 @@ func (f *PreFetcher) balancer() {
 
 	defer f.torrent.wake.fire()
 
-	scoreOf := func(ok bool, rtt, fails, upStreak, downStreak int64, inflight, max int32) float64 {
+	scoreOf := func(ok bool, rtt, fails, upStreak, downStreak, lowRate int64, inflight, max int32) float64 {
 		if rtt <= 0 {
 			rtt = 3000
 		}
@@ -208,8 +231,9 @@ func (f *PreFetcher) balancer() {
 
 		u := float64(min64(upStreak, 8))
 		d := float64(min64(downStreak, 6))
+		lr := float64(min64(lowRate, 4))
 
-		mult := math.Pow(0.90, u) * math.Pow(1.25, d)
+		mult := math.Pow(0.90, u) * math.Pow(1.25, d) * math.Pow(1.15, lr)
 
 		if mult < 0.6 {
 			mult = 0.6
@@ -295,11 +319,11 @@ func (f *PreFetcher) balancer() {
 				bestCurInflight := bestNode.conn.inflightPieces.Load()
 				bestMaxInflight := bestNode.conn.maxInflightPieces.Load()
 
-				thisScore := scoreOf(rttInfo.IsLastSuccess.Load(), rttInfo.LastRTT.Load(), int64(fails), rttInfo.UpStreak.Load(), rttInfo.DownStreak.Load(),
+				thisScore := scoreOf(rttInfo.IsLastSuccess.Load(), rttInfo.LastRTT.Load(), int64(fails), rttInfo.UpStreak.Load(), rttInfo.DownStreak.Load(), rttInfo.LowRateStreak.Load(),
 					curInflight, maxInflight)
 
 				bestScore := scoreOf(bestNodeRttInfo.IsLastSuccess.Load(), bestNodeRttInfo.LastRTT.Load(), int64(bestNodeFails),
-					bestNodeRttInfo.UpStreak.Load(), bestNodeRttInfo.DownStreak.Load(),
+					bestNodeRttInfo.UpStreak.Load(), bestNodeRttInfo.DownStreak.Load(), bestNodeRttInfo.LowRateStreak.Load(),
 					bestCurInflight, bestMaxInflight)
 
 				// balance load
@@ -393,9 +417,9 @@ func (f *PreFetcher) balancer() {
 
 					if curMax > 1 && lastChange < time.Now().UnixMilli()-minChangeMs {
 						bestNodeRttInfo.DownStreak.Add(1)
-						bestNodeRttInfo.UpStreak.Add(0)
+						bestNodeRttInfo.UpStreak.Store(0)
 
-						// fmt.Println("-- FAIL", bestNode.nodeAddr, rtt, curMax)
+						fmt.Println("-- FAIL", bestNode.nodeAddr, rtt, curMax)
 
 						if bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, curMax-1) {
 							bestNodeRttInfo.LastChange.Store(time.Now().UnixMilli())
@@ -406,6 +430,7 @@ func (f *PreFetcher) balancer() {
 
 					bestNodeRttInfo.StableCount.Store(0)
 					bestNodeRttInfo.IsLastSuccess.Store(false)
+					bestNodeRttInfo.LowRateStreak.Store(0)
 					Logger("[STORAGE] BAG", hex.EncodeToString(f.torrent.BagID), "PIECE", piece, "DOWNLOADED FAILED FROM", bestNode.conn.adnl.RemoteAddr(), hex.EncodeToString(bestNode.nodeId), "TOOK", rtt, "MS,", "INFLIGHT", bestNode.conn.inflightPieces.Load(), "MAX", bestNode.conn.maxInflightPieces.Load(), "REASON", err.Error())
 				}
 
@@ -422,9 +447,11 @@ func (f *PreFetcher) balancer() {
 
 			bestNodeRttInfo.IsLastSuccess.Store(true)
 			bestNodeRttInfo.LastRTT.Store(rtt)
-			bestNodeRttInfo.onSuccessSample(rtt, time.Now())
+			now := time.Now()
+			bestNodeRttInfo.onSuccessSample(rtt, len(pc.Data), now)
 
 			srtt, rttvar, minrtt, _, _ := bestNodeRttInfo.snapshot()
+			emaThr, lastThr, thrSample := bestNodeRttInfo.throughputSnapshot()
 
 			if srtt > 0 {
 				queueMs := float64(rtt) - minrtt
@@ -435,9 +462,25 @@ func (f *PreFetcher) balancer() {
 				incThresh := srtt + 1.15*rttvar
 				decThresh := srtt + 3*rttvar
 
-				nowMs = time.Now().UnixMilli()
+				nowMs = now.UnixMilli()
 
-				if float64(rtt) <= incThresh && queueMs <= 0.25*srtt {
+				var lowRate bool
+				if emaThr > 0 {
+					if lastThr >= 0.9*emaThr {
+						bestNodeRttInfo.LowRateStreak.Store(0)
+					} else if thrSample.After(now.Add(-2*time.Second)) && lastThr < 0.6*emaThr {
+						if bestNodeRttInfo.LowRateStreak.Add(1) >= 3 {
+							lowRate = true
+							bestNodeRttInfo.LowRateStreak.Store(0)
+						}
+					} else {
+						bestNodeRttInfo.LowRateStreak.Store(0)
+					}
+				} else {
+					bestNodeRttInfo.LowRateStreak.Store(0)
+				}
+
+				if !lowRate && float64(rtt) <= incThresh && queueMs <= 0.25*srtt {
 					stable := bestNodeRttInfo.StableCount.Add(1)
 
 					minChangeMs := int64(srtt * 1.1)
@@ -453,19 +496,19 @@ func (f *PreFetcher) balancer() {
 					if stable >= int64(need) && lastChange < nowMs-minChangeMs {
 						if bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, curMax+1) {
 							bestNodeRttInfo.UpStreak.Add(1)
-							bestNodeRttInfo.DownStreak.Add(0)
+							bestNodeRttInfo.DownStreak.Store(0)
 
-							// fmt.Println("-- UP", bestNode.nodeAddr, rtt, incThresh, curMax)
+							fmt.Println("-- UP", bestNode.nodeAddr, rtt, incThresh, curMax)
 
 							bestNodeRttInfo.LastChange.Store(nowMs)
 							bestNodeRttInfo.StableCount.Store(0)
 						}
 					}
-				} else if float64(rtt) >= decThresh || queueMs > 0.8*srtt {
+				} else if lowRate || float64(rtt) >= decThresh || queueMs > 0.8*srtt {
 					bestNodeRttInfo.DownStreak.Add(1)
-					bestNodeRttInfo.UpStreak.Add(0)
+					bestNodeRttInfo.UpStreak.Store(0)
 
-					// fmt.Println("-- DOWN", bestNode.nodeAddr, rtt, rttvar, srtt, queueMs, incThresh, decThresh, curMax)
+					fmt.Println("-- DOWN", bestNode.nodeAddr, rtt, rttvar, srtt, queueMs, incThresh, decThresh, curMax)
 
 					if curMax > 1 && bestNode.conn.maxInflightPieces.CompareAndSwap(curMax, curMax-1) {
 						bestNodeRttInfo.LastChange.Store(nowMs)

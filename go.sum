@@ -113,12 +113,10 @@ github.com/ton-blockchain/adnl-tunnel v0.1.7/go.mod h1:K1ZjTRZ7BhKbyqp2pRiF7RF0S
 github.com/xo/terminfo v0.0.0-20210125001918-ca9a967f8778/go.mod h1:2MuV+tbUrU1zIOPMxZ5EncGwgmMJsa+9ucAQZXxsObs=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=
 github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e/go.mod h1:RbqR21r5mrJuqunuUZ/Dhy/avygyECGrLceyNeo4LiM=
-github.com/xssnick/raptorq v1.2.0 h1:ts8yjB3Xns3GS4V7/xQLx9lYLAlSwzlvJjGDLscZCDA=
-github.com/xssnick/raptorq v1.2.0/go.mod h1:kgEVVsZv2hP+IeV7C7985KIFsDdvYq2ARW234SBA9Q4=
+github.com/xssnick/raptorq v1.3.0 h1:3GoaySKMg/i8rbjhIuqjxpTTO2l3Gs2/Gh7k3GAjvGo=
+github.com/xssnick/raptorq v1.3.0/go.mod h1:kgEVVsZv2hP+IeV7C7985KIFsDdvYq2ARW234SBA9Q4=
 github.com/xssnick/ton-payment-network v1.2.2 h1:493PkG67CgFaGVGIs3aH0J3lXGm5PFpVXX7IZaLC/Mw=
 github.com/xssnick/ton-payment-network v1.2.2/go.mod h1:V57JlCpRI3i4bECXgTmKMOeHUz0jhJH6YmrYdA+Ro7k=
-github.com/xssnick/tonutils-go v1.15.1 h1:aOCAIqyNpC0lALRo+N0dlYvdGlciNLjkcr9YgPXY1NY=
-github.com/xssnick/tonutils-go v1.15.1/go.mod h1:rpahE9aWb+Jsj1CZezPpJH0Bu5d8vRPYvYKT7Z67MSA=
 github.com/xssnick/tonutils-storage-provider v0.3.11 h1:njbOKR+VHgzQnbKn4YHrdoKZ3XV/ytVnX/as1q+QkY4=
 github.com/xssnick/tonutils-storage-provider v0.3.11/go.mod h1:h0BPPAuCUJonMtOD8xuINe8T3Bg/DXUBTP9jOyhpDxc=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=
