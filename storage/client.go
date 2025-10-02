@@ -225,6 +225,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		}
 
 		pf := NewPreFetcher(globalCtx, t, nil, hdrPieces, hdrMask)
+		defer pf.Stop()
 
 		data := make([]byte, 0, uint64(hdrPieces)*uint64(t.Info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
@@ -236,6 +237,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 			}
 			data = append(data, piece...)
 			proofs = append(proofs, proof)
+			pf.Free(i)
 		}
 
 		var header TorrentHeader
