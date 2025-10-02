@@ -71,7 +71,6 @@ func (f *PreFetcher) WaitGet(ctx context.Context, piece uint32) ([]byte, []byte,
 	}
 	f.mx.RUnlock()
 
-	defer f.torrent.wake.fire()
 	for {
 		f.mx.RLock()
 		if p := f.pieces[piece]; p != nil {
@@ -98,6 +97,7 @@ func (f *PreFetcher) Free(piece uint32) {
 	}
 	delete(f.pieces, piece)
 	f.processed.Add(1)
+	f.torrent.wake.fire()
 }
 
 type nodeRTTInfo struct {
@@ -405,7 +405,7 @@ func (f *PreFetcher) balancer() {
 			if minChangeMs < 50 {
 				minChangeMs = 50
 			}
-			
+
 			if srtt > 0 {
 				queueMs := float64(rtt) - minrtt
 				diff := queueMs / (minrtt + 50)

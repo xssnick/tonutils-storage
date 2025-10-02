@@ -152,7 +152,11 @@ func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error
 							continue
 						}
 
-						jobs <- job{piece: i, res: results}
+						select {
+						case <-ctxWorker.Done():
+							return
+						case jobs <- job{piece: i, res: results}:
+						}
 					}
 				}()
 
