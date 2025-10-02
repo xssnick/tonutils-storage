@@ -11,13 +11,21 @@ import (
 )
 
 type PeerConnection struct {
+	node          *overlay.Node
 	rldp          overlay.RLDP
 	adnl          adnl.Peer
 	rldpQueue     chan struct{}
 	bagsInitQueue chan struct{}
 
-	inflightPieces    atomic.Int32
-	maxInflightPieces atomic.Int32
+	InflightPieces    atomic.Int32
+	MaxInflightPieces atomic.Int32
+
+	StableCount   atomic.Int64
+	UnstableCount atomic.Int64
+	IsLastSuccess atomic.Bool
+	LastChange    atomic.Int64
+	UpStreak      atomic.Int64
+	DownStreak    atomic.Int64
 
 	mx         sync.RWMutex
 	usedByBags map[string]*storagePeer

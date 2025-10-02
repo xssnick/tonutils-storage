@@ -268,8 +268,8 @@ func main() {
 	}
 
 	listenThreads := runtime.NumCPU()
-	if listenThreads > 40 {
-		listenThreads = 40
+	if listenThreads > 80 {
+		listenThreads = 80
 	}
 	if *ListenThreads > 0 {
 		listenThreads = *ListenThreads

@@ -55,6 +55,7 @@ type storagePeer struct {
 	torrent      *Torrent
 	nodeAddr     string
 	overlay      []byte
+	overlayNode  *overlay.Node
 	nodeId       []byte
 	sessionId    int64
 	sessionSeqno int64
