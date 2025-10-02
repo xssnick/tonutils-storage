@@ -229,7 +229,7 @@ func (t *Torrent) GetFilesInPiece(piece uint32) ([]*FileInfo, error) {
 		if fileStart >= end {
 			break
 		}
-		if fileEnd < start {
+		if fileEnd <= start {
 			continue
 		}
 

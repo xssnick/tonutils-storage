@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-var DownloadPrefetch = runtime.NumCPU() * 2 * 16
+var DownloadPrefetch = uint32(runtime.NumCPU() * 2 * 16)
 
 type fileInfo struct {
 	path string
@@ -152,7 +152,11 @@ func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error
 							continue
 						}
 
-						jobs <- job{piece: i, res: results}
+						select {
+						case <-ctxWorker.Done():
+							return
+						case jobs <- job{piece: i, res: results}:
+						}
 					}
 				}()
 
@@ -343,20 +347,17 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 		}
 
-		pieces := make([]uint32, 0, len(piecesMap))
+		pieces := make([]byte, t.Info.PiecesNum())
 		for p := range piecesMap {
-			pieces = append(pieces, p)
+			pieces[p] = 1
 		}
 
-		sort.Slice(pieces, func(i, j int) bool {
-			return pieces[i] < pieces[j]
-		})
 		sort.Slice(list, func(i, j int) bool {
 			return uint64(list[i].info.ToPiece)<<32+uint64(list[i].info.ToPieceOffset) <
 				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
 		})
 
-		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(pieces)}})
+		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(piecesMap)}})
 		if len(pieces) > 0 {
 			if err := t.prepareDownloader(ctx); err != nil {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
@@ -364,7 +365,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, t.downloader, report, DownloadPrefetch, pieces)
+				fetch := NewPreFetcher(ctx, t, report, DownloadPrefetch, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
@@ -379,7 +380,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 				left := len(pieces)
 				ready := make(chan uint32, DownloadPrefetch)
-				fetch := NewPreFetcher(ctx, t, t.downloader, func(event Event) {
+				fetch := NewPreFetcher(ctx, t, func(event Event) {
 					if event.Name == EventPieceDownloaded {
 						ready <- event.Value.(uint32)
 					}
@@ -394,7 +395,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 					select {
 					case e := <-ready:
 						err := func(piece uint32) error {
-							currentPiece, currentProof, err := fetch.Get(ctx, piece)
+							currentPiece, currentProof, err := fetch.WaitGet(ctx, piece)
 							if err != nil {
 								return fmt.Errorf("failed to download piece %d: %w", piece, err)
 							}
@@ -554,7 +555,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						}
 
 						pieceStartFileIndex = off.info.Index
-						currentPiece, currentProof, err = fetch.Get(ctx, piece)
+						currentPiece, currentProof, err = fetch.WaitGet(ctx, piece)
 						if err != nil {
 							return fmt.Errorf("failed to download piece %d: %w", piece, err)
 						}

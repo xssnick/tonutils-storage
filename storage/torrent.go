@@ -10,7 +10,9 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
 	"math/bits"
+	"math/rand"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -95,6 +97,14 @@ type TorrentStats struct {
 	Uploaded uint64
 }
 
+type KnownNode struct {
+	Node       atomic.Pointer[overlay.Node]
+	FailStreak atomic.Uint32
+	InProgress atomic.Bool
+
+	TriedAt time.Time
+}
+
 type Torrent struct {
 	BagID          []byte
 	Path           string
@@ -112,7 +122,7 @@ type Torrent struct {
 	connector  NetConnector
 	downloader TorrentDownloader
 
-	knownNodes map[string]*overlay.Node
+	knownNodes map[string]*KnownNode
 	peers      map[string]*PeerInfo
 	peersMx    sync.RWMutex
 
@@ -143,6 +153,8 @@ type Torrent struct {
 	currentDownloadFlag *bool
 	stopDownload        func()
 
+	wake *wakeSig
+
 	opWg sync.WaitGroup
 }
 
@@ -163,10 +175,11 @@ func NewTorrent(path string, db Storage, connector NetConnector) *Torrent {
 		Path:            path,
 		CreatedAt:       time.Now(),
 		peers:           map[string]*PeerInfo{},
-		knownNodes:      map[string]*overlay.Node{},
+		knownNodes:      map[string]*KnownNode{},
 		db:              db,
 		connector:       connector,
 		signalNewPieces: make(chan struct{}, 1),
+		wake:            newWakeSig(),
 	}
 
 	// create as stopped
@@ -220,12 +233,16 @@ func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
 }
 
 func (t *Torrent) Stop() {
+	defer t.wake.fire()
+
 	t.activeUpload = false
 	t.pause()
 }
 
 func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
 	t.activeUpload = withUpload
+
+	defer t.wake.fire()
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
@@ -287,8 +304,10 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 	ticker := time.NewTicker(5 * time.Millisecond)
 	defer ticker.Stop()
 
+	connInflight := make(chan bool, 3)
+
+	var lastUpdatePiecesSeqno int64
 	for {
-		var updatePieces bool
 		select {
 		case <-workerCtx.Done():
 			t.peersMx.RLock()
@@ -303,26 +322,50 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 			}
 
 			return
-		case <-t.signalNewPieces:
-			updatePieces = true
 		case <-ticker.C:
+			select {
+			case <-t.signalNewPieces:
+				lastUpdatePiecesSeqno++
+			default:
+			}
 		}
 		ticker.Reset(time.Second)
 
 		t.peersMx.RLock()
 		peers := make([]*storagePeer, 0, len(t.peers))
+		known := make([]*KnownNode, 0, len(t.knownNodes))
 		for _, peer := range t.peers {
 			peers = append(peers, peer.peer)
 		}
+		for id, k := range t.knownNodes {
+			if t.peers[id] != nil {
+				continue
+			}
+			known = append(known, k)
+		}
 		t.peersMx.RUnlock()
 
+		rand.Shuffle(len(known), func(i, j int) {
+			known[i], known[j] = known[j], known[i]
+		})
+
+		sort.Slice(peers, func(i, j int) bool {
+			return peers[i].lastUpdatePiecesSeqno < peers[j].lastUpdatePiecesSeqno
+		})
+
+		var updates = 0
+		now := time.Now().UnixMilli()
 		wg := sync.WaitGroup{}
 		for _, peer := range peers {
 			if atomic.LoadInt32(&peer.sessionInitialized) == 0 {
 				continue
 			}
 
-			if updatePieces {
+			if updates < 3 && peer.lastUpdatePiecesSeqno < lastUpdatePiecesSeqno && peer.lastUpdatePiecesAt+1000 < now {
+				peer.lastUpdatePiecesAt = now
+				peer.lastUpdatePiecesSeqno = lastUpdatePiecesSeqno
+				updates++ // limit per cycle to not overload network
+
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -380,6 +423,50 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 				}()
 			}
 		}
+
+	loop:
+		for _, node := range known {
+			stk := node.FailStreak.Load()
+			if stk > 8 {
+				stk = 8
+			}
+
+			secDelay := 30 * (1 << stk) // exp backoff
+			if secDelay > 1800 {
+				secDelay = 1800
+			}
+
+			if node.TriedAt.Add(time.Duration(secDelay)*time.Second).After(time.Now()) || node.InProgress.Load() {
+				continue
+			}
+
+			select {
+			case connInflight <- true:
+				node.TriedAt = time.Now()
+				node.InProgress.Store(true)
+			default:
+				break loop
+			}
+
+			go func() {
+				defer func() {
+					// free slot
+					<-connInflight
+					node.InProgress.Store(false)
+				}()
+
+				ctx, cancel := context.WithTimeout(workerCtx, 90*time.Second)
+				err := t.connector.ConnectToNode(ctx, t, node.Node.Load(), nil)
+				cancel()
+				if err != nil {
+					node.FailStreak.Add(1)
+					Logger("[STORAGE_PEERS] CONNECT TO NODE FAILED", err.Error())
+					return
+				}
+				node.FailStreak.Store(0)
+			}()
+		}
+
 		wg.Wait()
 	}
 }
@@ -651,8 +738,8 @@ func (t *Torrent) SetInfoStats(pieceSize uint32, headerData, rootHash []byte, fi
 
 func (t *Torrent) transmitTimeout() time.Duration {
 	timeout := time.Duration(t.Info.PieceSize/(256<<10)) * time.Second
-	if timeout < 7*time.Second {
-		return 7 * time.Second
+	if timeout < 15*time.Second {
+		return 15 * time.Second
 	} else if timeout > 60*time.Second {
 		return 60 * time.Second
 	}

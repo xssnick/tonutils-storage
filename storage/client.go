@@ -42,52 +42,41 @@ type FileInfo struct {
 }
 
 type TorrentDownloader interface {
-	DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (data []byte, proof []byte, peer []byte, peerAddr string, err error)
 	Close()
 	IsActive() bool
 }
 
 type torrentDownloader struct {
-	torrent *Torrent
-
 	globalCtx      context.Context
 	downloadCancel func()
-
-	mx sync.Mutex
-}
-
-type pieceResponse struct {
-	index int32
-	node  *storagePeer
-	piece Piece
-	err   error
 }
 
 type storagePeer struct {
 	torrent      *Torrent
 	nodeAddr     string
 	overlay      []byte
+	overlayNode  *overlay.Node
 	nodeId       []byte
 	sessionId    int64
 	sessionSeqno int64
 	conn         *PeerConnection
 
-	currentPing        int64
-	lastPingAt         time.Time
-	lastNeighboursAt   time.Time
-	sessionInitialized int32
-	sessionInitAt      int64
-	updateInitReceived int32
+	currentPing           int64
+	lastPingAt            time.Time
+	lastNeighboursAt      time.Time
+	sessionInitialized    int32
+	sessionInitAt         int64
+	updateInitReceived    int32
+	lastUpdatePiecesAt    int64
+	lastUpdatePiecesSeqno int64
 
 	lastSentPieces []byte
 	hasPieces      map[uint32]bool
 	piecesMx       sync.RWMutex
 	prepareInfoMx  sync.Mutex
 
-	fails            int32
-	failAt           int64
-	inflight         int32
-	maxInflightScore int32
+	fails  int32
+	failAt int64
 
 	closeOnce sync.Once
 
@@ -107,7 +96,7 @@ type TorrentInfo struct {
 	Description tlb.Text `tlb:"."`
 }
 
-type speedLimit struct {
+type SpeedLimit struct {
 	bytesPerSec uint64
 	bucket      unsafe.Pointer
 }
@@ -120,20 +109,20 @@ type TorrentServer interface {
 }
 
 type Connector struct {
-	downloadLimit *speedLimit
-	uploadLimit   *speedLimit
+	downloadLimit *SpeedLimit
+	uploadLimit   *SpeedLimit
 	TorrentServer
 }
 
 func NewConnector(srv TorrentServer) *Connector {
 	return &Connector{
 		TorrentServer: srv,
-		downloadLimit: &speedLimit{},
-		uploadLimit:   &speedLimit{},
+		downloadLimit: &SpeedLimit{},
+		uploadLimit:   &SpeedLimit{},
 	}
 }
 
-func (s *speedLimit) SetLimit(bytesPerSec uint64) {
+func (s *SpeedLimit) SetLimit(bytesPerSec uint64) {
 	if bytesPerSec == 0 {
 		atomic.StoreUint64(&s.bytesPerSec, 0)
 		atomic.StorePointer(&s.bucket, unsafe.Pointer(nil))
@@ -150,11 +139,11 @@ func (s *speedLimit) SetLimit(bytesPerSec uint64) {
 	atomic.StorePointer(&s.bucket, unsafe.Pointer(b))
 }
 
-func (s *speedLimit) GetLimit() uint64 {
+func (s *SpeedLimit) GetLimit() uint64 {
 	return atomic.LoadUint64(&s.bytesPerSec)
 }
 
-func (s *speedLimit) Throttle(_ context.Context, sz uint64) error {
+func (s *SpeedLimit) Throttle(_ context.Context, sz uint64) error {
 	b := (*leakybucket.LeakyBucket)(atomic.LoadPointer(&s.bucket))
 	if b != nil {
 		full := uint64(b.Capacity())
@@ -204,7 +193,6 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 
 	globalCtx, downloadCancel := context.WithCancel(ctx)
 	var dow = &torrentDownloader{
-		torrent:        t,
 		globalCtx:      globalCtx,
 		downloadCancel: downloadCancel,
 	}
@@ -215,7 +203,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 	}()
 
 	// connect to first node and resolve torrent info
-	for dow.torrent.Info == nil {
+	for t.Info == nil {
 		select {
 		case <-ctx.Done():
 			err = fmt.Errorf("failed to find storage nodes for this bag, err: %w", ctx.Err())
@@ -224,23 +212,32 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		}
 	}
 
-	if dow.torrent.Header == nil {
-		hdrPieces := dow.torrent.Info.HeaderSize / uint64(dow.torrent.Info.PieceSize)
-		if dow.torrent.Info.HeaderSize%uint64(dow.torrent.Info.PieceSize) > 0 {
+	if t.Header == nil {
+		hdrPieces := uint32(t.Info.HeaderSize / uint64(t.Info.PieceSize))
+		if t.Info.HeaderSize%uint64(t.Info.PieceSize) > 0 {
 			// add not full piece
 			hdrPieces++
 		}
 
-		data := make([]byte, 0, hdrPieces*uint64(dow.torrent.Info.PieceSize))
+		hdrMask := make([]byte, hdrPieces)
+		for i := range hdrPieces {
+			hdrMask[i] = 1
+		}
+
+		pf := NewPreFetcher(globalCtx, t, nil, hdrPieces, hdrMask)
+		defer pf.Stop()
+
+		data := make([]byte, 0, uint64(hdrPieces)*uint64(t.Info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
-		for i := uint32(0); i < uint32(hdrPieces); i++ {
-			piece, proof, _, _, pieceErr := dow.DownloadPieceDetailed(globalCtx, i)
+		for i := uint32(0); i < hdrPieces; i++ {
+			piece, proof, pieceErr := pf.WaitGet(globalCtx, i)
 			if pieceErr != nil {
 				err = fmt.Errorf("failed to get header piece %d, err: %w", i, pieceErr)
 				return nil, err
 			}
 			data = append(data, piece...)
 			proofs = append(proofs, proof)
+			pf.Free(i)
 		}
 
 		var header TorrentHeader
@@ -267,10 +264,10 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 			return nil, err
 		}
 
-		dow.torrent.Header = &header
+		t.Header = &header
 
 		for i, proof := range proofs {
-			err = dow.torrent.setPiece(uint32(i), &PieceInfo{
+			err = t.setPiece(uint32(i), &PieceInfo{
 				StartFileIndex: 0,
 				Proof:          proof,
 			}, true)
@@ -297,6 +294,7 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 	defer func() {
 		if err == nil {
 			atomic.StoreInt32(&p.sessionInitialized, 1)
+			p.torrent.wake.fire()
 
 			Logger("[STORAGE] SESSION INITIALIZED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", atomic.LoadInt64(&p.sessionId))
 			return
@@ -363,18 +361,15 @@ func (p *storagePeer) ping(ctx context.Context) error {
 	return nil
 }
 
-func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, error) {
+func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int64, error) {
+	tm := time.Now()
+
 	var piece Piece
 	err := func() error {
-		tm := time.Now()
-		reqCtx, cancel := context.WithTimeout(ctx, p.torrent.transmitTimeout())
-		err := p.conn.rldp.DoQuery(reqCtx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
-		cancel()
+		err := p.conn.rldp.DoQuery(ctx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
 		if err != nil {
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 		}
-		Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "DOWNLOAD TOOK:", time.Since(tm).String())
-		// tm = time.Now()
 
 		proof, err := cell.FromBOC(piece.Proof)
 		if err != nil {
@@ -392,127 +387,29 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, err
 		}
 
 		p.torrent.UpdateDownloadedPeer(p, uint64(len(piece.Data)))
-		// Logger("[STORAGE] LOAD PIECE", id, "FROM", p.nodeAddr, "VERIFICATION TOOK:", time.Since(tm).String())
 
 		return nil
 	}()
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
-			return nil, err
+			return nil, time.Since(tm).Milliseconds(), err
 		}
 
-		Logger("[STORAGE] LOAD PIECE FROM", p.nodeAddr, "ERR:", err.Error())
-
 		now := time.Now().Unix()
-		if old := atomic.LoadInt64(&p.failAt); old < time.Now().Unix()-1 {
-			if atomic.CompareAndSwapInt64(&p.failAt, old, now) {
-				atomic.AddInt32(&p.fails, 1)
-			}
-
+		if old := atomic.LoadInt64(&p.failAt); old < now-1 && atomic.CompareAndSwapInt64(&p.failAt, old, now) {
 			// in case 3 fails with 2s delay in a row, disconnect
-			if atomic.LoadInt32(&p.fails) >= 3 {
+			if atomic.AddInt32(&p.fails, 1) >= 3 {
 				Logger("[STORAGE] TOO MANY FAILS FROM", p.nodeAddr, "CLOSING CONNECTION, ERR:", err.Error())
 				// something wrong, close connection, we should reconnect after it
 				p.Close()
 			}
 		}
-		return nil, err
+		return nil, time.Since(tm).Milliseconds(), err
 	}
 	atomic.StoreInt32(&p.fails, 0)
 	atomic.StoreInt64(&p.failAt, 0)
 
-	return &piece, nil
-}
-
-var DownloadMaxInflightScore = int32(400)
-
-// DownloadPieceDetailed - same as DownloadPiece, but also returns proof data
-func (t *torrentDownloader) DownloadPieceDetailed(ctx context.Context, pieceIndex uint32) (piece []byte, proof []byte, peer []byte, peerAddr string, err error) {
-	skip := map[string]*storagePeer{}
-	for {
-		peers := t.torrent.GetPeers()
-
-		var bestNode *storagePeer
-
-		const maxPerPeer = 120
-		t.mx.Lock()
-		{
-			for _, node := range peers {
-				if skip[string(node.peer.nodeId)] != nil {
-					continue
-				}
-
-				if atomic.LoadInt32(&node.peer.sessionInitialized) == 0 {
-					continue
-				}
-
-				inf := atomic.LoadInt32(&node.peer.inflight)
-				if inf > atomic.LoadInt32(&node.peer.maxInflightScore) {
-					continue
-				}
-
-				if bestNode != nil && atomic.LoadInt32(&bestNode.inflight) < inf {
-					continue
-				}
-
-				if fl := atomic.LoadInt32(&node.peer.conn.inflightPieces); fl >= maxPerPeer {
-					continue
-				}
-
-				node.peer.piecesMx.RLock()
-				hasPiece := node.peer.hasPieces[pieceIndex]
-				node.peer.piecesMx.RUnlock()
-
-				if hasPiece {
-					bestNode = node.peer
-				}
-			}
-
-			if bestNode != nil {
-				if was := atomic.LoadInt32(&bestNode.conn.inflightPieces); was >= maxPerPeer || !atomic.CompareAndSwapInt32(&bestNode.conn.inflightPieces, was, was+1) {
-					bestNode = nil
-				} else {
-					atomic.AddInt32(&bestNode.inflight, 1)
-				}
-			}
-		}
-		t.mx.Unlock()
-
-		if bestNode == nil {
-			select {
-			case <-ctx.Done():
-				return nil, nil, nil, "", ctx.Err()
-			case <-time.After(5 * time.Millisecond):
-				skip = map[string]*storagePeer{}
-				// no nodes, wait
-			}
-			continue
-		}
-
-		// tm := time.Now()
-		pc, err := bestNode.downloadPiece(ctx, pieceIndex)
-		atomic.AddInt32(&bestNode.conn.inflightPieces, -1)
-		// log.Println("DW", pieceIndex, bestNode.nodeAddr, time.Since(tm).String(), err)
-		atomic.AddInt32(&bestNode.inflight, -1)
-		if err != nil {
-			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x > 5 {
-				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x-1)
-			}
-
-			skip[string(bestNode.nodeId)] = bestNode
-			continue
-		} else {
-			if x := atomic.LoadInt32(&bestNode.maxInflightScore); x < 60 {
-				atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x+1)
-			}
-		}
-
-		if x := atomic.LoadInt32(&bestNode.maxInflightScore); x < DownloadMaxInflightScore {
-			atomic.CompareAndSwapInt32(&bestNode.maxInflightScore, x, x+1)
-		}
-
-		return pc.Data, pc.Proof, bestNode.nodeId, bestNode.nodeAddr, nil
-	}
+	return &piece, time.Since(tm).Milliseconds(), nil
 }
 
 func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) error {

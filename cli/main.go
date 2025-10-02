@@ -97,6 +97,7 @@ func main() {
 		fallthrough
 	case 12:
 		rldp.Logger = log.Logger.Println
+		rldp.BBRLogger = log.Logger.Println
 		fallthrough
 	case 11:
 		storage.Logger = log.Logger.Println
@@ -267,8 +268,8 @@ func main() {
 	}
 
 	listenThreads := runtime.NumCPU()
-	if listenThreads > 40 {
-		listenThreads = 40
+	if listenThreads > 80 {
+		listenThreads = 80
 	}
 	if *ListenThreads > 0 {
 		listenThreads = *ListenThreads

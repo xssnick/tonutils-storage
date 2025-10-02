@@ -49,7 +49,8 @@ func (t *Torrent) RemovePeer(id []byte) {
 	defer t.peersMx.Unlock()
 
 	delete(t.peers, strId)
-	delete(t.knownNodes, strId)
+
+	t.wake.fire()
 }
 
 func (t *Torrent) GetPeer(id []byte) *PeerInfo {
@@ -89,10 +90,16 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 			uploadSpeed:   &speedInfo{},
 			downloadSpeed: &speedInfo{},
 		}
+		p.peer = peer
+		p.Addr = peer.nodeAddr
+
 		t.peers[strId] = p
+	} else {
+		p.peer = peer
+		p.Addr = peer.nodeAddr
 	}
-	p.peer = peer
-	p.Addr = peer.nodeAddr
+	t.wake.fire()
+
 	return p
 }
 

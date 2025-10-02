@@ -26,3 +26,31 @@ func TestTorrent_IsCompleted(t *testing.T) {
 		}
 	}
 }
+
+func TestTorrent_GetFilesInPiece_NoOverlapForAdjacentFiles(t *testing.T) {
+	tr := &Torrent{
+		Info: &TorrentInfo{
+			PieceSize:  1024,
+			HeaderSize: 0,
+		},
+		Header: &TorrentHeader{
+			FilesCount: 2,
+			DataIndex:  []uint64{1024, 2048},
+			NameIndex:  []uint64{1, 2},
+			Names:      []byte("ab"),
+		},
+	}
+
+	files, err := tr.GetFilesInPiece(1)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(files) != 1 {
+		t.Fatalf("expected a single file in piece, got %d", len(files))
+	}
+
+	if files[0].Index != 1 {
+		t.Fatalf("expected file with index 1, got %d", files[0].Index)
+	}
+}

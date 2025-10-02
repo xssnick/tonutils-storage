@@ -23,6 +23,9 @@ import (
 	"time"
 )
 
+type netCapacity struct {
+}
+
 type Server struct {
 	key            ed25519.PrivateKey
 	dht            *dht.Client
@@ -32,20 +35,36 @@ type Server struct {
 	serverMode     bool
 	dhtParallelism int
 
+	netCtrl *rldp.TokenBucket
+
 	bootstrapped map[string]*PeerConnection
 	mx           sync.RWMutex
+
+	dhtCache      map[string]*dhtCacheEntry
+	dhtCacheMx    sync.RWMutex
+	findSemaphore chan struct{}
 
 	closer func()
 }
 
+type dhtCacheEntry struct {
+	addrs    *address.List
+	expireAt time.Time
+}
+
 func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool, dhtParallelism int) *Server {
+	var rateLimit = rldp.NewTokenBucket(1<<20, "storage")
+
 	s := &Server{
 		key:            key,
 		dht:            dht,
 		gate:           gate,
+		netCtrl:        rateLimit,
 		bootstrapped:   map[string]*PeerConnection{},
 		serverMode:     serverMode,
 		dhtParallelism: dhtParallelism,
+		dhtCache:       make(map[string]*dhtCacheEntry),
+		findSemaphore:  make(chan struct{}, dhtParallelism),
 	}
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
 	s.gate.SetConnectionHandler(s.bootstrapPeerWrap)
@@ -130,6 +149,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		rldpQueue:     make(chan struct{}, 10),
 		bagsInitQueue: make(chan struct{}, 8),
 	}
+	p.MaxInflightPieces.Store(1)
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
 	return p
@@ -165,8 +185,12 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 
 			peers := []overlay.Node{*node}
 			t.peersMx.RLock()
-			for _, nd := range t.knownNodes {
-				peers = append(peers, *nd)
+			for _, nd := range t.peers {
+				if nd.peer.overlayNode == nil {
+					continue
+				}
+
+				peers = append(peers, *nd.peer.overlayNode)
 				if len(peers) == 8 {
 					break
 				}
@@ -183,7 +207,7 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 				return fmt.Errorf("peer disconnected")
 			}
 
-			stNode, sessionCtx := t.prepareStoragePeer(over, p, &q.SessionID)
+			stNode, sessionCtx := t.prepareStoragePeer(over, nil, p, &q.SessionID)
 			if sessionCtx != nil {
 				go stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), false)
 			}
@@ -232,7 +256,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			return fmt.Errorf("peer disconnected")
 		}
 
-		stPeer, sessionCtx := t.prepareStoragePeer(over, p, sesId)
+		stPeer, sessionCtx := t.prepareStoragePeer(over, nil, p, sesId)
 		if sessionCtx != nil {
 			go stPeer.initializeSession(sessionCtx, atomic.LoadInt64(&stPeer.sessionId), sesId == nil)
 		}
@@ -250,8 +274,12 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			peers := []overlay.Node{*node}
 			t.peersMx.RLock()
-			for _, nd := range t.knownNodes {
-				peers = append(peers, *nd)
+			for _, nd := range t.peers {
+				if nd.peer.overlayNode == nil {
+					continue
+				}
+
+				peers = append(peers, *nd.peer.overlayNode)
 				if len(peers) == 8 {
 					break
 				}
@@ -353,6 +381,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 					}
 				}
 				stPeer.piecesMx.Unlock()
+				t.wake.fire()
 			case UpdateHavePieces:
 				var piecesNum *uint32
 				t.mx.RLock()
@@ -373,6 +402,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 					stPeer.hasPieces[uint32(d)] = true
 				}
 				stPeer.piecesMx.Unlock()
+				t.wake.fire()
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, &Ok{})
@@ -645,8 +675,15 @@ func (t *Torrent) addNode(node overlay.Node) {
 		return
 	}
 
+	strId := hex.EncodeToString(nodeId)
+
+	if node.CheckSignature() != nil {
+		Logger("[STORAGE] INCORRECT OVERLAY NODE SIGNATURE, SKIPPED", strId)
+		return
+	}
+
 	if bytes.Equal(nodeId, t.connector.GetID()) {
-		Logger("[STORAGE] SKIP OURSELF", hex.EncodeToString(nodeId))
+		Logger("[STORAGE] SKIP OURSELF", strId)
 
 		// skip ourself
 		return
@@ -655,22 +692,37 @@ func (t *Torrent) addNode(node overlay.Node) {
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
-	if t.knownNodes[hex.EncodeToString(nodeId)] == nil {
-		Logger("[STORAGE] ADD KNOWN NODE ", hex.EncodeToString(nodeId), "for", hex.EncodeToString(t.BagID))
-		t.knownNodes[hex.EncodeToString(nodeId)] = &node
+	if p := t.peers[strId]; p != nil && (p.peer.overlayNode == nil || p.peer.overlayNode.Version < node.Version) {
+		p.peer.overlayNode = &node
+		Logger("[STORAGE] UPDATED PEER OVERLAY NODE INFO", strId)
+	}
 
-		go func() {
-			ctx, cancel := context.WithTimeout(t.globalCtx, 120*time.Second)
-			defer cancel()
-
-			err := t.connector.ConnectToNode(ctx, t, &node, nil)
-			if err != nil {
-				Logger("[STORAGE] FAILED TO CONNECT TO NODE", hex.EncodeToString(nodeId), "FOR", hex.EncodeToString(t.BagID), err.Error())
-				return
+	if t.knownNodes[strId] == nil {
+		if len(t.knownNodes) > 128 { // cleanup
+			var evictKey string
+			var evictNode *KnownNode
+			for n, kn := range t.knownNodes {
+				if evictNode == nil || evictNode.FailStreak.Load() < kn.FailStreak.Load() {
+					evictNode = kn
+					evictKey = n
+					continue
+				}
 			}
-		}()
-	} else {
-		// Logger("[STORAGE] ALREADY KNOWN NODE", hex.EncodeToString(nodeId))
+
+			if evictNode != nil {
+				Logger("[STORAGE] EVICTED KNOWN NODE ", evictKey, "FOR", hex.EncodeToString(t.BagID))
+
+				delete(t.knownNodes, evictKey)
+			}
+		}
+
+		Logger("[STORAGE] ADD KNOWN NODE ", strId, "FOR", hex.EncodeToString(t.BagID))
+		n := &KnownNode{}
+		n.Node.Store(&node)
+		t.knownNodes[strId] = n
+	} else if node.Version > t.knownNodes[strId].Node.Load().Version {
+		t.knownNodes[strId].Node.Store(&node)
+		Logger("[STORAGE] UPDATED KNOWN NODE", strId)
 	}
 }
 
@@ -689,12 +741,37 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 	if peer == nil {
 		start := time.Now()
 		if addrs == nil {
-			lcCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-			addrs, _, err = s.dht.FindAddresses(lcCtx, adnlID)
-			cancel()
-			if err != nil {
-				Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID), "ERR", err.Error(), "TOOK", time.Since(start).String())
-				return fmt.Errorf("failed to find node address: %w", err)
+
+			adnlIDStr := hex.EncodeToString(adnlID)
+
+			s.dhtCacheMx.RLock()
+			if entry := s.dhtCache[adnlIDStr]; entry != nil && entry.expireAt.After(time.Now()) {
+				addrs = entry.addrs
+				s.dhtCacheMx.RUnlock()
+			} else {
+				s.dhtCacheMx.RUnlock()
+
+				select {
+				case s.findSemaphore <- struct{}{}:
+					defer func() { <-s.findSemaphore }()
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+
+				lcCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+				addrs, _, err = s.dht.FindAddresses(lcCtx, adnlID)
+				cancel()
+				if err != nil {
+					Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID), "ERR", err.Error(), "TOOK", time.Since(start).String())
+					return fmt.Errorf("failed to find node address: %w", err)
+				}
+
+				s.dhtCacheMx.Lock()
+				s.dhtCache[adnlIDStr] = &dhtCacheEntry{
+					addrs:    addrs,
+					expireAt: time.Now().Add(5 * time.Minute),
+				}
+				s.dhtCacheMx.Unlock()
 			}
 		}
 		Logger("[STORAGE] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), addrs.Addresses[0].Port, "PUBKEY", hex.EncodeToString(key.Key), "FOR", hex.EncodeToString(t.BagID), "ELAPSED", time.Since(start).Seconds())
@@ -710,7 +787,7 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		Logger("[STORAGE] HAS ALREADY ACTIVE PEER FOR NODE ", hex.EncodeToString(adnlID), "ADDR", peer.adnl.RemoteAddr(), "ADDING FOR", hex.EncodeToString(t.BagID))
 	}
 
-	stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, peer, nil)
+	stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, node, peer, nil)
 
 	select {
 	case <-ctx.Done():
@@ -962,7 +1039,7 @@ func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
 	return s.key
 }
 
-func (t *Torrent) prepareStoragePeer(over []byte, conn *PeerConnection, sessionId *int64) (*storagePeer, context.Context) {
+func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *PeerConnection, sessionId *int64) (*storagePeer, context.Context) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
@@ -993,14 +1070,14 @@ func (t *Torrent) prepareStoragePeer(over []byte, conn *PeerConnection, sessionI
 	}
 
 	stNode := &storagePeer{
-		torrent:          t,
-		nodeAddr:         conn.adnl.RemoteAddr(),
-		nodeId:           conn.adnl.GetID(),
-		conn:             conn,
-		sessionId:        *sessionId,
-		sessionInitAt:    time.Now().Unix(),
-		overlay:          over,
-		maxInflightScore: 50,
+		torrent:       t,
+		nodeAddr:      conn.adnl.RemoteAddr(),
+		nodeId:        conn.adnl.GetID(),
+		conn:          conn,
+		sessionId:     *sessionId,
+		sessionInitAt: time.Now().Unix(),
+		overlay:       over,
+		overlayNode:   oNode,
 		// TODO: bitmask
 		hasPieces: map[uint32]bool{},
 	}
