@@ -44,6 +44,9 @@ type Server struct {
 	dhtCacheMx    sync.RWMutex
 	findSemaphore chan struct{}
 
+	downloadMaxInflight atomic.Int64
+	downloadInflight    atomic.Int64
+
 	closer func()
 }
 
@@ -66,6 +69,7 @@ func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serv
 		dhtCache:       make(map[string]*dhtCacheEntry),
 		findSemaphore:  make(chan struct{}, dhtParallelism),
 	}
+	s.downloadMaxInflight.Store(300) // TODO: high limit for now, add dynamic scaling based of bandwidth
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
 	s.gate.SetConnectionHandler(s.bootstrapPeerWrap)
 
@@ -145,6 +149,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	p := &PeerConnection{
 		rldp:          rl,
 		adnl:          client,
+		srv:           s,
 		usedByBags:    map[string]*storagePeer{},
 		rldpQueue:     make(chan struct{}, 10),
 		bagsInitQueue: make(chan struct{}, 8),
@@ -769,7 +774,7 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 				s.dhtCacheMx.Lock()
 				s.dhtCache[adnlIDStr] = &dhtCacheEntry{
 					addrs:    addrs,
-					expireAt: time.Now().Add(5 * time.Minute),
+					expireAt: time.Now().Add(150 * time.Second),
 				}
 				s.dhtCacheMx.Unlock()
 			}

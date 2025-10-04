@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -159,7 +160,7 @@ func (n *nodeRTTInfo) calcTimeout() time.Duration {
 		rttvar = srtt * 0.12
 	}
 
-	rtoMs := 2*srtt + 8*rttvar
+	rtoMs := 3*srtt + 8*rttvar
 	if rtoMs > 17000 {
 		rtoMs = 17000
 	}
@@ -314,6 +315,22 @@ func (f *PreFetcher) balancer() {
 				continue
 			}
 		}
+
+		for {
+			inf := bestNode.conn.srv.downloadInflight.Load()
+			maxInf := bestNode.conn.srv.downloadMaxInflight.Load()
+			if inf >= maxInf || !bestNode.conn.srv.downloadInflight.CompareAndSwap(inf, inf+1) {
+				select {
+				case <-f.ctx.Done():
+					return
+				default:
+					runtime.Gosched()
+					continue
+				}
+			}
+
+			break
+		}
 		f.ready.Add(1) // add now to reserve slot
 
 		for {
@@ -338,6 +355,7 @@ func (f *PreFetcher) balancer() {
 		go func() {
 			defer f.torrent.wake.fire()
 			defer bestNode.conn.InflightPieces.Add(-1)
+			defer bestNode.conn.srv.downloadInflight.Add(-1)
 
 			tou := bestNodeRttInfo.calcTimeout()
 
@@ -376,6 +394,8 @@ func (f *PreFetcher) balancer() {
 						}
 					}
 
+					// log.Println("-- X", bestNode.nodeAddr, rtt, cur, curMax, bestNode.conn.srv.downloadInflight.Load())
+
 					bestNodeRttInfo.onFailure()
 
 					bestNode.conn.StableCount.Store(0)
@@ -406,22 +426,27 @@ func (f *PreFetcher) balancer() {
 				minChangeMs = 50
 			}
 
+			/*var sp uint64
+			for _, info := range f.torrent.GetPeers() {
+				sp += uint64(info.downloadSpeed.speed)
+			}*/
+
 			if srtt > 0 {
 				queueMs := float64(rtt) - minrtt
 				diff := queueMs / (minrtt + 50)
 				// diffPrc := fmt.Sprintf("%.2f", diff*100.0)
-				// fmt.Println("-- Q", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, sp)
+				// log.Println("-- Q", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, bestNode.conn.srv.downloadInflight.Load(), ToSpeed(sp))
 
 				nowMs = now.UnixMilli()
 
-				if diff < 0.25 || queueMs < 100 {
+				if diff < 0.25 || queueMs < 75 {
 					// fmt.Println("-- STABLE", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
 
 					if cur >= curMax {
 						stable := bestNode.conn.StableCount.Add(1)
 						bestNode.conn.UnstableCount.Store(0)
 
-						need := curMax * 2
+						need := curMax * 3
 						if need < 2 {
 							need = 2
 						}
@@ -444,7 +469,12 @@ func (f *PreFetcher) balancer() {
 
 					// fmt.Println("-- SLOW", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, sp)
 
-					if uns >= 3 && lastChange < nowMs-minChangeMs {
+					need := curMax / 2
+					if need < 2 {
+						need = 2
+					}
+
+					if uns >= int64(need) && lastChange < nowMs-minChangeMs {
 						if curMax > 1 && bestNode.conn.MaxInflightPieces.CompareAndSwap(curMax, curMax-1) {
 							bestNode.conn.DownStreak.Add(1)
 							bestNode.conn.UpStreak.Store(0)

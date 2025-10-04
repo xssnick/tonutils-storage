@@ -14,6 +14,7 @@ type PeerConnection struct {
 	node          *overlay.Node
 	rldp          overlay.RLDP
 	adnl          adnl.Peer
+	srv           *Server
 	rldpQueue     chan struct{}
 	bagsInitQueue chan struct{}
 
