@@ -5,12 +5,19 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"github.com/pterm/pterm"
+	"github.com/rs/zerolog"
+	"github.com/rs/zerolog/log"
+	"github.com/xssnick/tonutils-go/adnl"
+	"github.com/xssnick/tonutils-go/adnl/dht"
+	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage-provider/pkg/transport"
 	"github.com/xssnick/tonutils-storage/db"
+	"github.com/xssnick/tonutils-storage/provider"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -122,6 +129,7 @@ func (s *Server) Start(addr string) error {
 	m.HandleFunc("/api/v1/list", s.withAuth(s.handleList))
 	m.HandleFunc("/api/v1/piece/proof", s.withAuth(s.handlePieceProof))
 	m.HandleFunc("/api/v1/sign/provider", s.withAuth(s.handleSignProvider))
+	m.HandleFunc("/api/v1/logger", s.withAuth(s.handleSwitchLogger))
 
 	return http.ListenAndServe(addr, m)
 }
@@ -451,7 +459,50 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response(w, http.StatusNotFound, Ok{Ok: false})
+}
 
+func (s *Server) handleSwitchLogger(w http.ResponseWriter, r *http.Request) {
+	req := struct {
+		Verbosity int `json:"verbosity"`
+	}{}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response(w, http.StatusBadRequest, Error{err.Error()})
+		return
+	}
+
+	storage.Logger = func(v ...any) {}
+	rldp.Logger = func(v ...any) {}
+	dht.Logger = func(v ...any) {}
+	provider.Logger = func(...any) {}
+	rldp.BBRLogger = func(...any) {}
+	adnl.Logger = func(...any) {}
+
+	if req.Verbosity > 13 {
+		req.Verbosity = 13
+	}
+
+	level := zerolog.InfoLevel
+	if req.Verbosity >= 3 {
+		level = zerolog.DebugLevel
+	} else if req.Verbosity <= 1 {
+		level = zerolog.ErrorLevel
+	}
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(level)
+
+	switch req.Verbosity {
+	case 13:
+		adnl.Logger = log.Logger.Println
+		dht.Logger = log.Logger.Println
+		fallthrough
+	case 12:
+		rldp.Logger = log.Logger.Println
+		rldp.BBRLogger = log.Logger.Println
+		fallthrough
+	case 11:
+		storage.Logger = log.Logger.Println
+		provider.Logger = log.Logger.Println
+	}
+	response(w, http.StatusOK, Ok{Ok: true})
 }
 
 func (s *Server) withAuth(next func(w http.ResponseWriter, r *http.Request)) func(w http.ResponseWriter, r *http.Request) {

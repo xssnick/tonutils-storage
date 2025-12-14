@@ -64,6 +64,8 @@ var (
 	EnableTunnel        = flag.Bool("enable-tunnel", false, "Enable tunnel mode, to host files with no public ip (should be configured first)")
 	DHTParallelism      = flag.Int("dht-parallelism", 12, "Max parallel threads to search/update dht records of bags")
 	PprofEnableAddr     = flag.String("pprof-addr", "", "Enable pprof HTTP server for performance profiling on specified addr")
+	LimitDownload       = flag.Int("limit-download", 0, "Max bytes per second to download")
+	LimitUpload         = flag.Int("limit-upload", 0, "Max bytes per second to upload")
 )
 
 var GitCommit string
@@ -82,7 +84,7 @@ func main() {
 	}
 
 	storage.Logger = func(v ...any) {}
-	adnl.Logger = func(v ...any) {}
+	rldp.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
 	provider.Logger = func(...any) {}
 
@@ -323,6 +325,12 @@ func main() {
 
 	srv := storage.NewServer(dhtClient, gate, cfg.Key, serverMode, *DHTParallelism)
 	Connector = storage.NewConnector(srv)
+	if *LimitDownload > 0 {
+		Connector.SetDownloadLimit(uint64(*LimitDownload))
+	}
+	if *LimitUpload > 0 {
+		Connector.SetUploadLimit(uint64(*LimitUpload))
+	}
 
 	Storage, err = db.NewStorage(ldb, Connector, *ForcePieceSize, true, *NoVerify, *NoRemove, nil)
 	if err != nil {
