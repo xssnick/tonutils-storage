@@ -146,6 +146,9 @@ type Torrent struct {
 	searchesWithZeroPeersNum uint32
 
 	signalNewPieces chan struct{}
+	newPieces       []uint32
+	newPiecesBase   uint64
+	newPiecesMx     sync.Mutex
 
 	mx     sync.RWMutex
 	maskMx sync.RWMutex
@@ -513,6 +516,8 @@ func (t *Torrent) setPiece(id uint32, p *PieceInfo, onlyHeader bool) error {
 		return err
 	}
 
+	t.enqueueNewPiece(id)
+
 	// notify peers about our new pieces
 	select {
 	case t.signalNewPieces <- struct{}{}:
@@ -527,6 +532,104 @@ func (t *Torrent) PiecesMask() []byte {
 	defer t.maskMx.RUnlock()
 
 	return append([]byte{}, t.pieceMask...)
+}
+
+func (t *Torrent) currentNewPiecesCursor() uint64 {
+	t.newPiecesMx.Lock()
+	defer t.newPiecesMx.Unlock()
+
+	return t.newPiecesBase + uint64(len(t.newPieces))
+}
+
+func (t *Torrent) enqueueNewPiece(id uint32) {
+	t.newPiecesMx.Lock()
+	t.newPieces = append(t.newPieces, id)
+	needCompact := len(t.newPieces) >= 4096
+	t.newPiecesMx.Unlock()
+
+	if needCompact {
+		t.compactNewPieces()
+	}
+}
+
+func (t *Torrent) getNewPiecesSince(cursor uint64, limit int) ([]int32, uint64) {
+	t.newPiecesMx.Lock()
+	defer t.newPiecesMx.Unlock()
+
+	if cursor < t.newPiecesBase {
+		cursor = t.newPiecesBase
+	}
+
+	offset := int(cursor - t.newPiecesBase)
+	if offset >= len(t.newPieces) {
+		return nil, cursor
+	}
+
+	end := len(t.newPieces)
+	if limit > 0 && offset+limit < end {
+		end = offset + limit
+	}
+
+	res := make([]int32, end-offset)
+	for i, piece := range t.newPieces[offset:end] {
+		res[i] = int32(piece)
+	}
+
+	return res, t.newPiecesBase + uint64(end)
+}
+
+func (t *Torrent) compactNewPieces() {
+	t.peersMx.RLock()
+	minCursor := uint64(0)
+	hasReadyPeer := false
+	for _, info := range t.peers {
+		peer := info.peer
+		if peer == nil {
+			continue
+		}
+
+		peer.piecesMx.RLock()
+		hasInitSnapshot := peer.lastSentPieces != nil
+		peer.piecesMx.RUnlock()
+		if !peer.isSessionReady() && !hasInitSnapshot {
+			continue
+		}
+
+		cursor := atomic.LoadUint64(&peer.lastSentNewPiecesPos)
+		if !hasReadyPeer || cursor < minCursor {
+			minCursor = cursor
+			hasReadyPeer = true
+		}
+	}
+	t.peersMx.RUnlock()
+
+	t.newPiecesMx.Lock()
+	defer t.newPiecesMx.Unlock()
+
+	tail := t.newPiecesBase + uint64(len(t.newPieces))
+	if !hasReadyPeer {
+		minCursor = tail
+	}
+	if minCursor < t.newPiecesBase {
+		minCursor = t.newPiecesBase
+	}
+	if minCursor > tail {
+		minCursor = tail
+	}
+
+	drop := int(minCursor - t.newPiecesBase)
+	if drop <= 0 {
+		return
+	}
+
+	if drop >= len(t.newPieces) {
+		t.newPieces = nil
+		t.newPiecesBase = minCursor
+		return
+	}
+
+	t.newPieces = append([]uint32(nil), t.newPieces[drop:]...)
+	t.newPiecesBase = minCursor
 }
 
 func (t *Torrent) IsCompleted() bool {
