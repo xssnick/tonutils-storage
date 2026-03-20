@@ -15,7 +15,8 @@ type PeerConnection struct {
 	rldp          overlay.RLDP
 	adnl          adnl.Peer
 	srv           *Server
-	rldpQueue     chan struct{}
+	controlQueue  chan struct{}
+	dataQueue     chan struct{}
 	bagsInitQueue chan struct{}
 
 	InflightPieces    atomic.Int32
@@ -63,24 +64,46 @@ func (c *PeerConnection) GetFor(id []byte) *storagePeer {
 
 var ErrQueueIsBusy = errors.New("queue is busy")
 
-func (c *PeerConnection) AcquireQueueSlotWait(ctx context.Context) error {
+func (c *PeerConnection) AcquireControlQueueSlotWait(ctx context.Context) error {
 	select {
-	case c.rldpQueue <- struct{}{}:
+	case c.controlQueue <- struct{}{}:
 	case <-ctx.Done():
 		return ErrQueueIsBusy
 	}
 	return nil
 }
 
-func (c *PeerConnection) AcquireQueueSlot() error {
+func (c *PeerConnection) AcquireControlQueueSlot() error {
 	select {
-	case c.rldpQueue <- struct{}{}:
+	case c.controlQueue <- struct{}{}:
 	default:
 		return ErrQueueIsBusy
 	}
 	return nil
 }
 
-func (c *PeerConnection) FreeQueueSlot() {
-	<-c.rldpQueue
+func (c *PeerConnection) FreeControlQueueSlot() {
+	<-c.controlQueue
+}
+
+func (c *PeerConnection) AcquireDataQueueSlotWait(ctx context.Context) error {
+	select {
+	case c.dataQueue <- struct{}{}:
+	case <-ctx.Done():
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) AcquireDataQueueSlot() error {
+	select {
+	case c.dataQueue <- struct{}{}:
+	default:
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) FreeDataQueueSlot() {
+	<-c.dataQueue
 }

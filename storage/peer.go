@@ -46,10 +46,10 @@ func (t *Torrent) RemovePeer(id []byte) {
 	strId := hex.EncodeToString(id)
 
 	t.peersMx.Lock()
-	defer t.peersMx.Unlock()
-
 	delete(t.peers, strId)
+	t.peersMx.Unlock()
 
+	t.compactNewPieces()
 	t.wake.fire()
 }
 

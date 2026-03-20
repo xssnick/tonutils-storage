@@ -69,9 +69,20 @@ type storagePeer struct {
 	updateInitReceived    int32
 	lastUpdatePiecesAt    int64
 	lastUpdatePiecesSeqno int64
+	lastSentNewPiecesPos  uint64
 
 	lastSentPieces []byte
-	hasPieces      map[uint32]bool
+	hasPieces      []byte
+	hasPiecesNum   uint32
+
+	initExpectedChunks uint32
+	initReceivedChunks uint32
+	initChunksMask     []byte
+	lastInitChunkAt    int64
+	pendingInitChunks  map[uint32][]byte
+	pendingInitBytes   int
+	pendingHavePieces  []int32
+
 	piecesMx       sync.RWMutex
 	prepareInfoMx  sync.Mutex
 
@@ -85,6 +96,277 @@ type storagePeer struct {
 
 	closerCtx context.Context
 	stop      func()
+}
+
+const maxPendingInitBytes = 32 << 20
+const maxPendingHavePieces = 1 << 20
+
+func piecesBitsetBytes(bits uint32) int {
+	if bits == 0 {
+		return 0
+	}
+	return int((bits + 7) / 8)
+}
+
+func initChunksCount(piecesNum uint32) uint32 {
+	maskBytes := piecesBitsetBytes(piecesNum)
+	if maskBytes == 0 {
+		return 0
+	}
+
+	chunks := maskBytes / maxPiecesBytesPerRequest
+	if maskBytes%maxPiecesBytesPerRequest != 0 {
+		chunks++
+	}
+	return uint32(chunks)
+}
+
+func bitsetHas(buf []byte, id uint32) bool {
+	idx := id / 8
+	if int(idx) >= len(buf) {
+		return false
+	}
+	return buf[idx]&(1<<(id%8)) != 0
+}
+
+func bitsetSet(buf []byte, id uint32) bool {
+	idx := id / 8
+	if int(idx) >= len(buf) {
+		return false
+	}
+
+	mask := byte(1 << (id % 8))
+	if buf[idx]&mask != 0 {
+		return false
+	}
+	buf[idx] |= mask
+	return true
+}
+
+func (p *storagePeer) configurePieceTrackingLocked(piecesNum uint32, clearPending bool) {
+	p.hasPiecesNum = piecesNum
+	p.hasPieces = make([]byte, piecesBitsetBytes(piecesNum))
+	p.initExpectedChunks = initChunksCount(piecesNum)
+	p.initReceivedChunks = 0
+	p.initChunksMask = make([]byte, piecesBitsetBytes(p.initExpectedChunks))
+	if clearPending {
+		p.pendingInitChunks = nil
+		p.pendingInitBytes = 0
+		p.pendingHavePieces = nil
+	}
+}
+
+func (p *storagePeer) resetPieceTrackingLocked(piecesNum uint32) {
+	p.configurePieceTrackingLocked(piecesNum, true)
+}
+
+func (p *storagePeer) ensurePieceTrackingLocked(piecesNum uint32) {
+	if p.hasPiecesNum == piecesNum &&
+		len(p.hasPieces) == piecesBitsetBytes(piecesNum) &&
+		p.initExpectedChunks == initChunksCount(piecesNum) &&
+		len(p.initChunksMask) == piecesBitsetBytes(p.initExpectedChunks) {
+		return
+	}
+	p.configurePieceTrackingLocked(piecesNum, false)
+}
+
+func (p *storagePeer) waitForPiecesNum(ctx context.Context) (uint32, error) {
+	for {
+		p.torrent.mx.RLock()
+		info := p.torrent.Info
+		p.torrent.mx.RUnlock()
+		if info != nil {
+			return info.PiecesNum(), nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
+
+func (p *storagePeer) initProgressTimedOut(now time.Time, timeout time.Duration) bool {
+	lastProgressAt := atomic.LoadInt64(&p.lastInitChunkAt)
+	sessionInitAt := atomic.LoadInt64(&p.sessionInitAt)
+	if lastProgressAt == 0 || lastProgressAt < sessionInitAt {
+		lastProgressAt = sessionInitAt
+	}
+	if lastProgressAt == 0 {
+		return true
+	}
+	return now.UnixMilli()-lastProgressAt > timeout.Milliseconds()
+}
+
+func (p *storagePeer) hasPiece(id uint32) bool {
+	p.piecesMx.RLock()
+	defer p.piecesMx.RUnlock()
+
+	if id >= p.hasPiecesNum {
+		return false
+	}
+	return bitsetHas(p.hasPieces, id)
+}
+
+func (p *storagePeer) applyInitChunkLocked(piecesNum, off uint32, have []byte) (bool, error) {
+	p.piecesMx.Lock()
+	defer p.piecesMx.Unlock()
+	return p.applyInitChunkUnsafe(piecesNum, off, have)
+}
+
+func (p *storagePeer) applyInitChunk(piecesNum, off uint32, have []byte) (bool, error) {
+	p.piecesMx.Lock()
+	defer p.piecesMx.Unlock()
+	return p.applyInitChunkUnsafe(piecesNum, off, have)
+}
+
+func (p *storagePeer) applyInitChunkUnsafe(piecesNum, off uint32, have []byte) (bool, error) {
+	if len(have) == 0 {
+		return false, fmt.Errorf("empty init chunk")
+	}
+
+	p.ensurePieceTrackingLocked(piecesNum)
+
+	if off >= piecesNum {
+		return false, fmt.Errorf("invalid pieces offset")
+	}
+
+	chunkSpan := uint32(maxPiecesBytesPerRequest * 8)
+	if off%chunkSpan != 0 {
+		return false, fmt.Errorf("invalid init chunk offset")
+	}
+
+	chunkIdx := off / chunkSpan
+	if chunkIdx >= p.initExpectedChunks {
+		return false, fmt.Errorf("invalid init chunk index")
+	}
+
+	start := int(off / 8)
+	expectedBytes := len(p.hasPieces) - start
+	if expectedBytes > maxPiecesBytesPerRequest {
+		expectedBytes = maxPiecesBytesPerRequest
+	}
+	if expectedBytes <= 0 || len(have) != expectedBytes {
+		return false, fmt.Errorf("invalid init chunk size")
+	}
+
+	if rem := piecesNum % 8; rem != 0 && chunkIdx == p.initExpectedChunks-1 {
+		validMask := byte((1 << rem) - 1)
+		if have[len(have)-1]&^validMask != 0 {
+			return false, fmt.Errorf("invalid trailing pieces bits")
+		}
+	}
+
+	now := time.Now().UnixMilli()
+	if !bitsetSet(p.initChunksMask, chunkIdx) {
+		if !bytes.Equal(p.hasPieces[start:start+len(have)], have) {
+			return false, fmt.Errorf("conflicting init chunk")
+		}
+		atomic.StoreInt64(&p.lastInitChunkAt, now)
+		return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
+	}
+
+	copy(p.hasPieces[start:start+len(have)], have)
+	p.initReceivedChunks++
+	atomic.StoreInt64(&p.lastInitChunkAt, now)
+
+	return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
+}
+
+func (p *storagePeer) queuePendingInitChunk(off uint32, have []byte) error {
+	p.piecesMx.Lock()
+	defer p.piecesMx.Unlock()
+
+	if len(have) == 0 {
+		return fmt.Errorf("empty init chunk")
+	}
+	if len(have) > maxPiecesBytesPerRequest {
+		return fmt.Errorf("invalid init chunk size")
+	}
+
+	chunkSpan := uint32(maxPiecesBytesPerRequest * 8)
+	if off%chunkSpan != 0 {
+		return fmt.Errorf("invalid init chunk offset")
+	}
+
+	if p.pendingInitChunks == nil {
+		p.pendingInitChunks = map[uint32][]byte{}
+	}
+
+	if existing, ok := p.pendingInitChunks[off]; ok {
+		if !bytes.Equal(existing, have) {
+			return fmt.Errorf("conflicting init chunk")
+		}
+		atomic.StoreInt64(&p.lastInitChunkAt, time.Now().UnixMilli())
+		return nil
+	}
+
+	if p.pendingInitBytes+len(have) > maxPendingInitBytes {
+		return fmt.Errorf("too many pending init bytes")
+	}
+
+	copied := append([]byte(nil), have...)
+	p.pendingInitChunks[off] = copied
+	p.pendingInitBytes += len(copied)
+	atomic.StoreInt64(&p.lastInitChunkAt, time.Now().UnixMilli())
+	return nil
+}
+
+func (p *storagePeer) applyHavePiecesLocked(piecesNum uint32, pieceIDs []int32) error {
+	p.ensurePieceTrackingLocked(piecesNum)
+	for _, d := range pieceIDs {
+		if d < 0 || uint32(d) >= piecesNum {
+			return fmt.Errorf("invalid piece id in update")
+		}
+
+		_ = bitsetSet(p.hasPieces, uint32(d))
+	}
+	return nil
+}
+
+func (p *storagePeer) queuePendingHavePieces(pieceIDs []int32) error {
+	p.piecesMx.Lock()
+	defer p.piecesMx.Unlock()
+
+	for _, d := range pieceIDs {
+		if d < 0 {
+			return fmt.Errorf("invalid piece id in update")
+		}
+	}
+
+	if len(p.pendingHavePieces)+len(pieceIDs) > maxPendingHavePieces {
+		return fmt.Errorf("too many pending piece ids")
+	}
+
+	p.pendingHavePieces = append(p.pendingHavePieces, pieceIDs...)
+	return nil
+}
+
+func (p *storagePeer) flushPendingPieceUpdates(piecesNum uint32) (bool, error) {
+	p.piecesMx.Lock()
+	defer p.piecesMx.Unlock()
+
+	p.ensurePieceTrackingLocked(piecesNum)
+
+	for off, have := range p.pendingInitChunks {
+		if _, err := p.applyInitChunkUnsafe(piecesNum, off, have); err != nil {
+			return false, err
+		}
+	}
+	if len(p.pendingInitChunks) > 0 {
+		p.pendingInitChunks = nil
+		p.pendingInitBytes = 0
+	}
+
+	if len(p.pendingHavePieces) > 0 {
+		if err := p.applyHavePiecesLocked(piecesNum, p.pendingHavePieces); err != nil {
+			return false, err
+		}
+		p.pendingHavePieces = nil
+	}
+
+	return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
 }
 
 type TorrentInfo struct {
@@ -289,7 +571,11 @@ func (p *storagePeer) Close() {
 	})
 }
 
-func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) bool {
+func (p *storagePeer) isSessionReady() bool {
+	return atomic.LoadInt32(&p.sessionInitialized) == 1 && atomic.LoadInt32(&p.updateInitReceived) == 1
+}
+
+func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) error {
 	var err error
 	defer func() {
 		if err == nil {
@@ -314,21 +600,21 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 		cancel()
 		if err != nil {
 			err = fmt.Errorf("failed to ping: %w", err)
-			return false
+			return err
 		}
 	}
 
 	if err = p.prepareTorrentInfo(ctx); err != nil {
 		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
-		return false
+		return err
 	}
 
 	if err = p.updateInitPieces(ctx); err != nil {
 		err = fmt.Errorf("failed to send init pieces, err: %w", err)
-		return false
+		return err
 	}
 
-	return true
+	return nil
 }
 
 func (p *storagePeer) touch() {
@@ -366,6 +652,14 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int
 
 	var piece Piece
 	err := func() error {
+		if err := p.conn.AcquireDataQueueSlotWait(ctx); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("failed to acquire data queue slot: %w", err)
+		}
+		defer p.conn.FreeDataQueueSlot()
+
 		err := p.conn.rldp.DoQuery(ctx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
 		if err != nil {
 			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
