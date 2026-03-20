@@ -119,6 +119,8 @@ github.com/xssnick/ton-payment-network v1.2.3 h1:5/uR6YhnlCrOz+EJN8guG+qeAgGxbc1
 github.com/xssnick/ton-payment-network v1.2.3/go.mod h1:K+YwyIjyrtCcKfZ0EIbk81n85ctu6YXEn+do9NwQQJs=
 github.com/xssnick/tonutils-go v1.15.4-0.20251203102642-124ac120fe14 h1:vSFgvyW3Jt1T8x3RMnL1rt9gepiBg3+UoNFAhC68Eps=
 github.com/xssnick/tonutils-go v1.15.4-0.20251203102642-124ac120fe14/go.mod h1:CNSM+L0FYufOFhprg8otc9Y/ecFfLrWqFMq00Gh9yk4=
+github.com/xssnick/tonutils-go v1.16.0 h1:MLYVZiiMB0Q+XudLo7WyjOli4gMuenNmJpBqETqa5DE=
+github.com/xssnick/tonutils-go v1.16.0/go.mod h1:CNSM+L0FYufOFhprg8otc9Y/ecFfLrWqFMq00Gh9yk4=
 github.com/xssnick/tonutils-storage-provider v0.3.13 h1:7BoXMVrs7RAXyfBF4HfK2bam7nUK/4QyuvMycoBSvl0=
 github.com/xssnick/tonutils-storage-provider v0.3.13/go.mod h1:QEdnSzHcPQIW/lFBJXuVof+Srx6vKGSq9YolLZ2rE2U=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

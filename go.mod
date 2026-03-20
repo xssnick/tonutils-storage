@@ -10,7 +10,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/ton-blockchain/adnl-tunnel v0.1.8
-	github.com/xssnick/tonutils-go v1.15.4-0.20251203102642-124ac120fe14
+	github.com/xssnick/tonutils-go v1.16.0
 	github.com/xssnick/tonutils-storage-provider v0.3.13
 	golang.org/x/sync v0.19.0
 )
