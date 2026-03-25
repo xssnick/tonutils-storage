@@ -51,6 +51,11 @@ type fileInfo struct {
 	path string
 }
 
+func isIgnoredSystemFile(name string) bool {
+	nameLower := strings.ToLower(name)
+	return name == ".DS_Store" || nameLower == "desktop.ini" || nameLower == "thumbs.db"
+}
+
 func (f fileInfo) GetName() string {
 	return f.name
 }
@@ -159,8 +164,7 @@ func (s *Storage) GetAllFilesRefsInDir(path string, only ...map[string]bool) ([]
 		name := filePath[len(path)+1:]
 		name = strings.ReplaceAll(name, "\\", "/") // to unix style
 
-		nameLower := strings.ToLower(name)
-		if name == ".DS_Store" || nameLower == "desktop.ini" || nameLower == "thumbs.db" {
+		if isIgnoredSystemFile(name) {
 			// exclude OS-created files that can be modified automatically and thus break some torrent pieces
 			return nil
 		}

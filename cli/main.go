@@ -30,6 +30,7 @@ import (
 	"github.com/xssnick/tonutils-storage/api"
 	"github.com/xssnick/tonutils-storage/config"
 	"github.com/xssnick/tonutils-storage/db"
+	"github.com/xssnick/tonutils-storage/internal/termui"
 	"github.com/xssnick/tonutils-storage/provider"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/big"
@@ -83,6 +84,14 @@ func main() {
 		os.Exit(0)
 	}
 
+	termui.ConfigurePTerm()
+	termui.ConfigureStdLogger()
+	level := zerolog.InfoLevel
+	if *Verbosity >= 3 {
+		level = zerolog.DebugLevel
+	}
+	termui.SetZerologLevel(level)
+
 	storage.Logger = func(v ...any) {}
 	rldp.Logger = func(v ...any) {}
 	dht.Logger = func(v ...any) {}
@@ -94,16 +103,16 @@ func main() {
 
 	switch *Verbosity {
 	case 13:
-		adnl.Logger = log.Logger.Println
-		dht.Logger = log.Logger.Println
+		adnl.Logger = func(v ...any) { log.Logger.Println(v...) }
+		dht.Logger = func(v ...any) { log.Logger.Println(v...) }
 		fallthrough
 	case 12:
-		rldp.Logger = log.Logger.Println
-		rldp.BBRLogger = log.Logger.Println
+		rldp.Logger = func(v ...any) { log.Logger.Println(v...) }
+		rldp.BBRLogger = func(v ...any) { log.Logger.Println(v...) }
 		fallthrough
 	case 11:
-		storage.Logger = log.Logger.Println
-		provider.Logger = log.Logger.Println
+		storage.Logger = func(v ...any) { log.Logger.Println(v...) }
+		provider.Logger = func(v ...any) { log.Logger.Println(v...) }
 	}
 
 	pterm.DefaultBox.WithBoxStyle(pterm.NewStyle(pterm.FgLightBlue)).Println(pterm.LightWhite("    Tonutils Storage   "))
@@ -196,11 +205,6 @@ func main() {
 	var netMgr adnl.NetManager
 	var gate *adnl.Gateway
 	if *EnableTunnel {
-		log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(zerolog.InfoLevel)
-		if *Verbosity >= 3 {
-			log.Logger = log.Logger.Level(zerolog.DebugLevel)
-		}
-
 		if cfg.TunnelConfig.NodesPoolConfigPath == "" {
 			pterm.Fatal.Println("Nodes pool config path is empty")
 			return

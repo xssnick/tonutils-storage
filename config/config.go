@@ -7,6 +7,7 @@ import (
 	"errors"
 	"github.com/pterm/pterm"
 	tunnelConfig "github.com/ton-blockchain/adnl-tunnel/config"
+	"github.com/xssnick/tonutils-storage/internal/termui"
 	"log"
 	"net"
 	"os"
@@ -75,7 +76,7 @@ func checkCanSeed() (string, bool) {
 		_ = conn.Close()
 	}()
 
-	sp, _ := pterm.DefaultSpinner.Start("Resolving port checker...")
+	sp, _ := termui.StartSpinner("Resolving port checker...")
 	ips, err := net.LookupIP("tonutils.com")
 	if err != nil || len(ips) == 0 {
 		sp.Fail("Port is not resolved, you can download, but no-one can download from you, unless you specify your ip manually in config.json")
@@ -83,7 +84,7 @@ func checkCanSeed() (string, bool) {
 	}
 	sp.Success("Port checker resolved.")
 
-	sp, _ = pterm.DefaultSpinner.Start("Using port checker tonutils.com at ", ips[0].String())
+	sp, _ = termui.StartSpinner("Using port checker tonutils.com at ", ips[0].String())
 	conn, err := net.Dial("tcp", ips[0].String()+":9099")
 	if err != nil {
 		return "", false

@@ -14,10 +14,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/pterm/pterm"
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
+	"github.com/xssnick/tonutils-storage/internal/termui"
 )
 
 type FileRef interface {
@@ -72,9 +72,9 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 	if pieceSize > 8<<20 {
 		return nil, fmt.Errorf("too big piece size")
 	}
-	var waiter *pterm.SpinnerPrinter
+	var waiter *termui.Spinner
 	if verbose {
-		waiter, _ = pterm.DefaultSpinner.Start("Generating bag header...")
+		waiter, _ = termui.StartSpinner("Generating bag header...")
 	}
 	headerData, err := tl.Serialize(torrent.Header, true)
 	if err != nil {
@@ -98,10 +98,10 @@ func initializeTorrentHeader(torrent *Torrent, files []FileRef, verbose bool) (u
 	if len(files) == 0 {
 		return 0, fmt.Errorf("0 files in torrent")
 	}
-	var waiter *pterm.SpinnerPrinter
+	var waiter *termui.Spinner
 	if verbose {
 		// report on waiter that we are scanning files
-		waiter, _ = pterm.DefaultSpinner.Start("Scanning files...")
+		waiter, _ = termui.StartSpinner("Scanning files...")
 	}
 
 	var dataSize uint64
@@ -138,7 +138,7 @@ func computeHashesAndJoinPieces(
 	headerData []byte,
 	files []FileRef,
 	description string,
-	waiter *pterm.SpinnerPrinter,
+	waiter *termui.Spinner,
 	progressCallback func(done uint64, max uint64),
 ) error {
 	fullSz := uint64(len(headerData)) + dataSize
@@ -165,16 +165,16 @@ func computeHashesAndJoinPieces(
 		return err
 	}
 	if waiter != nil {
-		waiter, _ = pterm.DefaultSpinner.Start("Building merkle tree...")
+		waiter, _ = termui.StartSpinner("Building merkle tree...")
 	}
 	hashTree := buildMerkleTree(hashes, 9) // 9 is most efficient in most cases
 	rootHash := hashTree.Hash()
 	if waiter != nil {
 		waiter.Success("Merkle tree successfully built")
 	}
-	var progress *pterm.ProgressbarPrinter
+	var progress *termui.ProgressBar
 	if waiter != nil {
-		progress, _ = pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Calculating proofs...").Start()
+		progress, _ = termui.StartProgressbar(int(piecesNum), "Calculating proofs...")
 	}
 	pcNumBytes := len(piecesStartIndexes) / 8
 	if len(piecesStartIndexes)%8 != 0 {
@@ -209,7 +209,7 @@ func joinTorrentPieces(
 	files []FileRef,
 	piecesStartIndexes []uint32,
 	doneProgress *uint64, maxProgress uint64,
-	progress *pterm.ProgressbarPrinter,
+	progress *termui.ProgressBar,
 	progressCallback func(done uint64, max uint64),
 ) error {
 	wg := sync.WaitGroup{}
@@ -255,7 +255,7 @@ func joinTorrentPieces(
 		select {
 		case <-ctx.Done():
 			if progress != nil {
-				_, _ = progress.Stop()
+				_ = progress.Stop()
 			}
 			return ctx.Err()
 		case err := <-toCalcErr:
@@ -290,7 +290,7 @@ func computeFileHashes(
 	headerData []byte,
 	files []FileRef,
 	piecesNum uint64, doneProgress *uint64, maxProgress uint64,
-	waiter *pterm.SpinnerPrinter,
+	waiter *termui.Spinner,
 	progressCallback func(done uint64, max uint64),
 ) ([][]byte, []uint32, error) {
 	hashes := make([][]byte, piecesNum)
@@ -302,7 +302,7 @@ func computeFileHashes(
 	var piecesProcessed int64
 
 	hx := sha256.New()
-	process := func(isHeader bool, size uint64, rd io.ReaderAt, progress *pterm.ProgressbarPrinter) error {
+	process := func(isHeader bool, size uint64, rd io.ReaderAt, progress *termui.ProgressBar) error {
 		var fileOffset int64 = 0
 		end := false
 		for !end {
@@ -432,9 +432,9 @@ func computeFileHashes(
 		}
 		return nil
 	}
-	var progress *pterm.ProgressbarPrinter
+	var progress *termui.ProgressBar
 	if waiter != nil {
-		progress, _ = pterm.DefaultProgressbar.WithTotal(int(piecesNum)).WithTitle("Hashing pieces...").Start()
+		progress, _ = termui.StartProgressbar(int(piecesNum), "Hashing pieces...")
 	}
 	err := process(true, uint64(len(headerData)), bytes.NewReader(headerData), progress)
 	if err != nil {
@@ -483,7 +483,7 @@ func computeFileHashes(
 		}
 	}
 	if progress != nil {
-		_, _ = progress.Stop()
+		_ = progress.Stop()
 	}
 	return hashes, piecesStartFileIndexes, nil
 }

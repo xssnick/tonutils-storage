@@ -13,11 +13,11 @@ import (
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-storage-provider/pkg/transport"
 	"github.com/xssnick/tonutils-storage/db"
+	"github.com/xssnick/tonutils-storage/internal/termui"
 	"github.com/xssnick/tonutils-storage/provider"
 	"github.com/xssnick/tonutils-storage/storage"
 	"math/bits"
 	"net/http"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -487,20 +487,20 @@ func (s *Server) handleSwitchLogger(w http.ResponseWriter, r *http.Request) {
 	} else if req.Verbosity <= 1 {
 		level = zerolog.ErrorLevel
 	}
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stdout}).Level(level)
+	termui.SetZerologLevel(level)
 
 	switch req.Verbosity {
 	case 13:
-		adnl.Logger = log.Logger.Println
-		dht.Logger = log.Logger.Println
+		adnl.Logger = func(v ...any) { log.Logger.Println(v...) }
+		dht.Logger = func(v ...any) { log.Logger.Println(v...) }
 		fallthrough
 	case 12:
-		rldp.Logger = log.Logger.Println
-		rldp.BBRLogger = log.Logger.Println
+		rldp.Logger = func(v ...any) { log.Logger.Println(v...) }
+		rldp.BBRLogger = func(v ...any) { log.Logger.Println(v...) }
 		fallthrough
 	case 11:
-		storage.Logger = log.Logger.Println
-		provider.Logger = log.Logger.Println
+		storage.Logger = func(v ...any) { log.Logger.Println(v...) }
+		provider.Logger = func(v ...any) { log.Logger.Println(v...) }
 	}
 	response(w, http.StatusOK, Ok{Ok: true})
 }

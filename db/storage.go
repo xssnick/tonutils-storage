@@ -132,13 +132,20 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	if err != nil {
 		return err
 	}
+
+	t.Stop()
+	t.Wait()
+
+	if t.Header != nil && withFiles {
+		if err = s.removeTorrentFiles(t); err != nil {
+			return err
+		}
+	}
+
 	s.mx.Lock()
 	delete(s.torrents, string(t.BagID))
 	delete(s.torrentsOverlay, string(id))
 	s.mx.Unlock()
-
-	t.Stop()
-	t.Wait()
 
 	b := &leveldb.Batch{}
 	b.Delete(append([]byte("bags:"), t.BagID...))
@@ -146,27 +153,6 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 
 	if err = s.db.Write(b, nil); err != nil {
 		return err
-	}
-
-	if t.Header != nil {
-		if withFiles {
-			list, err := t.ListFiles()
-			if err == nil {
-				for _, f := range list {
-					path := filepath.Join(t.Path, string(t.Header.DirName), f)
-					if errR := s.fs.GetController().RemoveFile(path); errR != nil {
-						log.Warn().Str("path", path).Err(errR).Msg("remove err, skip")
-					}
-				}
-			}
-
-			path := filepath.Clean(t.Path)
-			if t.CreatedLocally {
-				path = filepath.Join(path, string(t.Header.DirName))
-			}
-
-			recursiveEmptyDelete(buildTreeFromDir(filepath.Clean(path)), s.fs.GetController())
-		}
 	}
 
 	if t.Info != nil {
@@ -177,6 +163,35 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	}
 	s.notify(EventTorrentUpdated)
 	return nil
+}
+
+func (s *Storage) removeTorrentFiles(t *storage.Torrent) error {
+	list, err := t.ListFiles()
+	if err != nil {
+		return err
+	}
+
+	var firstErr error
+	for _, f := range list {
+		path := filepath.Join(t.Path, string(t.Header.DirName), f)
+		if errR := s.fs.GetController().RemoveFile(path); errR != nil {
+			log.Warn().Str("path", path).Err(errR).Msg("remove err")
+			if firstErr == nil {
+				firstErr = errR
+			}
+		}
+	}
+
+	path := filepath.Clean(t.Path)
+	if t.CreatedLocally {
+		path = filepath.Join(path, string(t.Header.DirName))
+	}
+
+	if err := recursiveEmptyDelete(buildTreeFromDir(filepath.Clean(path)), s.fs.GetController()); err != nil && firstErr == nil {
+		firstErr = err
+	}
+
+	return firstErr
 }
 
 func (s *Storage) SetTorrent(t *storage.Torrent) error {

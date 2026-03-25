@@ -109,7 +109,7 @@ func (f *FSControllerCache) clean() bool {
 	return false
 }
 
-func (f *FSControllerCache) RemoveFile(path string) (err error) {
+func (f *FSControllerCache) RemoveFile(path string) error {
 	if f.noRemove {
 		log.Println("attempt to remove file skipped because no-remove flag is set, file", path)
 		return nil
@@ -135,24 +135,27 @@ func (f *FSControllerCache) RemoveFile(path string) (err error) {
 	}
 
 	if runtime.GOOS == "windows" {
-		if err = remove(); err == nil {
-			return
+		const maxAttempts = 10
+		const retryDelay = 100 * time.Millisecond
+
+		var lastErr error
+		for i := 0; i < maxAttempts; i++ {
+			if err := remove(); err == nil {
+				return nil
+			} else {
+				lastErr = err
+			}
+
+			if i == 0 {
+				log.Println("first delete attempt failed, retrying sync, file", path)
+			}
+			if i < maxAttempts-1 {
+				time.Sleep(retryDelay)
+			}
 		}
 
-		log.Println("first delete attempt failed, retrying async in 50ms, file", path)
-		go func() {
-			// windows can still hold a file for some time, so we retry
-			for i := 0; i < 4; i++ {
-				if err = remove(); err == nil {
-					log.Println("removed asynchronously", path)
-					return
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-			log.Println("async removal failed, file", path)
-		}()
-
-		return nil
+		log.Println("removal failed after retries, file", path, "err", lastErr)
+		return lastErr
 	}
 
 	return remove()
