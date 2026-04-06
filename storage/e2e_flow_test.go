@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/address"
+	adnladdr "github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/keys"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/adnl/rldp"
@@ -274,12 +274,12 @@ func (l *loopbackTorrentServer) GetID() []byte {
 func (l *loopbackTorrentServer) Stop() {}
 
 type loopbackADNL struct {
-	remoteID  []byte
-	remoteKey ed25519.PublicKey
-	remote    *loopbackSide
+	remoteID   []byte
+	remoteKey  ed25519.PublicKey
+	remote     *loopbackSide
 	remoteAddr string
-	ctx       context.Context
-	cancel    context.CancelFunc
+	ctx        context.Context
+	cancel     context.CancelFunc
 
 	customHandler     func(msg *adnl.MessageCustom) error
 	queryHandler      func(msg *adnl.MessageQuery) error
@@ -472,7 +472,9 @@ func (l *loopbackRLDP) DoQuery(ctx context.Context, _ uint64, query, result tl.S
 					remotePeer.piecesMx.Unlock()
 					return fmt.Errorf("invalid piece id in update")
 				}
-				_ = bitsetSet(remotePeer.hasPieces, uint32(id))
+				if bitsetSet(remotePeer.hasPieces, uint32(id)) {
+					atomic.AddUint32(&remotePeer.knownPieces, 1)
+				}
 			}
 			remotePeer.piecesMx.Unlock()
 			l.remote.torrent.wake.fire()
@@ -516,7 +518,9 @@ func (l *loopbackRLDP) DoQuery(ctx context.Context, _ uint64, query, result tl.S
 					remotePeer.piecesMx.Unlock()
 					return fmt.Errorf("invalid piece id in update")
 				}
-				_ = bitsetSet(remotePeer.hasPieces, uint32(id))
+				if bitsetSet(remotePeer.hasPieces, uint32(id)) {
+					atomic.AddUint32(&remotePeer.knownPieces, 1)
+				}
 			}
 			remotePeer.piecesMx.Unlock()
 			l.remote.torrent.wake.fire()
@@ -575,10 +579,11 @@ func (l *loopbackRLDP) SendAnswer(context.Context, uint64, uint32, []byte, []byt
 
 func newLoopbackPeerConnection(id []byte, remoteID []byte, remoteKey ed25519.PublicKey, remote *loopbackSide, remoteAddr string) *PeerConnection {
 	conn := &PeerConnection{
-		usedByBags:    map[string]*storagePeer{},
-		controlQueue:  make(chan struct{}, 4),
-		dataQueue:     make(chan struct{}, 10),
-		bagsInitQueue: make(chan struct{}, 8),
+		usedByBags:       map[string]*storagePeer{},
+		controlQueue:     make(chan struct{}, 4),
+		initControlQueue: make(chan struct{}, 2),
+		dataQueue:        make(chan struct{}, 10),
+		bagsInitQueue:    make(chan struct{}, 8),
 	}
 	conn.MaxInflightPieces.Store(1)
 	conn.srv = &Server{}
@@ -894,6 +899,150 @@ func TestLoopback_TwoNodeDownloadFlow(t *testing.T) {
 	}
 	if seedTorrent.GetUploadStats() == 0 {
 		t.Fatal("expected seeder to report uploaded bytes")
+	}
+
+	downTorrent.Stop()
+	seedTorrent.Stop()
+	downTorrent.Wait()
+	seedTorrent.Wait()
+}
+
+func TestLoopback_DownloadStartsWithPartialInitCompatibility(t *testing.T) {
+	seedDir := t.TempDir()
+	downloadDir := t.TempDir()
+
+	source := make([]byte, 64*1024+137)
+	for i := range source {
+		source[i] = byte((i*17 + 29) % 251)
+	}
+
+	sourceName := "compat.bin"
+	sourcePath := filepath.Join(seedDir, sourceName)
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatalf("failed to write source file: %v", err)
+	}
+
+	seedStore := newE2EStorage(4096)
+	downStore := newE2EStorage(4096)
+
+	_, seedKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("failed to generate seeder key: %v", err)
+	}
+	_, downKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("failed to generate downloader key: %v", err)
+	}
+
+	seedServer := &loopbackTorrentServer{
+		id:  append([]byte(nil), seedKey.Public().(ed25519.PublicKey)...),
+		key: seedKey,
+	}
+	downServer := &loopbackTorrentServer{
+		id:  append([]byte(nil), downKey.Public().(ed25519.PublicKey)...),
+		key: downKey,
+	}
+
+	seedConnector := NewConnector(seedServer)
+	downConnector := NewConnector(downServer)
+
+	seedTorrent, err := CreateTorrentWithInitialHeader(
+		context.Background(),
+		seedDir,
+		"loopback partial init compatibility",
+		&TorrentHeader{},
+		seedStore,
+		seedConnector,
+		[]FileRef{e2eFileRef{
+			path: sourcePath,
+			name: sourceName,
+			size: uint64(len(source)),
+		}},
+		nil,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("failed to create seeder torrent: %v", err)
+	}
+	activateTorrent(seedTorrent, true)
+	seedTorrent.downloadAll = true
+	if err = seedStore.SetTorrent(seedTorrent); err != nil {
+		t.Fatalf("failed to register seeder torrent: %v", err)
+	}
+
+	downTorrent := NewTorrent(downloadDir, downStore, downConnector)
+	downTorrent.BagID = append([]byte(nil), seedTorrent.BagID...)
+	downTorrent.Info = seedTorrent.Info
+	downTorrent.Header = seedTorrent.Header
+	downTorrent.downloadAll = true
+	activateTorrent(downTorrent, false)
+	if err = downStore.SetTorrent(downTorrent); err != nil {
+		t.Fatalf("failed to register downloader torrent: %v", err)
+	}
+
+	seedSide := &loopbackSide{torrent: seedTorrent}
+	downSide := &loopbackSide{torrent: downTorrent}
+
+	seedConn := newLoopbackPeerConnection(seedServer.id, downServer.id, downKey.Public().(ed25519.PublicKey), downSide, "loopback-downloader")
+	downConn := newLoopbackPeerConnection(downServer.id, seedServer.id, seedKey.Public().(ed25519.PublicKey), seedSide, "loopback-seeder")
+	seedSide.conn = seedConn
+	downSide.conn = downConn
+
+	downPeer, sessionCtx := downTorrent.prepareStoragePeer(seedTorrent.BagID, nil, downConn, nil)
+	if sessionCtx == nil {
+		t.Fatal("expected a fresh partial-init loopback session context")
+	}
+	atomic.StoreInt32(&downPeer.sessionInitialized, 1)
+
+	complete, err := downPeer.applyInitChunk(seedTorrent.Info.PiecesNum(), 0, seedTorrent.PiecesMask())
+	if err != nil {
+		t.Fatalf("failed to apply compatibility init chunk: %v", err)
+	}
+	if !complete {
+		t.Fatal("expected small test bag init chunk to carry full mask")
+	}
+	if atomic.LoadInt32(&downPeer.updateInitReceived) != 0 {
+		t.Fatal("expected compatibility peer to stay partial and skip updateInitReceived")
+	}
+	if !downPeer.isDownloadUsable() {
+		t.Fatal("expected partial-init peer with known pieces to be download-usable")
+	}
+	downPeer.touch()
+
+	doneCh := make(chan DownloadResult, 1)
+	errCh := make(chan error, 1)
+	if err = downTorrent.startDownload(func(event Event) {
+		switch event.Name {
+		case EventDone:
+			select {
+			case doneCh <- event.Value.(DownloadResult):
+			default:
+			}
+		case EventErr:
+			select {
+			case errCh <- event.Value.(error):
+			default:
+			}
+		}
+	}); err != nil {
+		t.Fatalf("failed to start compatibility downloader flow: %v", err)
+	}
+
+	select {
+	case err = <-errCh:
+		t.Fatalf("compatibility download flow failed: %v", err)
+	case <-doneCh:
+	case <-time.After(15 * time.Second):
+		t.Fatal("timeout waiting for compatibility download completion")
+	}
+
+	downloadedPath := filepath.Join(downloadDir, sourceName)
+	got, err := os.ReadFile(downloadedPath)
+	if err != nil {
+		t.Fatalf("failed to read downloaded file: %v", err)
+	}
+	if !bytes.Equal(got, source) {
+		t.Fatal("downloaded file content mismatch")
 	}
 
 	downTorrent.Stop()

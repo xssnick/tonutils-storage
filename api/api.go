@@ -184,6 +184,11 @@ func (s *Server) handleAdd(w http.ResponseWriter, r *http.Request) {
 			response(w, http.StatusInternalServerError, Error{"Failed to start download:" + err.Error()})
 			return
 		}
+		if err = s.store.SetTorrent(tor); err != nil {
+			pterm.Error.Println("Failed to save state:", err.Error())
+			response(w, http.StatusInternalServerError, Error{"Failed to save to db:" + err.Error()})
+			return
+		}
 		pterm.Success.Println("Bag state updated", hex.EncodeToString(bag), "download all:", req.DownloadAll)
 	}
 
@@ -421,12 +426,13 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if tor := s.store.GetTorrent(bag); tor != nil {
-		intact, err := tor.Verify(r.Context(), !req.OnlyFilesExistence)
-		if err != nil {
-			pterm.Error.Println("Failed to verify bag:", err.Error())
-			response(w, http.StatusInternalServerError, Error{err.Error()})
-		}
+		if tor := s.store.GetTorrent(bag); tor != nil {
+			intact, err := tor.Verify(r.Context(), !req.OnlyFilesExistence)
+			if err != nil {
+				pterm.Error.Println("Failed to verify bag:", err.Error())
+				response(w, http.StatusInternalServerError, Error{err.Error()})
+				return
+			}
 
 		response(w, http.StatusOK, Ok{Ok: intact})
 		return
@@ -455,6 +461,11 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 
 	if tor := s.store.GetTorrent(bag); tor != nil {
 		tor.Stop()
+		if err = s.store.SetTorrent(tor); err != nil {
+			pterm.Error.Println("Failed to save state:", err.Error())
+			response(w, http.StatusInternalServerError, Error{"Failed to save to db:" + err.Error()})
+			return
+		}
 		response(w, http.StatusOK, Ok{Ok: true})
 		return
 	}

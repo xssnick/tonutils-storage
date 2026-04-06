@@ -452,17 +452,16 @@ func main() {
 				default:
 					fallthrough
 				case "help":
-					pterm.Info.Println("Commands:\n"+
-						"create [path] [description]\n",
-						"download [bag_id]\n",
-						"remove [bag_id] [with files? (true/false)]\n",
-						"list\n",
-						"providers [bag_id] [owner_address]\n",
-						"rent-storage [bag_id] [owner_address] [provider_id] [amount]\n",
-						"rent-withdraw [bag_id] [owner_address] [amount]\n",
-						"rent-topup [bag_id] [owner_address] [amount]\n",
-						"help\n",
-					)
+					pterm.Info.Print("Commands:\n" +
+						"create [path] [description]\n" +
+						"download [bag_id]\n" +
+						"remove [bag_id] [with files? (true/false)]\n" +
+						"list\n" +
+						"providers [bag_id] [owner_address]\n" +
+						"rent-storage [bag_id] [owner_address] [provider_id] [amount]\n" +
+						"rent-withdraw [bag_id] [owner_address] [amount]\n" +
+						"rent-topup [bag_id] [owner_address] [amount]\n" +
+						"help\n")
 				}
 			}
 		}()

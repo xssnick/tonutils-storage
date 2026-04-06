@@ -11,13 +11,14 @@ import (
 )
 
 type PeerConnection struct {
-	node          *overlay.Node
-	rldp          overlay.RLDP
-	adnl          adnl.Peer
-	srv           *Server
-	controlQueue  chan struct{}
-	dataQueue     chan struct{}
-	bagsInitQueue chan struct{}
+	node             *overlay.Node
+	rldp             overlay.RLDP
+	adnl             adnl.Peer
+	srv              *Server
+	controlQueue     chan struct{}
+	initControlQueue chan struct{}
+	dataQueue        chan struct{}
+	bagsInitQueue    chan struct{}
 
 	InflightPieces    atomic.Int32
 	MaxInflightPieces atomic.Int32
@@ -84,6 +85,41 @@ func (c *PeerConnection) AcquireControlQueueSlot() error {
 
 func (c *PeerConnection) FreeControlQueueSlot() {
 	<-c.controlQueue
+}
+
+func (c *PeerConnection) AcquireInitControlQueueSlotWait(ctx context.Context) error {
+	if c.initControlQueue == nil {
+		return c.AcquireControlQueueSlotWait(ctx)
+	}
+
+	select {
+	case c.initControlQueue <- struct{}{}:
+	case <-ctx.Done():
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) AcquireInitControlQueueSlot() error {
+	if c.initControlQueue == nil {
+		return c.AcquireControlQueueSlot()
+	}
+
+	select {
+	case c.initControlQueue <- struct{}{}:
+	default:
+		return ErrQueueIsBusy
+	}
+	return nil
+}
+
+func (c *PeerConnection) FreeInitControlQueueSlot() {
+	if c.initControlQueue == nil {
+		c.FreeControlQueueSlot()
+		return
+	}
+
+	<-c.initControlQueue
 }
 
 func (c *PeerConnection) AcquireDataQueueSlotWait(ctx context.Context) error {

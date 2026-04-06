@@ -310,6 +310,7 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 	connInflight := make(chan bool, 3)
 
 	var lastUpdatePiecesSeqno int64
+	var lastIdleSweepAt time.Time
 	for {
 		select {
 		case <-workerCtx.Done():
@@ -357,9 +358,17 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 		})
 
 		var updates = 0
-		now := time.Now().UnixMilli()
+		nowTime := time.Now()
+		now := nowTime.UnixMilli()
+		idleSweepDue := lastIdleSweepAt.IsZero() || nowTime.Sub(lastIdleSweepAt) >= peerIdleSweepInterval
 		wg := sync.WaitGroup{}
 		for _, peer := range peers {
+			if idleSweepDue && peer.isIdle(nowTime, peerIdleTimeout) {
+				Logger("[STORAGE_PEERS] PEER IDLE TOO LONG, CLOSING CONNECTION", hex.EncodeToString(peer.nodeId), "BAG", hex.EncodeToString(t.BagID), "LAST_ACTIVITY", peer.lastActivity().Format(time.RFC3339))
+				peer.Close()
+				continue
+			}
+
 			if atomic.LoadInt32(&peer.sessionInitialized) == 0 {
 				continue
 			}
@@ -425,6 +434,9 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 					}
 				}()
 			}
+		}
+		if idleSweepDue {
+			lastIdleSweepAt = nowTime
 		}
 
 	loop:

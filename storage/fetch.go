@@ -219,13 +219,13 @@ func (f *PreFetcher) balancer() {
 
 		peers := f.torrent.GetPeers()
 
-			peersList := make([]*storagePeer, 0, len(peers))
-			for _, p := range peers {
-				if !p.peer.isSessionReady() {
-					continue
-				}
-				peersList = append(peersList, p.peer)
+		peersList := make([]*storagePeer, 0, len(peers))
+		for _, p := range peers {
+			if !p.peer.isDownloadUsable() {
+				continue
 			}
+			peersList = append(peersList, p.peer)
+		}
 
 		// shuffle to prevent download same failed piece from same peer when conditions are similar
 		rand.Shuffle(len(peersList), func(i, j int) {

@@ -290,6 +290,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				return
 			}
 		}
+		t.InitMask()
 
 		// update torrent in db
 		if err := t.db.SetTorrent(t); err != nil {

@@ -16,6 +16,11 @@ type PeerInfo struct {
 	downloadSpeed *speedInfo
 }
 
+const (
+	peerIdleTimeout       = 10 * time.Minute
+	peerIdleSweepInterval = 30 * time.Second
+)
+
 func (t *Torrent) GetPeers() map[string]PeerInfo {
 	t.peersMx.RLock()
 	defer t.peersMx.RUnlock()
@@ -82,7 +87,32 @@ func (t *Torrent) UpdateUploadedPeer(peer *storagePeer, bytes uint64) {
 	p.Uploaded += bytes
 }
 
+func (p *storagePeer) markActivity() {
+	atomic.StoreInt64(&p.lastActivityAt, time.Now().UnixMilli())
+}
+
+func (p *storagePeer) lastActivity() time.Time {
+	ts := atomic.LoadInt64(&p.lastActivityAt)
+	if ts == 0 {
+		ts = atomic.LoadInt64(&p.sessionInitAt)
+	}
+	if ts == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ts)
+}
+
+func (p *storagePeer) isIdle(now time.Time, maxIdle time.Duration) bool {
+	last := p.lastActivity()
+	if last.IsZero() {
+		return false
+	}
+	return now.Sub(last) > maxIdle
+}
+
 func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
+	peer.markActivity()
+
 	strId := hex.EncodeToString(peer.nodeId)
 	p := t.peers[strId]
 	if p == nil {

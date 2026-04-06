@@ -360,14 +360,41 @@ type Offer struct {
 	PerProofNano  *big.Int
 }
 
+func offerEvery(span uint32) string {
+	switch {
+	case span < 3600:
+		return fmt.Sprintf("%d Minutes", span/60)
+	case span < 100*3600:
+		return fmt.Sprintf("%d Hours", span/3600)
+	default:
+		return fmt.Sprintf("%d Days", span/86400)
+	}
+}
+
+func zeroOffer(span uint32) Offer {
+	return Offer{
+		Span:          span,
+		Every:         offerEvery(span),
+		RatePerMBNano: big.NewInt(0),
+		PerDayNano:    big.NewInt(0),
+		PerProofNano:  big.NewInt(0),
+	}
+}
+
 func CalculateBestProviderOffer(r *ProviderRates) Offer {
 	const minStep = 15 * 60
 
+	if r == nil {
+		return zeroOffer(minStep)
+	}
 	if r.MinSpan < minStep {
 		r.MinSpan = minStep
 	}
 	if r.MaxSpan < r.MinSpan {
 		r.MaxSpan = r.MinSpan
+	}
+	if !r.Available || r.Size == 0 {
+		return zeroOffer(r.MinSpan)
 	}
 
 	step := (r.MaxSpan - r.MinSpan) / 300
@@ -410,6 +437,9 @@ func calcOffer(span uint32, r *ProviderRates) Offer {
 
 	num := new(big.Int).Mul(r.MinBounty.Nano(), big.NewInt(mbMulDay))
 	den := new(big.Int).Mul(size, spanBI)
+	if den.Sign() == 0 {
+		return zeroOffer(span)
+	}
 
 	minRate := new(big.Int).Div(num, den)
 	if new(big.Int).Mod(num, den).Sign() != 0 {
@@ -434,19 +464,9 @@ func calcOffer(span uint32, r *ProviderRates) Offer {
 	perProofNano, _ := perProof.Int(nil)
 	effPerDayNano, _ := effPerDay.Int(nil)
 
-	var every string
-	switch {
-	case span < 3600:
-		every = fmt.Sprintf("%d Minutes", span/60)
-	case span < 100*3600:
-		every = fmt.Sprintf("%d Hours", span/3600)
-	default:
-		every = fmt.Sprintf("%d Days", span/86400)
-	}
-
 	return Offer{
 		Span:          span,
-		Every:         every,
+		Every:         offerEvery(span),
 		RatePerMBNano: ratePerMBNano,
 		PerDayNano:    effPerDayNano,
 		PerProofNano:  perProofNano,

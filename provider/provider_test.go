@@ -89,11 +89,11 @@ func TestCalculateBestProviderOffer(t *testing.T) {
 				Size:             9<<30 + 400<<20,
 			},
 			want: Offer{
-				Span:          2583648,
-				Every:         "29 Days",
-				RatePerMBNano: bigInt(174),
-				PerDayNano:    bigInt(1673183),
-				PerProofNano:  coinsFromStr("0.050033778").Nano(),
+				Span:          94752,
+				Every:         "26 Hours",
+				RatePerMBNano: bigInt(100000),
+				PerDayNano:    bigInt(961599999),
+				PerProofNano:  bigInt(1054554666),
 			},
 		},
 	}

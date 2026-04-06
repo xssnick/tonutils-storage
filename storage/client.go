@@ -16,6 +16,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"math"
+	"math/bits"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,12 @@ import (
 )
 
 var Logger = func(...any) {}
+
+const (
+	sessionPingTimeout    = 7 * time.Second
+	sessionPingAttempts   = 3
+	sessionPingRetryDelay = 250 * time.Millisecond
+)
 
 type DHT interface {
 	StoreAddress(ctx context.Context, addresses address.List, ttl time.Duration, ownerKey ed25519.PrivateKey, copies int) (int, []byte, error)
@@ -52,14 +59,15 @@ type torrentDownloader struct {
 }
 
 type storagePeer struct {
-	torrent      *Torrent
-	nodeAddr     string
-	overlay      []byte
-	overlayNode  *overlay.Node
-	nodeId       []byte
-	sessionId    int64
-	sessionSeqno int64
-	conn         *PeerConnection
+	torrent        *Torrent
+	nodeAddr       string
+	overlay        []byte
+	overlayNode    *overlay.Node
+	nodeId         []byte
+	sessionId      int64
+	sessionSeqno   int64
+	conn           *PeerConnection
+	lastActivityAt int64
 
 	currentPing           int64
 	lastPingAt            time.Time
@@ -74,6 +82,7 @@ type storagePeer struct {
 	lastSentPieces []byte
 	hasPieces      []byte
 	hasPiecesNum   uint32
+	knownPieces    uint32
 
 	initExpectedChunks uint32
 	initReceivedChunks uint32
@@ -83,8 +92,8 @@ type storagePeer struct {
 	pendingInitBytes   int
 	pendingHavePieces  []int32
 
-	piecesMx       sync.RWMutex
-	prepareInfoMx  sync.Mutex
+	piecesMx      sync.RWMutex
+	prepareInfoMx sync.Mutex
 
 	fails  int32
 	failAt int64
@@ -143,9 +152,18 @@ func bitsetSet(buf []byte, id uint32) bool {
 	return true
 }
 
+func countBitsetOnes(buf []byte) uint32 {
+	var total uint32
+	for _, b := range buf {
+		total += uint32(bits.OnesCount8(b))
+	}
+	return total
+}
+
 func (p *storagePeer) configurePieceTrackingLocked(piecesNum uint32, clearPending bool) {
 	p.hasPiecesNum = piecesNum
 	p.hasPieces = make([]byte, piecesBitsetBytes(piecesNum))
+	atomic.StoreUint32(&p.knownPieces, 0)
 	p.initExpectedChunks = initChunksCount(piecesNum)
 	p.initReceivedChunks = 0
 	p.initChunksMask = make([]byte, piecesBitsetBytes(p.initExpectedChunks))
@@ -268,6 +286,7 @@ func (p *storagePeer) applyInitChunkUnsafe(piecesNum, off uint32, have []byte) (
 	}
 
 	copy(p.hasPieces[start:start+len(have)], have)
+	atomic.AddUint32(&p.knownPieces, countBitsetOnes(have))
 	p.initReceivedChunks++
 	atomic.StoreInt64(&p.lastInitChunkAt, now)
 
@@ -320,7 +339,9 @@ func (p *storagePeer) applyHavePiecesLocked(piecesNum uint32, pieceIDs []int32) 
 			return fmt.Errorf("invalid piece id in update")
 		}
 
-		_ = bitsetSet(p.hasPieces, uint32(d))
+		if bitsetSet(p.hasPieces, uint32(d)) {
+			atomic.AddUint32(&p.knownPieces, 1)
+		}
 	}
 	return nil
 }
@@ -571,8 +592,20 @@ func (p *storagePeer) Close() {
 	})
 }
 
+func (p *storagePeer) isSessionInitialized() bool {
+	return atomic.LoadInt32(&p.sessionInitialized) == 1
+}
+
+func (p *storagePeer) hasKnownPieces() bool {
+	return atomic.LoadUint32(&p.knownPieces) > 0
+}
+
+func (p *storagePeer) isDownloadUsable() bool {
+	return p.isSessionInitialized() && (atomic.LoadInt32(&p.updateInitReceived) == 1 || p.hasKnownPieces())
+}
+
 func (p *storagePeer) isSessionReady() bool {
-	return atomic.LoadInt32(&p.sessionInitialized) == 1 && atomic.LoadInt32(&p.updateInitReceived) == 1
+	return p.isSessionInitialized() && atomic.LoadInt32(&p.updateInitReceived) == 1
 }
 
 func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) error {
@@ -595,9 +628,7 @@ func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bo
 	}()
 
 	if doPing {
-		qCtx, cancel := context.WithTimeout(ctx, 7*time.Second)
-		err = p.ping(qCtx)
-		cancel()
+		err = p.pingWithRetry(ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to ping: %w", err)
 			return err
@@ -645,6 +676,37 @@ func (p *storagePeer) ping(ctx context.Context) error {
 	atomic.StoreInt64(&p.currentPing, int64(time.Since(tm)/time.Millisecond))
 
 	return nil
+}
+
+func (p *storagePeer) pingWithRetry(ctx context.Context) error {
+	var lastErr error
+
+	for attempt := 1; attempt <= sessionPingAttempts; attempt++ {
+		qCtx, cancel := context.WithTimeout(ctx, sessionPingTimeout)
+		err := p.ping(qCtx)
+		cancel()
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if ctx.Err() != nil || attempt == sessionPingAttempts || err.Error() == "no session id" {
+			break
+		}
+
+		Logger("[STORAGE] PING FAILED, RETRYING", attempt, "FOR", hex.EncodeToString(p.nodeId), p.nodeAddr, "BAG", hex.EncodeToString(p.torrent.BagID), "ERR", err.Error())
+
+		retryDelay := sessionPingRetryDelay * time.Duration(attempt)
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
 }
 
 func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int64, error) {
