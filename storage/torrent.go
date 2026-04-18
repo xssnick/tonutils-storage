@@ -825,10 +825,6 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 }
 
 func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
-	if id >= t.Info.PiecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.Info.PiecesNum())
-	}
-
 	piece, err := t.getPieceInternal(id, true)
 	if err != nil {
 		return nil, fmt.Errorf("piece %d error: %w", id, err)
