@@ -322,10 +322,10 @@ func (l *loopbackADNL) Query(ctx context.Context, req, result tl.Serializable) e
 	inner, over := overlay.UnwrapQuery(req)
 	switch q := inner.(type) {
 	case Ping:
-		remotePeer, sessionCtx := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
-		if sessionCtx != nil {
+		remotePeer, sessionAttempt := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
+		if sessionAttempt != nil {
 			go func() {
-				_ = remotePeer.initializeSession(sessionCtx, atomic.LoadInt64(&remotePeer.sessionId), false)
+				_ = remotePeer.initializeSession(sessionAttempt, false)
 			}()
 		}
 		remotePeer.touch()
@@ -335,10 +335,10 @@ func (l *loopbackADNL) Query(ctx context.Context, req, result tl.Serializable) e
 		}
 		return nil
 	case *Ping:
-		remotePeer, sessionCtx := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
-		if sessionCtx != nil {
+		remotePeer, sessionAttempt := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
+		if sessionAttempt != nil {
 			go func() {
-				_ = remotePeer.initializeSession(sessionCtx, atomic.LoadInt64(&remotePeer.sessionId), false)
+				_ = remotePeer.initializeSession(sessionAttempt, false)
 			}()
 		}
 		remotePeer.touch()
@@ -446,87 +446,8 @@ func (l *loopbackRLDP) DoQuery(ctx context.Context, _ uint64, query, result tl.S
 		remotePeer, _ := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
 		remotePeer.touch()
 
-		switch u := q.Update.(type) {
-		case UpdateInit:
-			piecesNum, err := remotePeer.waitForPiecesNum(ctx)
-			if err != nil {
-				return err
-			}
-			complete, err := remotePeer.applyInitChunk(piecesNum, uint32(u.HavePiecesOffset), u.HavePieces)
-			if err != nil {
-				return err
-			}
-			if complete {
-				atomic.StoreInt32(&remotePeer.updateInitReceived, 1)
-				l.remote.torrent.wake.fire()
-			}
-		case UpdateHavePieces:
-			piecesNum, err := remotePeer.waitForPiecesNum(ctx)
-			if err != nil {
-				return err
-			}
-			remotePeer.piecesMx.Lock()
-			remotePeer.ensurePieceTrackingLocked(piecesNum)
-			for _, id := range u.PieceIDs {
-				if id < 0 || uint32(id) >= piecesNum {
-					remotePeer.piecesMx.Unlock()
-					return fmt.Errorf("invalid piece id in update")
-				}
-				if bitsetSet(remotePeer.hasPieces, uint32(id)) {
-					atomic.AddUint32(&remotePeer.knownPieces, 1)
-				}
-			}
-			remotePeer.piecesMx.Unlock()
-			l.remote.torrent.wake.fire()
-		case UpdateState:
-		default:
-			return fmt.Errorf("unsupported update type %T", q.Update)
-		}
-
-		if res, ok := result.(*Ok); ok {
-			*res = Ok{}
-			return nil
-		}
-		return fmt.Errorf("unexpected update result type %T", result)
-	case *AddUpdate:
-		remotePeer, _ := l.remote.torrent.prepareStoragePeer(over, nil, l.remote.conn, &q.SessionID)
-		remotePeer.touch()
-
-		switch u := q.Update.(type) {
-		case UpdateInit:
-			piecesNum, err := remotePeer.waitForPiecesNum(ctx)
-			if err != nil {
-				return err
-			}
-			complete, err := remotePeer.applyInitChunk(piecesNum, uint32(u.HavePiecesOffset), u.HavePieces)
-			if err != nil {
-				return err
-			}
-			if complete {
-				atomic.StoreInt32(&remotePeer.updateInitReceived, 1)
-				l.remote.torrent.wake.fire()
-			}
-		case UpdateHavePieces:
-			piecesNum, err := remotePeer.waitForPiecesNum(ctx)
-			if err != nil {
-				return err
-			}
-			remotePeer.piecesMx.Lock()
-			remotePeer.ensurePieceTrackingLocked(piecesNum)
-			for _, id := range u.PieceIDs {
-				if id < 0 || uint32(id) >= piecesNum {
-					remotePeer.piecesMx.Unlock()
-					return fmt.Errorf("invalid piece id in update")
-				}
-				if bitsetSet(remotePeer.hasPieces, uint32(id)) {
-					atomic.AddUint32(&remotePeer.knownPieces, 1)
-				}
-			}
-			remotePeer.piecesMx.Unlock()
-			l.remote.torrent.wake.fire()
-		case UpdateState:
-		default:
-			return fmt.Errorf("unsupported update type %T", q.Update)
+		if err := remotePeer.applySessionUpdate(q.Update); err != nil {
+			return err
 		}
 
 		if res, ok := result.(*Ok); ok {
@@ -626,7 +547,7 @@ func TestE2E_TwoNodeDownloadFlow(t *testing.T) {
 	}
 	seedGate := adnl.NewGateway(seedKey)
 	seedPort := freeUDPPort(t)
-	seedGate.SetAddressList([]*adnladdr.UDP{{
+	seedGate.SetAddressList([]adnladdr.Address{&adnladdr.UDP{
 		IP:   net.ParseIP("127.0.0.1"),
 		Port: int32(seedPort),
 	}})
@@ -840,11 +761,11 @@ func TestLoopback_TwoNodeDownloadFlow(t *testing.T) {
 	seedSide.conn = seedConn
 	downSide.conn = downConn
 
-	downPeer, sessionCtx := downTorrent.prepareStoragePeer(seedTorrent.BagID, nil, downConn, nil)
-	if sessionCtx == nil {
+	downPeer, sessionAttempt := downTorrent.prepareStoragePeer(seedTorrent.BagID, nil, downConn, nil)
+	if sessionAttempt == nil {
 		t.Fatal("expected a fresh loopback session context")
 	}
-	if err = downPeer.initializeSession(sessionCtx, atomic.LoadInt64(&downPeer.sessionId), true); err != nil {
+	if err = downPeer.initializeSession(sessionAttempt, true); err != nil {
 		t.Fatalf("failed to initialize loopback downloader session: %v", err)
 	}
 	downPeer.touch()
@@ -988,11 +909,11 @@ func TestLoopback_DownloadStartsWithPartialInitCompatibility(t *testing.T) {
 	seedSide.conn = seedConn
 	downSide.conn = downConn
 
-	downPeer, sessionCtx := downTorrent.prepareStoragePeer(seedTorrent.BagID, nil, downConn, nil)
-	if sessionCtx == nil {
+	downPeer, sessionAttempt := downTorrent.prepareStoragePeer(seedTorrent.BagID, nil, downConn, nil)
+	if sessionAttempt == nil {
 		t.Fatal("expected a fresh partial-init loopback session context")
 	}
-	atomic.StoreInt32(&downPeer.sessionInitialized, 1)
+	atomic.StoreInt32(&downPeer.session.localInitSent, 1)
 
 	complete, err := downPeer.applyInitChunk(seedTorrent.Info.PiecesNum(), 0, seedTorrent.PiecesMask())
 	if err != nil {
@@ -1001,8 +922,8 @@ func TestLoopback_DownloadStartsWithPartialInitCompatibility(t *testing.T) {
 	if !complete {
 		t.Fatal("expected small test bag init chunk to carry full mask")
 	}
-	if atomic.LoadInt32(&downPeer.updateInitReceived) != 0 {
-		t.Fatal("expected compatibility peer to stay partial and skip updateInitReceived")
+	if atomic.LoadInt32(&downPeer.session.remoteInitComplete) != 0 {
+		t.Fatal("expected compatibility peer to stay partial and skip remoteInitComplete")
 	}
 	if !downPeer.isDownloadUsable() {
 		t.Fatal("expected partial-init peer with known pieces to be download-usable")

@@ -13,7 +13,17 @@ import (
 	"time"
 )
 
-var DownloadPrefetch = uint32(runtime.NumCPU() * 2 * 16)
+var (
+	// DownloadPrefetch is kept as an optional piece-count cap for callers that
+	// tune it directly. Zero means the byte based window is used without an
+	// extra piece-count cap.
+	DownloadPrefetch = uint32(0)
+
+	DownloadOrderedPrefetchBytes   = uint64(64 << 20)
+	DownloadUnorderedPrefetchBytes = uint64(64 << 20)
+	DownloadPrefetchMinPieces      = uint32(4)
+	DownloadPieceCommitBatch       = uint32(32)
+)
 
 type fileInfo struct {
 	path string
@@ -24,6 +34,65 @@ type DownloadResult struct {
 	Path        string
 	Dir         string
 	Description string
+}
+
+type pendingPieceCommit struct {
+	id             uint32
+	startFileIndex uint32
+	proof          []byte
+}
+
+type pieceCommitter struct {
+	torrent    *Torrent
+	pending    []pendingPieceCommit
+	dirtyFiles map[FSFile]struct{}
+}
+
+func newPieceCommitter(torrent *Torrent) *pieceCommitter {
+	return &pieceCommitter{
+		torrent:    torrent,
+		dirtyFiles: map[FSFile]struct{}{},
+	}
+}
+
+func (c *pieceCommitter) MarkDirty(file FSFile) {
+	if file != nil {
+		c.dirtyFiles[file] = struct{}{}
+	}
+}
+
+func (c *pieceCommitter) Add(piece, startFileIndex uint32, proof []byte) error {
+	c.pending = append(c.pending, pendingPieceCommit{
+		id:             piece,
+		startFileIndex: startFileIndex,
+		proof:          append([]byte(nil), proof...),
+	})
+
+	if DownloadPieceCommitBatch > 0 && len(c.pending) >= int(DownloadPieceCommitBatch) {
+		return c.Flush()
+	}
+	return nil
+}
+
+func (c *pieceCommitter) Flush() error {
+	for file := range c.dirtyFiles {
+		if err := file.Sync(); err != nil {
+			return err
+		}
+	}
+
+	for _, piece := range c.pending {
+		if err := c.torrent.setPiece(piece.id, &PieceInfo{
+			StartFileIndex: piece.startFileIndex,
+			Proof:          piece.proof,
+		}, false); err != nil {
+			return fmt.Errorf("failed to save piece %d to db: %w", piece.id, err)
+		}
+	}
+
+	c.pending = nil
+	clear(c.dirtyFiles)
+	return nil
 }
 
 type Event struct {
@@ -44,6 +113,26 @@ const (
 	EventPieceDownloaded = "PIECE_DOWNLOADED"
 	EventProgress        = "PROGRESS"
 )
+
+func (t *Torrent) reportDownloadEvent(downloadFlag *bool, report func(Event), event Event) {
+	if report != nil {
+		report(event)
+	}
+
+	if event.Name != EventErr || t.currentDownloadFlag != downloadFlag {
+		return
+	}
+
+	err, _ := event.Value.(error)
+	if err == nil || errors.Is(err, context.Canceled) {
+		return
+	}
+
+	Logger("download failed for", hex.EncodeToString(t.BagID), "err:", err.Error())
+	if t.pause != nil {
+		t.pause()
+	}
+}
 
 func (t *Torrent) prepareDownloader(ctx context.Context) error {
 	if t.connector == nil {
@@ -68,6 +157,28 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+func downloadPrefetchPieces(pieceSize uint32, bytesLimit uint64) uint32 {
+	minPieces := DownloadPrefetchMinPieces
+	if minPieces == 0 {
+		minPieces = 1
+	}
+	if pieceSize == 0 || bytesLimit == 0 {
+		return minPieces
+	}
+
+	pieces := bytesLimit / uint64(pieceSize)
+	if pieces < uint64(minPieces) {
+		pieces = uint64(minPieces)
+	}
+	if DownloadPrefetch > 0 && pieces > uint64(DownloadPrefetch) {
+		pieces = uint64(DownloadPrefetch)
+	}
+	if pieces > uint64(^uint32(0)>>1) {
+		return ^uint32(0) >> 1
+	}
+	return uint32(pieces)
 }
 
 func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error) {
@@ -262,6 +373,9 @@ func (t *Torrent) startDownload(report func(Event)) error {
 	// we use flag pointer to know is download was replaced
 	var flag = false
 	t.currentDownloadFlag = &flag
+	emit := func(event Event) {
+		t.reportDownloadEvent(&flag, report, event)
+	}
 
 	stop := t.stopDownload
 	if stop != nil {
@@ -350,6 +464,10 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 		pieces := make([]byte, t.Info.PiecesNum())
 		for p := range piecesMap {
+			if p >= uint32(len(pieces)) {
+				emit(Event{Name: EventErr, Value: fmt.Errorf("piece %d is out of range", p)})
+				return
+			}
 			pieces[p] = 1
 		}
 
@@ -358,19 +476,20 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
 		})
 
-		report(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(piecesMap)}})
-		if len(pieces) > 0 {
+		emit(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(piecesMap)}})
+		if len(piecesMap) > 0 {
 			if err := t.prepareDownloader(ctx); err != nil {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
 				return
 			}
 
 			if t.downloadOrdered {
-				fetch := NewPreFetcher(ctx, t, report, DownloadPrefetch, pieces)
+				prefetch := downloadPrefetchPieces(t.Info.PieceSize, DownloadOrderedPrefetchBytes)
+				fetch := NewPreFetcher(ctx, t, emit, prefetch, pieces)
 				defer fetch.Stop()
 
 				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
-					report(Event{Name: EventErr, Value: err})
+					emit(Event{Name: EventErr, Value: err})
 					return
 				}
 			} else {
@@ -379,18 +498,35 @@ func (t *Torrent) startDownload(report func(Event)) error {
 					filesMap[file] = true
 				}
 
-				left := len(pieces)
-				ready := make(chan uint32, DownloadPrefetch)
-				fetch := NewPreFetcher(ctx, t, func(event Event) {
+				left := len(piecesMap)
+				prefetch := downloadPrefetchPieces(t.Info.PieceSize, DownloadUnorderedPrefetchBytes)
+				ready := make(chan uint32, prefetch)
+				fetch := NewUnorderedPreFetcher(ctx, t, func(event Event) {
 					if event.Name == EventPieceDownloaded {
-						ready <- event.Value.(uint32)
+						select {
+						case ready <- event.Value.(uint32):
+						case <-ctx.Done():
+							return
+						}
 					}
-					report(event)
-				}, DownloadPrefetch, pieces)
+					emit(event)
+				}, prefetch, pieces)
 				defer fetch.Stop()
 
 				var currentFile FSFile
 				var currentFileId uint32
+				committer := newPieceCommitter(t)
+				closeCurrentFile := func() error {
+					if currentFile == nil {
+						return nil
+					}
+					if err := committer.Flush(); err != nil {
+						return err
+					}
+					err := currentFile.Close()
+					currentFile = nil
+					return err
+				}
 				defer func() {
 					if currentFile != nil {
 						_ = currentFile.Close()
@@ -424,9 +560,8 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 								err = func() error {
 									if currentFile == nil || currentFileId != file.Index {
-										if currentFile != nil {
-											_ = currentFile.Close()
-											currentFile = nil
+										if err := closeCurrentFile(); err != nil {
+											return fmt.Errorf("failed to sync and close previous file: %w", err)
 										}
 
 										for x := 1; x <= 5; x++ {
@@ -465,9 +600,10 @@ func (t *Torrent) startDownload(report func(Event)) error {
 										if err != nil {
 											return fmt.Errorf("failed to write file %s: %w", file.Name, err)
 										}
+										committer.MarkDirty(currentFile)
 									}
 
-									return currentFile.Sync()
+									return nil
 								}()
 								if err != nil {
 									return err
@@ -475,33 +611,34 @@ func (t *Torrent) startDownload(report func(Event)) error {
 							}
 
 							if i == left-1 && currentFile != nil {
-								_ = currentFile.Close()
-								currentFile = nil
+								if err := closeCurrentFile(); err != nil {
+									return fmt.Errorf("failed to sync and close file: %w", err)
+								}
 							}
 
-							err = t.setPiece(piece, &PieceInfo{
-								StartFileIndex: pieceFiles[0].Index,
-								Proof:          currentProof,
-							}, false)
-							if err != nil {
-								return fmt.Errorf("failed to save piece %d to db: %w", piece, err)
+							if err = committer.Add(piece, pieceFiles[0].Index, currentProof); err != nil {
+								return err
 							}
 
 							return nil
 						}(e)
 						if err != nil {
-							report(Event{Name: EventErr, Value: err})
+							emit(Event{Name: EventErr, Value: err})
 							return
 						}
 					case <-ctx.Done():
-						report(Event{Name: EventErr, Value: ctx.Err()})
+						emit(Event{Name: EventErr, Value: ctx.Err()})
 						return
 					}
+				}
+				if err := committer.Flush(); err != nil {
+					emit(Event{Name: EventErr, Value: err})
+					return
 				}
 			}
 		}
 
-		report(Event{Name: EventDone, Value: DownloadResult{
+		emit(Event{Name: EventDone, Value: DownloadResult{
 			Path:        rootPath,
 			Dir:         string(t.Header.DirName),
 			Description: t.Info.Description.Value,
@@ -525,6 +662,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 	var currentPieceId uint32
 	var pieceStartFileIndex uint32
 	var currentPiece, currentProof []byte
+	committer := newPieceCommitter(t)
 	for _, off := range list {
 		err := func() error {
 			if strings.Contains(off.path, "..") {
@@ -553,12 +691,8 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						if currentPiece != nil {
 							fetch.Free(currentPieceId)
 
-							err = t.setPiece(currentPieceId, &PieceInfo{
-								StartFileIndex: pieceStartFileIndex,
-								Proof:          currentProof,
-							}, false)
-							if err != nil {
-								return fmt.Errorf("failed to save piece %d to db: %w", currentPieceId, err)
+							if err = committer.Add(currentPieceId, pieceStartFileIndex, currentProof); err != nil {
+								return err
 							}
 						}
 
@@ -591,9 +725,13 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 					if err != nil {
 						return fmt.Errorf("failed to write piece %d for file %s: %w", piece, off.path, err)
 					}
+					committer.MarkDirty(f)
 				}
 			}
 
+			if err = committer.Flush(); err != nil {
+				return err
+			}
 			report(Event{Name: EventFileDownloaded, Value: off.path})
 			return nil
 		}()
@@ -605,13 +743,9 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 	if currentPiece != nil {
 		fetch.Free(currentPieceId)
 
-		err := t.setPiece(currentPieceId, &PieceInfo{
-			StartFileIndex: pieceStartFileIndex,
-			Proof:          currentProof,
-		}, false)
-		if err != nil {
-			return fmt.Errorf("failed to save piece %d to db: %w", currentPieceId, err)
+		if err := committer.Add(currentPieceId, pieceStartFileIndex, currentProof); err != nil {
+			return err
 		}
 	}
-	return nil
+	return committer.Flush()
 }

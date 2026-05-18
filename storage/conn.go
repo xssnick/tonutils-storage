@@ -65,81 +65,50 @@ func (c *PeerConnection) GetFor(id []byte) *storagePeer {
 
 var ErrQueueIsBusy = errors.New("queue is busy")
 
-func (c *PeerConnection) AcquireControlQueueSlotWait(ctx context.Context) error {
-	select {
-	case c.controlQueue <- struct{}{}:
-	case <-ctx.Done():
-		return ErrQueueIsBusy
+func (c *PeerConnection) initQueue() chan struct{} {
+	if c.initControlQueue == nil {
+		return c.controlQueue
 	}
-	return nil
+	return c.initControlQueue
 }
 
-func (c *PeerConnection) AcquireControlQueueSlot() error {
+func acquireQueueSlot(ctx context.Context, queue chan struct{}, wait bool) error {
+	if wait {
+		select {
+		case queue <- struct{}{}:
+			return nil
+		case <-ctx.Done():
+			return ErrQueueIsBusy
+		}
+	}
+
 	select {
-	case c.controlQueue <- struct{}{}:
+	case queue <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ErrQueueIsBusy
 	default:
 		return ErrQueueIsBusy
 	}
-	return nil
 }
 
-func (c *PeerConnection) FreeControlQueueSlot() {
-	<-c.controlQueue
+func withQueueSlot(ctx context.Context, queue chan struct{}, wait bool, run func() error) error {
+	if err := acquireQueueSlot(ctx, queue, wait); err != nil {
+		return err
+	}
+	defer func() { <-queue }()
+
+	return run()
 }
 
-func (c *PeerConnection) AcquireInitControlQueueSlotWait(ctx context.Context) error {
-	if c.initControlQueue == nil {
-		return c.AcquireControlQueueSlotWait(ctx)
-	}
-
-	select {
-	case c.initControlQueue <- struct{}{}:
-	case <-ctx.Done():
-		return ErrQueueIsBusy
-	}
-	return nil
+func (c *PeerConnection) withControlQueueSlot(ctx context.Context, wait bool, run func() error) error {
+	return withQueueSlot(ctx, c.controlQueue, wait, run)
 }
 
-func (c *PeerConnection) AcquireInitControlQueueSlot() error {
-	if c.initControlQueue == nil {
-		return c.AcquireControlQueueSlot()
-	}
-
-	select {
-	case c.initControlQueue <- struct{}{}:
-	default:
-		return ErrQueueIsBusy
-	}
-	return nil
+func (c *PeerConnection) withInitControlQueueSlot(ctx context.Context, wait bool, run func() error) error {
+	return withQueueSlot(ctx, c.initQueue(), wait, run)
 }
 
-func (c *PeerConnection) FreeInitControlQueueSlot() {
-	if c.initControlQueue == nil {
-		c.FreeControlQueueSlot()
-		return
-	}
-
-	<-c.initControlQueue
-}
-
-func (c *PeerConnection) AcquireDataQueueSlotWait(ctx context.Context) error {
-	select {
-	case c.dataQueue <- struct{}{}:
-	case <-ctx.Done():
-		return ErrQueueIsBusy
-	}
-	return nil
-}
-
-func (c *PeerConnection) AcquireDataQueueSlot() error {
-	select {
-	case c.dataQueue <- struct{}{}:
-	default:
-		return ErrQueueIsBusy
-	}
-	return nil
-}
-
-func (c *PeerConnection) FreeDataQueueSlot() {
-	<-c.dataQueue
+func (c *PeerConnection) withDataQueueSlot(ctx context.Context, wait bool, run func() error) error {
+	return withQueueSlot(ctx, c.dataQueue, wait, run)
 }

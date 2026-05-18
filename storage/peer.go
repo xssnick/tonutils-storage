@@ -21,6 +21,11 @@ const (
 	peerIdleSweepInterval = 30 * time.Second
 )
 
+var (
+	UploadStatsFlushBytes    = uint64(16 << 20)
+	UploadStatsFlushInterval = 10 * time.Second
+)
+
 func (t *Torrent) GetPeers() map[string]PeerInfo {
 	t.peersMx.RLock()
 	defer t.peersMx.RUnlock()
@@ -78,13 +83,45 @@ func (t *Torrent) ResetDownloadPeer(id []byte) {
 }
 
 func (t *Torrent) UpdateUploadedPeer(peer *storagePeer, bytes uint64) {
-	_ = t.db.UpdateUploadStats(t.BagID, atomic.AddUint64(&t.stats.Uploaded, bytes))
+	uploaded := atomic.AddUint64(&t.stats.Uploaded, bytes)
+	t.maybeStoreUploadStats(uploaded, false)
 
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
 
 	p := t.touchPeer(peer)
 	p.Uploaded += bytes
+}
+
+func (t *Torrent) maybeStoreUploadStats(uploaded uint64, force bool) {
+	if t.db == nil {
+		return
+	}
+
+	now := time.Now()
+	stored := atomic.LoadUint64(&t.stats.StoredUploaded)
+	lastAtMs := atomic.LoadInt64(&t.stats.LastUploadStatsStoredAtMs)
+	if force && uploaded == stored && lastAtMs != 0 {
+		return
+	}
+
+	if !force {
+		bytesDue := UploadStatsFlushBytes == 0 || uploaded-stored >= UploadStatsFlushBytes
+		timeDue := lastAtMs == 0 || now.UnixMilli()-lastAtMs >= UploadStatsFlushInterval.Milliseconds()
+		if !bytesDue && !timeDue {
+			return
+		}
+	}
+
+	if !atomic.CompareAndSwapUint64(&t.stats.StoredUploaded, stored, uploaded) {
+		return
+	}
+	atomic.StoreInt64(&t.stats.LastUploadStatsStoredAtMs, now.UnixMilli())
+	_ = t.db.UpdateUploadStats(t.BagID, uploaded)
+}
+
+func (t *Torrent) flushUploadStats() {
+	t.maybeStoreUploadStats(atomic.LoadUint64(&t.stats.Uploaded), true)
 }
 
 func (p *storagePeer) markActivity() {
@@ -94,7 +131,7 @@ func (p *storagePeer) markActivity() {
 func (p *storagePeer) lastActivity() time.Time {
 	ts := atomic.LoadInt64(&p.lastActivityAt)
 	if ts == 0 {
-		ts = atomic.LoadInt64(&p.sessionInitAt)
+		ts = atomic.LoadInt64(&p.session.sessionInitAt)
 	}
 	if ts == 0 {
 		return time.Time{}

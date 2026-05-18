@@ -162,22 +162,42 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 	return p
 }
 
+func answerADNLStorageError(peer *overlay.ADNLWrapper, queryID []byte, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if sendErr := peer.Answer(ctx, queryID, StorageError{Message: err.Error()}); sendErr != nil {
+		return fmt.Errorf("%w; failed to send storage error: %v", err, sendErr)
+	}
+	return nil
+}
+
+func answerRLDPStorageError(peer *overlay.RLDPWrapper, transfer []byte, query *rldp.Query, err error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if sendErr := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, StorageError{Message: err.Error()}); sendErr != nil {
+		return fmt.Errorf("%w; failed to send storage error: %v", err, sendErr)
+	}
+	return nil
+}
+
 func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.MessageQuery) error {
 	return func(query *adnl.MessageQuery) error {
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		if s.store == nil {
-			return fmt.Errorf("storage is not yet initialized")
+			return answerADNLStorageError(peer, query.ID, fmt.Errorf("storage is not yet initialized"))
 		}
 
 		t := s.store.GetTorrentByOverlay(over)
 		if t == nil {
-			return fmt.Errorf("bag not found")
+			return answerADNLStorageError(peer, query.ID, fmt.Errorf("not found"))
 		}
 
 		isDow, isUpl := t.IsActive()
 		if !isUpl && !isDow {
-			return fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID))
+			return answerADNLStorageError(peer, query.ID, fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID)))
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -187,7 +207,7 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 		case overlay.GetRandomPeers:
 			node, err := overlay.NewNode(t.BagID, s.key)
 			if err != nil {
-				return err
+				return answerADNLStorageError(peer, query.ID, err)
 			}
 
 			peers := []overlay.Node{*node}
@@ -211,20 +231,21 @@ func (s *Server) handleQuery(peer *overlay.ADNLWrapper) func(query *adnl.Message
 		case Ping:
 			p := s.GetPeerIfActive(peer.GetID())
 			if p == nil {
-				return fmt.Errorf("peer disconnected")
+				return answerADNLStorageError(peer, query.ID, fmt.Errorf("peer disconnected"))
 			}
 
-			stNode, sessionCtx := t.prepareStoragePeer(over, nil, p, &q.SessionID)
-			if sessionCtx != nil {
-				go func() {
-					_ = stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), false)
-				}()
-			}
-			stNode.touch()
+			_, sessionInit := t.routeIncomingPeerEvent(incomingPeerEvent{
+				overlay:   over,
+				conn:      p,
+				sessionID: &q.SessionID,
+			})
+			defer sessionInit.schedule()
 
 			if err := peer.Answer(ctx, query.ID, Pong{}); err != nil {
 				return err
 			}
+		default:
+			return answerADNLStorageError(peer, query.ID, fmt.Errorf("unsupported storage query %T", req))
 		}
 
 		return nil
@@ -236,53 +257,49 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		req, over := overlay.UnwrapQuery(query.Data)
 
 		if s.store == nil {
-			return fmt.Errorf("storage is not yet initialized")
+			return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("storage is not yet initialized"))
 		}
 
 		t := s.store.GetTorrentByOverlay(over)
 		if t == nil {
-			return fmt.Errorf("bag not found")
+			return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("not found"))
 		}
 
 		isDow, isUpl := t.IsActive()
 		if !isDow && !isUpl {
-			return fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID))
+			return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("bag %s is not active", hex.EncodeToString(t.BagID)))
 		}
 
 		adnlId := peer.GetADNL().GetID()
 
 		var sesId *int64
+		var updateSesId *int64
+		var updateSessionID int64
 		var timeout = 7 * time.Second
+
 		switch q := req.(type) {
 		case GetPiece:
 			timeout = t.transmitTimeout()
 		case Ping:
 			sesId = &q.SessionID
 		case AddUpdate:
+			updateSessionID = q.SessionID
+			updateSesId = &updateSessionID
 			timeout = 20 * time.Second
 		}
 
 		p := s.GetPeerIfActive(adnlId)
 		if p == nil {
-			return fmt.Errorf("peer disconnected")
+			return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("peer disconnected"))
 		}
 
-		if sesId == nil {
-			if existing := p.GetFor(t.BagID); existing != nil {
-				current := atomic.LoadInt64(&existing.sessionId)
-				if current != 0 {
-					sesId = &current
-				}
-			}
-		}
-
-		stPeer, sessionCtx := t.prepareStoragePeer(over, nil, p, sesId)
-		if sessionCtx != nil {
-			go func() {
-				_ = stPeer.initializeSession(sessionCtx, atomic.LoadInt64(&stPeer.sessionId), sesId == nil)
-			}()
-		}
-		stPeer.touch()
+		stPeer, sessionInit := t.routeIncomingPeerEvent(incomingPeerEvent{
+			overlay:         over,
+			conn:            p,
+			sessionID:       sesId,
+			updateSessionID: updateSesId,
+		})
+		defer sessionInit.schedule()
 
 		ctx, cancel := context.WithTimeout(t.globalCtx, timeout)
 		defer cancel()
@@ -291,7 +308,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		case overlay.GetRandomPeers:
 			node, err := overlay.NewNode(t.BagID, s.key)
 			if err != nil {
-				return err
+				return answerRLDPStorageError(peer, transfer, query, err)
 			}
 
 			peers := []overlay.Node{*node}
@@ -314,21 +331,19 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 		case GetPiece:
 			if !isUpl {
-				return fmt.Errorf("bag is not for upload")
+				return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("bag is not for upload"))
 			}
 
 			tm := time.Now()
 
 			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
 			if err != nil {
-				// we will not respond on this, because it will be incompatible with protocol,
-				// sender will retry to get the data
-				return nil
+				return answerRLDPStorageError(peer, transfer, query, err)
 			}
 
 			pc, err := t.GetPiece(uint32(q.PieceID))
 			if err != nil {
-				return err
+				return answerRLDPStorageError(peer, transfer, query, err)
 			}
 
 			Logger("[STORAGE] LOADED PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
@@ -350,14 +365,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 		case GetTorrentInfo:
 			if !isUpl {
-				return fmt.Errorf("bag is not for upload")
+				return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("bag is not for upload"))
 			}
 
 			Logger("[STORAGE] SENDING TORRENT INFO TO", hex.EncodeToString(adnlId), "FOR", hex.EncodeToString(t.BagID))
 
 			c, err := tlb.ToCell(t.Info)
 			if err != nil {
-				return err
+				return answerRLDPStorageError(peer, transfer, query, err)
 			}
 
 			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, TorrentInfoContainer{
@@ -369,115 +384,131 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 			Logger("[STORAGE] SENT TORRENT INFO TO", hex.EncodeToString(adnlId), "FOR", hex.EncodeToString(t.BagID))
 		case AddUpdate:
-			if q.SessionID != atomic.LoadInt64(&stPeer.sessionId) {
-				Logger("UPDATE SESSION MISSMATCH", q.SessionID, atomic.LoadInt64(&stPeer.sessionId), hex.EncodeToString(adnlId), hex.EncodeToString(t.BagID))
-				return fmt.Errorf("session id mismatch")
-			}
-
-			switch u := q.Update.(type) {
-			case UpdateInit:
-				Logger("[STORAGE] NODE REPORTED INIT PIECES INFO", hex.EncodeToString(adnlId), q.SessionID, q.Seqno)
-				if u.HavePiecesOffset < 0 {
-					return fmt.Errorf("invalid pieces offset")
-				}
-				off := uint32(u.HavePiecesOffset)
-
-				t.mx.RLock()
-				info := t.Info
-				t.mx.RUnlock()
-
-				queued := false
-				if info == nil {
-					if err := stPeer.queuePendingInitChunk(off, u.HavePieces); err != nil {
-						return err
-					}
-					queued = true
-
-					t.mx.RLock()
-					info = t.Info
-					t.mx.RUnlock()
-					if info == nil {
-						break
-					}
-				}
-
-				complete, err := stPeer.flushPendingPieceUpdates(info.PiecesNum())
-				if err != nil {
-					return err
-				}
-				if complete {
-					atomic.StoreInt32(&stPeer.updateInitReceived, 1)
-					t.wake.fire()
-				}
-				if queued {
-					break
-				}
-
-				complete, err = stPeer.applyInitChunk(info.PiecesNum(), off, u.HavePieces)
-				if err != nil {
-					return err
-				}
-
-				if complete {
-					atomic.StoreInt32(&stPeer.updateInitReceived, 1)
-					t.wake.fire()
-				}
-			case UpdateHavePieces:
-				t.mx.RLock()
-				info := t.Info
-				t.mx.RUnlock()
-
-				queued := false
-				if info == nil {
-					if err := stPeer.queuePendingHavePieces(u.PieceIDs); err != nil {
-						return err
-					}
-					queued = true
-
-					t.mx.RLock()
-					info = t.Info
-					t.mx.RUnlock()
-					if info == nil {
-						break
-					}
-				}
-
-				complete, err := stPeer.flushPendingPieceUpdates(info.PiecesNum())
-				if err != nil {
-					return err
-				}
-				if complete {
-					atomic.StoreInt32(&stPeer.updateInitReceived, 1)
-					t.wake.fire()
-				}
-				if queued {
-					break
-				}
-
-				Logger("[STORAGE] NODE HAS NEW PIECES", hex.EncodeToString(adnlId))
-				stPeer.piecesMx.Lock()
-				err = stPeer.applyHavePiecesLocked(info.PiecesNum(), u.PieceIDs)
-				stPeer.piecesMx.Unlock()
-				if err != nil {
-					return err
-				}
-				t.wake.fire()
+			if err := t.routeIncomingSessionUpdate(stPeer, adnlId, incomingSessionUpdate{
+				sessionID: q.SessionID,
+				seqno:     q.Seqno,
+				update:    q.Update,
+			}); err != nil {
+				return answerRLDPStorageError(peer, transfer, query, err)
 			}
 
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, &Ok{})
 			if err != nil {
 				return err
 			}
+		default:
+			return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("unsupported storage query %T", req))
 		}
 
 		return nil
 	}
 }
 
+type incomingPeerEvent struct {
+	overlay         []byte
+	overlayNode     *overlay.Node
+	conn            *PeerConnection
+	sessionID       *int64
+	updateSessionID *int64
+}
+
+type sessionInitTask struct {
+	peer    *storagePeer
+	attempt *peerSessionAttempt
+	doPing  bool
+}
+
+func (t *Torrent) routeIncomingPeerEvent(event incomingPeerEvent) (*storagePeer, sessionInitTask) {
+	sessionID := event.sessionID
+	if sessionID == nil {
+		sessionID = selectIncomingSessionID(event.conn, t.BagID, event.updateSessionID)
+	}
+
+	stPeer, sessionAttempt := t.prepareStoragePeer(event.overlay, event.overlayNode, event.conn, sessionID)
+	stPeer.touch()
+	if sessionAttempt == nil {
+		return stPeer, sessionInitTask{}
+	}
+
+	return stPeer, sessionInitTask{
+		peer:    stPeer,
+		attempt: sessionAttempt,
+		doPing:  sessionID == nil,
+	}
+}
+
+func (t sessionInitTask) schedule() {
+	if t.peer == nil || t.attempt == nil {
+		return
+	}
+	if !t.peer.session.tryScheduleInit(*t.attempt) {
+		return
+	}
+
+	go func() {
+		_ = t.peer.initializeSession(t.attempt, t.doPing)
+	}()
+}
+
+type incomingSessionUpdate struct {
+	sessionID int64
+	seqno     int64
+	update    any
+}
+
+func (t *Torrent) routeIncomingSessionUpdate(peer *storagePeer, adnlID []byte, update incomingSessionUpdate) error {
+	currentSessionID := atomic.LoadInt64(&peer.session.sessionId)
+	if update.sessionID != currentSessionID {
+		Logger("UPDATE SESSION MISSMATCH", update.sessionID, currentSessionID, hex.EncodeToString(adnlID), hex.EncodeToString(t.BagID))
+		return fmt.Errorf("session id mismatch")
+	}
+	if !peer.session.acceptRemoteSeqno(update.seqno) {
+		Logger("UPDATE SESSION STALE SEQNO", update.seqno, hex.EncodeToString(adnlID), hex.EncodeToString(t.BagID))
+		return fmt.Errorf("stale session update seqno")
+	}
+
+	switch update.update.(type) {
+	case UpdateInit:
+		Logger("[STORAGE] NODE REPORTED INIT PIECES INFO", hex.EncodeToString(adnlID), update.sessionID, update.seqno)
+	case UpdateHavePieces:
+		Logger("[STORAGE] NODE HAS NEW PIECES", hex.EncodeToString(adnlID))
+	}
+
+	return peer.applySessionUpdate(update.update)
+}
+
+func selectIncomingSessionID(conn *PeerConnection, bagID []byte, updateSesId *int64) *int64 {
+	if existing := conn.GetFor(bagID); existing != nil {
+		current := atomic.LoadInt64(&existing.session.sessionId)
+		if updateSesId != nil && (current == 0 || current == *updateSesId ||
+			(!existing.isDownloadUsable() && existing.initProgressTimedOut(time.Now(), 45*time.Second))) {
+			return updateSesId
+		}
+		if current != 0 {
+			return &current
+		}
+		return nil
+	}
+	if updateSesId != nil {
+		return updateSesId
+	}
+	return nil
+}
+
 const maxPiecesBytesPerRequest = 6000
 const maxNewPiecesPerRequest = maxPiecesBytesPerRequest / 4
+const peerSearcherInterval = time.Second
 
 func (p *storagePeer) updateInitPieces(ctx context.Context) error {
+	attempt := p.currentSessionAttempt(ctx)
+	return p.sendInitPieces(ctx, attempt)
+}
+
+func (p *storagePeer) sendInitPieces(ctx context.Context, attempt peerSessionAttempt) error {
+	if !p.isSessionAttemptCurrent(attempt) {
+		return errStaleSessionAttempt
+	}
+
 	num := p.torrent.Info.PiecesNum()
 	isDow, isUpl := p.torrent.IsActiveRaw()
 	cursor := p.torrent.currentNewPiecesCursor()
@@ -489,6 +520,10 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 
 	sent := uint32(0)
 	for i := uint32(0); sent < num; i++ {
+		if !p.isSessionAttemptCurrent(attempt) {
+			return errStaleSessionAttempt
+		}
+
 		p.piecesMx.RLock()
 		have := p.lastSentPieces[i*maxPiecesBytesPerRequest:]
 		p.piecesMx.RUnlock()
@@ -498,8 +533,8 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 		}
 
 		up := AddUpdate{
-			SessionID: atomic.LoadInt64(&p.sessionId),
-			Seqno:     atomic.AddInt64(&p.sessionSeqno, 1),
+			SessionID: attempt.id,
+			Seqno:     atomic.AddInt64(&p.session.sessionSeqno, 1),
 			Update: UpdateInit{
 				HavePieces:       have,
 				HavePiecesOffset: int32(sent),
@@ -512,16 +547,14 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 
 		var updRes Ok
 
-		if err := p.conn.AcquireInitControlQueueSlotWait(ctx); err != nil {
-			return fmt.Errorf("failed to acquire queue slot: %w", err)
-		}
+		err := p.conn.withInitControlQueueSlot(ctx, true, func() error {
+			ctxReq, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
 
-		ctxReq, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
-		cancel()
-		p.conn.FreeInitControlQueueSlot()
+			return p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
+		})
 		if err != nil {
-			Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(p.conn.adnl.GetID()), p.sessionId, err.Error())
+			Logger("[STORAGE] FAILED TO SEND UPDATE INIT", i, hex.EncodeToString(p.conn.adnl.GetID()), attempt.id, err.Error())
 			return fmt.Errorf("failed to send have pieces update: %w", err)
 		}
 
@@ -534,7 +567,12 @@ func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 }
 
 func (p *storagePeer) updateHavePieces(ctx context.Context) error {
+	attempt := p.currentSessionAttempt(ctx)
 	for {
+		if !p.isSessionAttemptCurrent(attempt) {
+			return nil
+		}
+
 		cursor := atomic.LoadUint64(&p.lastSentNewPiecesPos)
 		have, nextCursor := p.torrent.getNewPiecesSince(cursor, maxNewPiecesPerRequest)
 		if len(have) == 0 {
@@ -542,8 +580,8 @@ func (p *storagePeer) updateHavePieces(ctx context.Context) error {
 		}
 
 		up := AddUpdate{
-			SessionID: atomic.LoadInt64(&p.sessionId),
-			Seqno:     atomic.AddInt64(&p.sessionSeqno, 1),
+			SessionID: attempt.id,
+			Seqno:     atomic.AddInt64(&p.session.sessionSeqno, 1),
 			Update: UpdateHavePieces{
 				PieceIDs: have,
 			},
@@ -551,45 +589,50 @@ func (p *storagePeer) updateHavePieces(ctx context.Context) error {
 
 		var updRes Ok
 
-		if err := p.conn.AcquireControlQueueSlot(); err != nil {
-			return fmt.Errorf("failed to acquire queue slot: %w", err)
-		}
+		err := p.conn.withControlQueueSlot(ctx, false, func() error {
+			ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
+			defer cancel()
 
-		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
-		err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
-		cancel()
-		p.conn.FreeControlQueueSlot()
+			return p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &updRes)
+		})
 		if err != nil {
-			Logger("[STORAGE] FAILED TO SEND UPDATE HAVE", hex.EncodeToString(p.conn.adnl.GetID()), p.sessionId, err.Error())
+			Logger("[STORAGE] FAILED TO SEND UPDATE HAVE", hex.EncodeToString(p.conn.adnl.GetID()), attempt.id, err.Error())
 			return fmt.Errorf("failed to send have pieces update: %w", err)
 		}
 
+		if !p.isSessionAttemptCurrent(attempt) {
+			return nil
+		}
 		atomic.StoreUint64(&p.lastSentNewPiecesPos, nextCursor)
 		p.torrent.compactNewPieces()
 	}
 }
 
 func (p *storagePeer) updateState(ctx context.Context) error {
+	attempt := p.currentSessionAttempt(ctx)
+	if !p.isSessionAttemptCurrent(attempt) {
+		return errStaleSessionAttempt
+	}
+
+	isDow, isUpl := p.torrent.IsActiveRaw()
 	up := AddUpdate{
-		SessionID: atomic.LoadInt64(&p.sessionId),
-		Seqno:     atomic.AddInt64(&p.sessionSeqno, 1),
+		SessionID: attempt.id,
+		Seqno:     atomic.AddInt64(&p.session.sessionSeqno, 1),
 		Update: UpdateState{
 			State: State{
-				WillUpload:   true,
-				WantDownload: true,
+				WillUpload:   isUpl,
+				WantDownload: isDow,
 			},
 		},
 	}
 
-	if err := p.conn.AcquireControlQueueSlotWait(ctx); err != nil {
-		return fmt.Errorf("failed to acquire queue slot: %w", err)
-	}
-
 	var res Ok
-	ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
-	err := p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &res)
-	cancel()
-	p.conn.FreeControlQueueSlot()
+	err := p.conn.withControlQueueSlot(ctx, true, func() error {
+		ctxReq, cancel := context.WithTimeout(ctx, 7*time.Second)
+		defer cancel()
+
+		return p.conn.rldp.DoQuery(ctxReq, 1<<20, overlay.WrapQuery(p.overlay, up), &res)
+	})
 	if err != nil {
 		Logger("[STORAGE] FAILED TO SEND UPDATE STATE", hex.EncodeToString(p.conn.adnl.GetID()), err.Error())
 		return fmt.Errorf("failed to send state update: %w", err)
@@ -601,7 +644,7 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	addr := s.gate.GetAddressList()
 
 	ctxStore, cancel := context.WithTimeout(ctx, 90*time.Second)
-	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 20*time.Minute, s.key, 3)
+	stored, id, err := s.dht.StoreAddress(ctxStore, addr, 20*time.Minute, s.key)
 	cancel()
 	if err != nil && stored == 0 {
 		return err
@@ -698,7 +741,7 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 
 		tm = time.Now()
 		ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
-		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 45*time.Minute, 3)
+		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 45*time.Minute)
 		cancel()
 		if err != nil && stored == 0 {
 			Logger("[STORAGE_DHT] FAILED TO STORE DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
@@ -820,9 +863,14 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 				s.dhtCacheMx.Unlock()
 			}
 		}
-		Logger("[STORAGE] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addrs.Addresses[0].IP.String(), addrs.Addresses[0].Port, "PUBKEY", hex.EncodeToString(key.Key), "FOR", hex.EncodeToString(t.BagID), "ELAPSED", time.Since(start).Seconds())
-
-		addr := addrs.Addresses[0].IP.String() + ":" + fmt.Sprint(addrs.Addresses[0].Port)
+		if addrs == nil || len(addrs.Addresses) == 0 {
+			return fmt.Errorf("node has no known addresses")
+		}
+		addr, err := address.DialString(addrs.Addresses[0])
+		if err != nil {
+			return fmt.Errorf("failed to format node address: %w", err)
+		}
+		Logger("[STORAGE] ADDR FOR NODE ", hex.EncodeToString(adnlID), "FOUND", addr, "PUBKEY", hex.EncodeToString(key.Key), "FOR", hex.EncodeToString(t.BagID), "ELAPSED", time.Since(start).Seconds())
 
 		ax, err := s.gate.RegisterClient(addr, key.Key)
 		if err != nil {
@@ -833,7 +881,7 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		Logger("[STORAGE] HAS ALREADY ACTIVE PEER FOR NODE ", hex.EncodeToString(adnlID), "ADDR", peer.adnl.RemoteAddr(), "ADDING FOR", hex.EncodeToString(t.BagID))
 	}
 
-	stNode, sessionCtx := t.prepareStoragePeer(node.Overlay, node, peer, nil)
+	stNode, sessionAttempt := t.prepareStoragePeer(node.Overlay, node, peer, nil)
 
 	select {
 	case <-ctx.Done():
@@ -843,8 +891,8 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		defer func() { <-peer.bagsInitQueue }()
 	}
 
-	if sessionCtx != nil {
-		err = stNode.initializeSession(sessionCtx, atomic.LoadInt64(&stNode.sessionId), true)
+	if sessionAttempt != nil {
+		err = stNode.initializeSession(sessionAttempt, true)
 		if err != nil {
 			return err
 		}
@@ -889,15 +937,13 @@ func (p *storagePeer) prepareTorrentInfo(ctx context.Context) error {
 		tm := time.Now()
 		Logger("[STORAGE] REQUESTING TORRENT INFO FROM", hex.EncodeToString(p.nodeId), p.nodeAddr, "FOR", hex.EncodeToString(p.torrent.BagID))
 
-		if err := p.conn.AcquireInitControlQueueSlotWait(ctx); err != nil {
-			return fmt.Errorf("failed to acquire queue slot: %w", err)
-		}
-
 		var res TorrentInfoContainer
-		infCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		err := p.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(p.overlay, &GetTorrentInfo{}), &res)
-		cancel()
-		p.conn.FreeInitControlQueueSlot()
+		err := p.conn.withInitControlQueueSlot(ctx, true, func() error {
+			infCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+
+			return p.conn.rldp.DoQuery(infCtx, 1<<25, overlay.WrapQuery(p.overlay, &GetTorrentInfo{}), &res)
+		})
 		if err != nil {
 			Logger("[STORAGE] ERR ", err.Error(), " REQUESTING TORRENT INFO FROM", hex.EncodeToString(p.nodeId), p.nodeAddr, "FOR", hex.EncodeToString(p.torrent.BagID))
 			return err
@@ -914,7 +960,11 @@ func (p *storagePeer) prepareTorrentInfo(ctx context.Context) error {
 		}
 
 		var info TorrentInfo
-		err = tlb.LoadFromCell(&info, cl.BeginParse())
+		loader, err := cl.BeginParse()
+		if err != nil {
+			return fmt.Errorf("invalid torrent info cell")
+		}
+		err = tlb.LoadFromCell(&info, loader)
 		if err != nil {
 			return fmt.Errorf("invalid torrent info cell")
 		}
@@ -962,15 +1012,14 @@ func (p *storagePeer) prepareTorrentInfo(ctx context.Context) error {
 			return err
 		}
 		if complete {
-			atomic.StoreInt32(&p.updateInitReceived, 1)
-			p.torrent.wake.fire()
+			p.markRemoteInitComplete()
 		}
 	}
 	return nil
 }
 
 func (s *Server) startPeerSearcher() {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(peerSearcherInterval)
 	defer ticker.Stop()
 
 	updateSem := make(chan struct{}, s.dhtParallelism)
@@ -1109,7 +1158,7 @@ func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
 	return s.key
 }
 
-func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *PeerConnection, sessionId *int64) (*storagePeer, context.Context) {
+func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *PeerConnection, sessionId *int64) (*storagePeer, *peerSessionAttempt) {
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
@@ -1121,7 +1170,7 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 
 			v := rand.Int63()
 			sessionId = &v
-		} else if atomic.LoadInt64(&n.sessionId) == *sessionId {
+		} else if atomic.LoadInt64(&n.session.sessionId) == *sessionId {
 			return n, nil
 		}
 
@@ -1129,14 +1178,9 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 			n.stopSession()
 		}
 
-		Logger("[STORAGE] REINITIALIZE REQUEST FOR", hex.EncodeToString(n.nodeId), "BAG", hex.EncodeToString(t.BagID), "OLD SESSION", atomic.LoadInt64(&n.sessionId), "NEW SESSION", *sessionId)
+		Logger("[STORAGE] REINITIALIZE REQUEST FOR", hex.EncodeToString(n.nodeId), "BAG", hex.EncodeToString(t.BagID), "OLD SESSION", atomic.LoadInt64(&n.session.sessionId), "NEW SESSION", *sessionId)
 
-		atomic.StoreInt64(&n.sessionInitAt, time.Now().UnixMilli())
-		atomic.StoreInt32(&n.sessionInitialized, 0)
-		atomic.StoreInt32(&n.updateInitReceived, 0)
-		atomic.StoreInt64(&n.sessionId, *sessionId)
-		atomic.StoreInt64(&n.sessionSeqno, 0)
-		atomic.StoreInt64(&n.lastInitChunkAt, 0)
+		generation := n.session.resetForReinit(*sessionId, time.Now())
 		atomic.StoreUint64(&n.lastSentNewPiecesPos, 0)
 
 		var piecesNum uint32
@@ -1151,24 +1195,28 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 		var sessionCtx context.Context
 		sessionCtx, n.stopSession = context.WithCancel(n.closerCtx)
 
-		return n, sessionCtx
+		return n, newPeerSessionAttempt(sessionCtx, *sessionId, generation)
 	}
 
 	if sessionId == nil {
 		v := rand.Int63()
 		sessionId = &v
 	}
+	generation := uint64(1)
 
 	stNode := &storagePeer{
 		torrent:        t,
 		nodeAddr:       conn.adnl.RemoteAddr(),
 		nodeId:         conn.adnl.GetID(),
 		conn:           conn,
-		sessionId:      *sessionId,
-		sessionInitAt:  time.Now().UnixMilli(),
 		lastActivityAt: time.Now().UnixMilli(),
 		overlay:        over,
 		overlayNode:    oNode,
+		session: peerSessionState{
+			sessionId:     *sessionId,
+			sessionGen:    generation,
+			sessionInitAt: time.Now().UnixMilli(),
+		},
 	}
 	stNode.closerCtx, stNode.stop = context.WithCancel(t.globalCtx)
 
@@ -1187,5 +1235,5 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 
 	conn.UseFor(stNode)
 
-	return stNode, sessionCtx
+	return stNode, newPeerSessionAttempt(sessionCtx, *sessionId, generation)
 }

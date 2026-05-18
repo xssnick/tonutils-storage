@@ -316,7 +316,10 @@ func checkProofBranch(proof *cell.Cell, piece, piecesNum uint32) error {
 		return fmt.Errorf("piece is out of range %d/%d", piece, piecesNum)
 	}
 
-	tree := proof.BeginParse()
+	tree, err := proof.BeginParse()
+	if err != nil {
+		return err
+	}
 
 	// calc tree depth
 	depth := int(math.Log2(float64(piecesNum)))

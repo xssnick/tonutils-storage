@@ -4,11 +4,9 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"runtime"
 	"strings"
 	"sync"
@@ -167,7 +165,13 @@ func computeHashesAndJoinPieces(
 	if waiter != nil {
 		waiter, _ = termui.StartSpinner("Building merkle tree...")
 	}
-	hashTree := buildMerkleTree(hashes, 9) // 9 is most efficient in most cases
+	hashTree, err := buildMerkleTree(ctx, hashes, 9) // 9 is most efficient in most cases
+	if err != nil {
+		if waiter != nil {
+			waiter.Fail(err.Error())
+		}
+		return err
+	}
 	rootHash := hashTree.Hash()
 	if waiter != nil {
 		waiter.Success("Merkle tree successfully built")
@@ -239,9 +243,15 @@ func joinTorrentPieces(
 					}
 				}
 
-				err := torrent.setPiece(p.id, &PieceInfo{
+				proof, err := torrent.fastProof(hashTree, p.id, torrent.Info.PiecesNum())
+				if err != nil {
+					toCalcErr <- err
+					return
+				}
+
+				err = torrent.setPiece(p.id, &PieceInfo{
 					StartFileIndex: p.startIndex,
-					Proof:          torrent.fastProof(hashTree, p.id, torrent.Info.PiecesNum()).ToBOCWithFlags(false),
+					Proof:          proof.ToBOCWithFlags(false),
 				}, false)
 				if err != nil {
 					toCalcErr <- err
@@ -292,8 +302,8 @@ func computeFileHashes(
 	piecesNum uint64, doneProgress *uint64, maxProgress uint64,
 	waiter *termui.Spinner,
 	progressCallback func(done uint64, max uint64),
-) ([][]byte, []uint32, error) {
-	hashes := make([][]byte, piecesNum)
+) ([]merkleHash, []uint32, error) {
+	hashes := make([]merkleHash, piecesNum)
 	piecesStartFileIndexes := make([]uint32, piecesNum)
 	pieceStartFileIndex := uint32(0)
 	cb := make([]byte, pieceSize)
@@ -301,7 +311,6 @@ func computeFileHashes(
 	var filesProcessed uint32
 	var piecesProcessed int64
 
-	hx := sha256.New()
 	process := func(isHeader bool, size uint64, rd io.ReaderAt, progress *termui.ProgressBar) error {
 		var fileOffset int64 = 0
 		end := false
@@ -341,8 +350,7 @@ func computeFileHashes(
 										break
 									}
 
-									h := sha256.Sum256(buf)
-									hashes[j.piece] = h[:]
+									hashes[j.piece] = sha256.Sum256(buf)
 									piecesStartFileIndexes[j.piece] = pieceStartFileIndex
 
 									select {
@@ -409,11 +417,9 @@ func computeFileHashes(
 			cbOffset += n
 
 			if cbOffset == int(pieceSize) {
-				hx.Write(cb)
-				hashes[piecesProcessed] = hx.Sum(nil)
+				hashes[piecesProcessed] = sha256.Sum256(cb)
 				// save index of file where block starts
 				piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
-				hx.Reset()
 
 				piecesProcessed++
 
@@ -468,8 +474,7 @@ func computeFileHashes(
 
 	if cbOffset != 0 {
 		// last data hash
-		hx.Write(cb[:cbOffset])
-		hashes[piecesProcessed] = hx.Sum(nil)
+		hashes[piecesProcessed] = sha256.Sum256(cb[:cbOffset])
 
 		// save index of file where block starts
 		piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
@@ -488,190 +493,20 @@ func computeFileHashes(
 	return hashes, piecesStartFileIndexes, nil
 }
 
-var _emptyHashCell = cell.FromRawUnsafe(cell.RawUnsafeCell{
-	BitsSz: 256,
-	Data:   make([]byte, 32),
-})
-
-func buildMerkleTree(hashes [][]byte, parallelDepth int) *cell.Cell {
-	logN := uint32(0)
-	for (1 << logN) < len(hashes) {
-		logN++
-	}
-	n := 1 << logN
-	cells := make([]*cell.Cell, n)
-
-	for i := 0; i < len(hashes); i++ {
-		cells[i] = cell.FromRawUnsafe(cell.RawUnsafeCell{
-			BitsSz: 256,
-			Data:   hashes[i],
-		})
-	}
-
-	for i := len(hashes); i < n; i++ {
-		cells[i] = _emptyHashCell
-	}
-	return createMerkleTreeCell(cells, 1<<parallelDepth)
-}
-
-func createMerkleTreeCell(cells []*cell.Cell, depthParallel int) *cell.Cell {
-	switch len(cells) {
-	case 0:
-		panic("empty cells")
-	case 1:
-		return cells[0]
-	case 2:
-		return cell.FromRawUnsafe(cell.RawUnsafeCell{
-			Refs: []*cell.Cell{cells[0], cells[1]},
-		})
-	default:
-		var left, right *cell.Cell
-		if len(cells) >= depthParallel {
-			cLeft := make(chan *cell.Cell, 1)
-			cRight := make(chan *cell.Cell, 1)
-			go func() {
-				cLeft <- createMerkleTreeCell(cells[:len(cells)/2], depthParallel)
-			}()
-			go func() {
-				cRight <- createMerkleTreeCell(cells[len(cells)/2:], depthParallel)
-			}()
-			left = <-cLeft   // wait for left
-			right = <-cRight // then wait for right
-		} else {
-			left = createMerkleTreeCell(cells[:len(cells)/2], depthParallel)
-			right = createMerkleTreeCell(cells[len(cells)/2:], depthParallel)
-		}
-
-		return cell.FromRawUnsafe(cell.RawUnsafeCell{
-			Refs: []*cell.Cell{left, right},
-		})
-	}
-}
-
 func calcHash(cb []byte) []byte {
 	hash := sha256.Sum256(cb)
 	return hash[:]
 }
 
-func (t *Torrent) fastProof(root *cell.Cell, piece, piecesNum uint32) *cell.Cell {
-	if piecesNum == 1 {
-		//special case
-		pf, _ := root.CreateProof(cell.CreateProofSkeleton())
-		return pf
-	}
-
-	// calc tree depth
-	depth := int(math.Log2(float64(piecesNum)))
-	if piecesNum > uint32(math.Pow(2, float64(depth))) {
-		// add 1 if pieces num is not exact log2
-		depth++
-	}
-
-	data := make([]byte, 1+32+2)
-	data[0] = 0x03 // merkle proof
-	copy(data[1:], root.Hash())
-	binary.BigEndian.PutUint16(data[1+32:], uint16(depth))
-
-	proof := cell.RawUnsafeCell{
-		IsSpecial: true,
-		LevelMask: cell.LevelMask{Mask: 0},
-		BitsSz:    uint(len(data) * 8),
-		Data:      data,
-	}
-
-	if depth == 0 {
-		// nothing to prune
-		return cell.FromRawUnsafe(proof)
-	}
-
-	type pair struct {
-		leftPruned bool
-		left       *cell.Builder
-		right      *cell.Builder
-	}
-
-	var pairs = make([]pair, 0, depth)
-
-	// check bits from left to right and load branches
-	for i := depth - 1; i >= 0; i-- {
-		isLeft := piece&(1<<i) == 0
-		if i == 0 {
-			pairs = append(pairs, pair{
-				leftPruned: false,
-				left:       root.MustPeekRef(0).ToBuilder(),
-				right:      root.MustPeekRef(1).ToBuilder(),
-			})
-			break
-		}
-
-		if isLeft {
-			pairs = append(pairs, pair{
-				leftPruned: false,
-				left:       cell.BeginCell(),
-				right:      fastPrune(root.MustPeekRef(1), uint16(i)),
-			})
-			root = root.MustPeekRef(0)
-		} else {
-			pairs = append(pairs, pair{
-				leftPruned: true,
-				left:       fastPrune(root.MustPeekRef(0), uint16(i)),
-				right:      cell.BeginCell(),
-			})
-			root = root.MustPeekRef(1)
-		}
-	}
-
-	newRoot := cell.BeginCell()
-	for i := len(pairs) - 1; i >= 0; i-- {
-		nextRoot := newRoot
-		if i > 0 {
-			p := pairs[i-1]
-			if !p.leftPruned {
-				nextRoot = p.left
-			} else {
-				nextRoot = p.right
-			}
-		}
-
-		cll := pairs[i].left.EndCell()
-		if i < len(pairs)-2 || (i == len(pairs)-2 && cll.RefsNum() == 0) { // set level only for parents of pruned
-			cll.UnsafeModify(cell.LevelMask{Mask: 1}, pairs[i].leftPruned)
-		}
-		nextRoot.MustStoreRef(cll)
-
-		cll = pairs[i].right.EndCell()
-		if i < len(pairs)-2 || (i == len(pairs)-2 && cll.RefsNum() == 0) {
-			cll.UnsafeModify(cell.LevelMask{Mask: 1}, !pairs[i].leftPruned)
-		}
-		nextRoot.MustStoreRef(cll)
-	}
-
-	newRootCell := newRoot.EndCell()
-	if len(pairs) > 1 {
-		newRootCell.UnsafeModify(cell.LevelMask{Mask: 1}, false)
-	}
-
-	proof.Refs = append(proof.Refs, newRootCell)
-
-	return cell.FromRawUnsafe(proof)
-}
-
-func fastPrune(toPrune *cell.Cell, depth uint16) *cell.Builder {
-	prunedData := make([]byte, 2+32+2)
-	prunedData[0] = 0x01 // pruned type
-	prunedData[1] = 1    // level
-	copy(prunedData[2:], toPrune.Hash())
-
-	binary.BigEndian.PutUint16(prunedData[2+32:], depth) //depth
-	return cell.BeginCell().MustStoreSlice(prunedData, uint(len(prunedData)*8))
-}
-
 func validateFileName(name string, isFile bool) error {
+	if strings.Contains(name, "\x00") {
+		return fmt.Errorf("name cannot contain NUL byte")
+	}
+	if strings.Contains(name, "\\") {
+		return fmt.Errorf("name cannot contain backslash")
+	}
 	if strings.HasPrefix(name, "/") {
 		return fmt.Errorf("name cannot starts with '/'")
-	}
-	if strings.Contains(name, "./") {
-		return fmt.Errorf("name cannot contain traversal './'")
 	}
 	if isFile {
 		if name == "" {
@@ -679,6 +514,14 @@ func validateFileName(name string, isFile bool) error {
 		}
 		if strings.HasSuffix(name, "/") {
 			return fmt.Errorf("file name cannot end with /")
+		}
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == "" {
+			continue
+		}
+		if part == "." || part == ".." {
+			return fmt.Errorf("name cannot contain traversal component %q", part)
 		}
 	}
 	return nil

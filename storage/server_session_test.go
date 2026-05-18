@@ -31,24 +31,70 @@ func TestPrepareStoragePeer_ReusesHealthyOutgoingSession(t *testing.T) {
 		torrent:     tor,
 		nodeId:      []byte("node"),
 		conn:        conn,
-		sessionId:   111,
 		closerCtx:   context.Background(),
 		stop:        func() {},
 		stopSession: func() {},
+		session:     peerSessionState{sessionId: 111},
 	}
-	atomic.StoreInt32(&peer.sessionInitialized, 1)
-	atomic.StoreInt32(&peer.updateInitReceived, 1)
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 1)
 	conn.usedByBags[string(tor.BagID)] = peer
 
-	gotPeer, sessionCtx := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
+	gotPeer, sessionAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
 	if gotPeer != peer {
 		t.Fatal("expected healthy session to be reused")
 	}
-	if sessionCtx != nil {
+	if sessionAttempt != nil {
 		t.Fatal("expected healthy session reuse without reinitialization")
 	}
-	if atomic.LoadInt64(&peer.sessionId) != 111 {
+	if atomic.LoadInt64(&peer.session.sessionId) != 111 {
 		t.Fatal("expected session id to stay intact")
+	}
+}
+
+func TestTorrentRouteIncomingSessionUpdateRejectsStaleSeqno(t *testing.T) {
+	tor := &Torrent{
+		BagID:     []byte("bag"),
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{
+		torrent: tor,
+		nodeId:  []byte("node"),
+		session: peerSessionState{sessionId: 77},
+	}
+	adnlID := []byte("adnl")
+
+	if err := tor.routeIncomingSessionUpdate(peer, adnlID, incomingSessionUpdate{
+		sessionID: 77,
+		seqno:     1,
+		update:    UpdateState{State: State{WillUpload: true, WantDownload: true}},
+	}); err != nil {
+		t.Fatalf("unexpected first update error: %v", err)
+	}
+
+	if err := tor.routeIncomingSessionUpdate(peer, adnlID, incomingSessionUpdate{
+		sessionID: 77,
+		seqno:     1,
+		update:    UpdateState{State: State{WillUpload: false, WantDownload: true}},
+	}); err == nil {
+		t.Fatal("expected duplicate seqno to be rejected")
+	}
+
+	if err := tor.routeIncomingSessionUpdate(peer, adnlID, incomingSessionUpdate{
+		sessionID: 77,
+		seqno:     0,
+		update:    UpdateState{State: State{WillUpload: true, WantDownload: true}},
+	}); err == nil {
+		t.Fatal("expected zero seqno to be rejected")
+	}
+
+	if err := tor.routeIncomingSessionUpdate(peer, adnlID, incomingSessionUpdate{
+		sessionID: 77,
+		seqno:     2,
+		update:    UpdateState{State: State{WillUpload: true, WantDownload: true}},
+	}); err != nil {
+		t.Fatalf("unexpected newer update error: %v", err)
 	}
 }
 
@@ -72,7 +118,6 @@ func TestPrepareStoragePeer_ReinitializesUnhealthyOutgoingSession(t *testing.T) 
 		torrent:            tor,
 		nodeId:             []byte("node"),
 		conn:               conn,
-		sessionId:          222,
 		closerCtx:          context.Background(),
 		stop:               func() {},
 		hasPieces:          []byte{0xff, 0xff},
@@ -86,34 +131,38 @@ func TestPrepareStoragePeer_ReinitializesUnhealthyOutgoingSession(t *testing.T) 
 		stopSession: func() {
 			atomic.AddInt32(&stopCalls, 1)
 		},
+		session: peerSessionState{sessionId: 222},
 	}
-	atomic.StoreInt32(&peer.sessionInitialized, 0)
-	atomic.StoreInt32(&peer.updateInitReceived, 0)
-	atomic.StoreInt64(&peer.sessionInitAt, time.Now().Add(-2*time.Minute).UnixMilli())
-	atomic.StoreInt64(&peer.lastInitChunkAt, time.Now().Add(-50*time.Second).UnixMilli())
+	atomic.StoreInt32(&peer.session.localInitSent, 0)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 0)
+	atomic.StoreInt64(&peer.session.sessionInitAt, time.Now().Add(-2*time.Minute).UnixMilli())
+	atomic.StoreInt64(&peer.session.lastInitChunkAt, time.Now().Add(-50*time.Second).UnixMilli())
 	atomic.StoreUint64(&peer.lastSentNewPiecesPos, 33)
 	conn.usedByBags[string(tor.BagID)] = peer
 
-	gotPeer, sessionCtx := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
+	gotPeer, sessionAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
 	if gotPeer != peer {
 		t.Fatal("expected existing peer to be reinitialized in place")
 	}
-	if sessionCtx == nil {
+	if sessionAttempt == nil {
 		t.Fatal("expected unhealthy session to request reinitialization")
 	}
 	if atomic.LoadInt32(&stopCalls) != 1 {
 		t.Fatal("expected previous session context to be stopped before reinit")
 	}
-	if atomic.LoadInt64(&peer.sessionId) == 222 {
+	if atomic.LoadInt64(&peer.session.sessionId) == 222 {
 		t.Fatal("expected a fresh session id for outgoing reinit")
 	}
-	if atomic.LoadInt32(&peer.sessionInitialized) != 0 {
-		t.Fatal("expected sessionInitialized to be reset before reinit")
+	if atomic.LoadInt32(&peer.session.localInitSent) != 0 {
+		t.Fatal("expected localInitSent to be reset before reinit")
 	}
-	if atomic.LoadInt32(&peer.updateInitReceived) != 0 {
-		t.Fatal("expected updateInitReceived to be reset before reinit")
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) != 0 {
+		t.Fatal("expected remoteInitComplete to be reset before reinit")
 	}
-	if atomic.LoadInt64(&peer.lastInitChunkAt) != 0 {
+	if atomic.LoadUint64(&peer.session.sessionGen) != sessionAttempt.generation {
+		t.Fatal("expected returned attempt generation to match peer generation")
+	}
+	if atomic.LoadInt64(&peer.session.lastInitChunkAt) != 0 {
 		t.Fatal("expected init progress timestamp to be reset before reinit")
 	}
 	if atomic.LoadUint64(&peer.lastSentNewPiecesPos) != 0 {
@@ -153,24 +202,24 @@ func TestPrepareStoragePeer_ReusesInitializedPartialOutgoingSession(t *testing.T
 		torrent:     tor,
 		nodeId:      []byte("node"),
 		conn:        conn,
-		sessionId:   333,
 		closerCtx:   context.Background(),
 		stop:        func() {},
 		stopSession: func() {},
+		session:     peerSessionState{sessionId: 333},
 	}
-	atomic.StoreInt32(&peer.sessionInitialized, 1)
-	atomic.StoreInt32(&peer.updateInitReceived, 0)
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 0)
 	atomic.StoreUint32(&peer.knownPieces, 12)
 	conn.usedByBags[string(tor.BagID)] = peer
 
-	gotPeer, sessionCtx := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
+	gotPeer, sessionAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
 	if gotPeer != peer {
 		t.Fatal("expected initialized partial session to be reused")
 	}
-	if sessionCtx != nil {
+	if sessionAttempt != nil {
 		t.Fatal("expected partial session reuse without reinitialization")
 	}
-	if atomic.LoadInt64(&peer.sessionId) != 333 {
+	if atomic.LoadInt64(&peer.session.sessionId) != 333 {
 		t.Fatal("expected session id to stay intact")
 	}
 }
@@ -195,30 +244,315 @@ func TestPrepareStoragePeer_ReinitializesInitializedButUnusableOutgoingSession(t
 		torrent:     tor,
 		nodeId:      []byte("node"),
 		conn:        conn,
-		sessionId:   444,
 		closerCtx:   context.Background(),
 		stop:        func() {},
 		stopSession: func() { atomic.AddInt32(&stopCalls, 1) },
+		session:     peerSessionState{sessionId: 444},
 	}
-	atomic.StoreInt32(&peer.sessionInitialized, 1)
-	atomic.StoreInt32(&peer.updateInitReceived, 0)
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 0)
 	atomic.StoreUint32(&peer.knownPieces, 0)
-	atomic.StoreInt64(&peer.sessionInitAt, time.Now().Add(-2*time.Minute).UnixMilli())
-	atomic.StoreInt64(&peer.lastInitChunkAt, time.Now().Add(-50*time.Second).UnixMilli())
+	atomic.StoreInt64(&peer.session.sessionInitAt, time.Now().Add(-2*time.Minute).UnixMilli())
+	atomic.StoreInt64(&peer.session.lastInitChunkAt, time.Now().Add(-50*time.Second).UnixMilli())
 	conn.usedByBags[string(tor.BagID)] = peer
 
-	gotPeer, sessionCtx := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
+	gotPeer, sessionAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, nil)
 	if gotPeer != peer {
 		t.Fatal("expected existing peer to be reinitialized in place")
 	}
-	if sessionCtx == nil {
+	if sessionAttempt == nil {
 		t.Fatal("expected unusable timed out session to request reinitialization")
 	}
 	if atomic.LoadInt32(&stopCalls) != 1 {
 		t.Fatal("expected previous session context to be stopped before reinit")
 	}
-	if atomic.LoadInt64(&peer.sessionId) == 444 {
+	if atomic.LoadInt64(&peer.session.sessionId) == 444 {
 		t.Fatal("expected a fresh session id for outgoing reinit")
+	}
+}
+
+func TestPrepareStoragePeer_ExplicitPingSessionReinitializesHealthySession(t *testing.T) {
+	tor := &Torrent{
+		BagID:     []byte("bag"),
+		globalCtx: context.Background(),
+		Info:      &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1},
+	}
+	conn := &PeerConnection{
+		usedByBags: map[string]*storagePeer{},
+	}
+
+	stopCalls := int32(0)
+	peer := &storagePeer{
+		torrent:     tor,
+		nodeId:      []byte("node"),
+		conn:        conn,
+		closerCtx:   context.Background(),
+		stop:        func() {},
+		stopSession: func() { atomic.AddInt32(&stopCalls, 1) },
+		session:     peerSessionState{sessionId: 555, sessionGen: 7},
+	}
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 1)
+	peer.setRemoteState(State{WillUpload: true, WantDownload: true})
+	conn.usedByBags[string(tor.BagID)] = peer
+
+	newID := int64(556)
+	gotPeer, attempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, &newID)
+	if gotPeer != peer {
+		t.Fatal("expected existing peer to be reinitialized in place")
+	}
+	if attempt == nil {
+		t.Fatal("expected explicit new session id to create a fresh attempt")
+	}
+	if attempt.id != newID {
+		t.Fatalf("expected new session id %d, got %d", newID, attempt.id)
+	}
+	if attempt.generation != 8 {
+		t.Fatalf("expected session generation 8, got %d", attempt.generation)
+	}
+	if atomic.LoadInt32(&stopCalls) != 1 {
+		t.Fatal("expected previous session context to be stopped")
+	}
+	if atomic.LoadInt32(&peer.session.localInitSent) != 0 || atomic.LoadInt32(&peer.session.remoteInitComplete) != 0 {
+		t.Fatal("expected reinit to reset local and remote init flags")
+	}
+	if atomic.LoadInt32(&peer.session.remoteStateKnown) != 0 {
+		t.Fatal("expected reinit to clear remote state")
+	}
+}
+
+func TestSelectIncomingSessionID_OldAddUpdateCompatibility(t *testing.T) {
+	t.Run("new peer accepts AddUpdate session id before ping", func(t *testing.T) {
+		conn := &PeerConnection{usedByBags: map[string]*storagePeer{}}
+		updateID := int64(77)
+
+		got := selectIncomingSessionID(conn, []byte("bag"), &updateID)
+		if got == nil || *got != updateID {
+			t.Fatalf("expected update session id %d, got %v", updateID, got)
+		}
+	})
+
+	t.Run("healthy peer keeps current session on mismatched AddUpdate", func(t *testing.T) {
+		bagID := []byte("bag")
+		conn := &PeerConnection{usedByBags: map[string]*storagePeer{}}
+		peer := &storagePeer{
+			session: peerSessionState{sessionId: 11},
+		}
+		atomic.StoreInt32(&peer.session.localInitSent, 1)
+		atomic.StoreInt32(&peer.session.remoteInitComplete, 1)
+		conn.usedByBags[string(bagID)] = peer
+
+		updateID := int64(22)
+		got := selectIncomingSessionID(conn, bagID, &updateID)
+		if got == nil || *got != 11 {
+			t.Fatalf("expected current healthy session id 11, got %v", got)
+		}
+	})
+
+	t.Run("timed out unusable peer accepts AddUpdate reinit id", func(t *testing.T) {
+		bagID := []byte("bag")
+		conn := &PeerConnection{usedByBags: map[string]*storagePeer{}}
+		peer := &storagePeer{
+			session: peerSessionState{sessionId: 33},
+		}
+		atomic.StoreInt32(&peer.session.localInitSent, 1)
+		atomic.StoreInt64(&peer.session.sessionInitAt, time.Now().Add(-2*time.Minute).UnixMilli())
+		atomic.StoreInt64(&peer.session.lastInitChunkAt, time.Now().Add(-50*time.Second).UnixMilli())
+		conn.usedByBags[string(bagID)] = peer
+
+		updateID := int64(44)
+		got := selectIncomingSessionID(conn, bagID, &updateID)
+		if got == nil || *got != updateID {
+			t.Fatalf("expected update session id %d for timed-out unusable peer, got %v", updateID, got)
+		}
+	})
+}
+
+func TestRouteIncomingPeerEvent_DefersOutboundInitUntilScheduled(t *testing.T) {
+	initQuery := make(chan struct{}, 1)
+	rl := &testRLDP{
+		onQuery: func(query tl.Serializable, result tl.Serializable) error {
+			select {
+			case initQuery <- struct{}{}:
+			default:
+			}
+			return nil
+		},
+	}
+	tor := &Torrent{
+		BagID:        []byte("bag"),
+		Info:         &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1},
+		globalCtx:    context.Background(),
+		activeUpload: true,
+		pieceMask:    []byte{0x01},
+		peers:        map[string]*PeerInfo{},
+		wake:         newWakeSig(),
+	}
+	conn := &PeerConnection{
+		adnl:             &testADNLPeer{},
+		rldp:             rl,
+		usedByBags:       map[string]*storagePeer{},
+		controlQueue:     make(chan struct{}, 1),
+		initControlQueue: make(chan struct{}, 1),
+	}
+	updateSessionID := int64(91)
+
+	peer, initTask := tor.routeIncomingPeerEvent(incomingPeerEvent{
+		overlay:         []byte("overlay"),
+		conn:            conn,
+		updateSessionID: &updateSessionID,
+	})
+	if peer == nil {
+		t.Fatal("expected incoming event to create a peer")
+	}
+	if initTask.attempt == nil {
+		t.Fatal("expected incoming event to prepare outbound init")
+	}
+	if initTask.doPing {
+		t.Fatal("expected AddUpdate-before-Ping compatibility path to skip outbound ping")
+	}
+
+	select {
+	case <-initQuery:
+		t.Fatal("outbound init should not run while handler is still routing the event")
+	default:
+	}
+
+	if err := tor.routeIncomingSessionUpdate(peer, []byte("adnl"), incomingSessionUpdate{
+		sessionID: updateSessionID,
+		seqno:     1,
+		update:    UpdateHavePieces{PieceIDs: []int32{0}},
+	}); err != nil {
+		t.Fatalf("unexpected incoming update error: %v", err)
+	}
+
+	select {
+	case <-initQuery:
+		t.Fatal("outbound init should stay deferred until the session task is scheduled")
+	default:
+	}
+
+	initTask.schedule()
+	select {
+	case <-initQuery:
+	case <-time.After(time.Second):
+		t.Fatal("expected scheduled session task to send outbound init")
+	}
+}
+
+func TestSessionInitTaskSchedule_DeduplicatesSameGeneration(t *testing.T) {
+	initStarted := make(chan struct{}, 2)
+	releaseInit := make(chan struct{})
+	rl := &testRLDP{
+		onQuery: func(query tl.Serializable, result tl.Serializable) error {
+			select {
+			case initStarted <- struct{}{}:
+			default:
+			}
+			<-releaseInit
+			return nil
+		},
+	}
+	defer close(releaseInit)
+
+	tor := &Torrent{
+		BagID:        []byte("bag"),
+		Info:         &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1},
+		globalCtx:    context.Background(),
+		activeUpload: true,
+		pieceMask:    []byte{0x01},
+		wake:         newWakeSig(),
+	}
+	peer := &storagePeer{
+		torrent:   tor,
+		conn:      &PeerConnection{adnl: &testADNLPeer{}, rldp: rl, controlQueue: make(chan struct{}, 1), initControlQueue: make(chan struct{}, 1)},
+		overlay:   []byte("overlay"),
+		nodeId:    []byte("node"),
+		closerCtx: context.Background(),
+		stop:      func() {},
+		session:   peerSessionState{sessionId: 77, sessionGen: 1},
+	}
+	task := sessionInitTask{
+		peer:    peer,
+		attempt: newPeerSessionAttempt(context.Background(), 77, 1),
+	}
+
+	task.schedule()
+	task.schedule()
+
+	select {
+	case <-initStarted:
+	case <-time.After(time.Second):
+		t.Fatal("expected first scheduled init to start")
+	}
+
+	select {
+	case <-initStarted:
+		t.Fatal("expected duplicate schedule for same generation to be ignored")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSessionInitTaskSchedule_AllowsNewGenerationAfterReinit(t *testing.T) {
+	initSessions := make(chan int64, 2)
+	rl := &testRLDP{
+		onQuery: func(query tl.Serializable, result tl.Serializable) error {
+			req, _ := overlay.UnwrapQuery(query)
+			up, ok := req.(AddUpdate)
+			if !ok {
+				t.Fatalf("expected AddUpdate init query, got %T", req)
+			}
+			initSessions <- up.SessionID
+			return nil
+		},
+	}
+
+	tor := &Torrent{
+		BagID:        []byte("bag"),
+		Info:         &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1},
+		globalCtx:    context.Background(),
+		activeUpload: true,
+		pieceMask:    []byte{0x01},
+		wake:         newWakeSig(),
+	}
+	conn := &PeerConnection{
+		adnl:             &testADNLPeer{},
+		rldp:             rl,
+		usedByBags:       map[string]*storagePeer{},
+		controlQueue:     make(chan struct{}, 1),
+		initControlQueue: make(chan struct{}, 1),
+	}
+
+	firstID := int64(77)
+	peer, firstAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, &firstID)
+	if firstAttempt == nil {
+		t.Fatal("expected first session attempt")
+	}
+	sessionInitTask{peer: peer, attempt: firstAttempt}.schedule()
+
+	select {
+	case got := <-initSessions:
+		if got != firstID {
+			t.Fatalf("expected first init for session %d, got %d", firstID, got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected first init to be sent")
+	}
+
+	secondID := int64(78)
+	_, secondAttempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, &secondID)
+	if secondAttempt == nil {
+		t.Fatal("expected reinit to create a new session attempt")
+	}
+	sessionInitTask{peer: peer, attempt: secondAttempt}.schedule()
+
+	select {
+	case got := <-initSessions:
+		if got != secondID {
+			t.Fatalf("expected reinit for session %d, got %d", secondID, got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected reinit generation to be sent")
 	}
 }
 
@@ -257,13 +591,13 @@ func TestStoragePeerInitProgressTimedOut_UsesLastChunkProgress(t *testing.T) {
 	peer := &storagePeer{}
 	now := time.Now()
 
-	atomic.StoreInt64(&peer.sessionInitAt, now.Add(-2*time.Minute).UnixMilli())
-	atomic.StoreInt64(&peer.lastInitChunkAt, now.Add(-10*time.Second).UnixMilli())
+	atomic.StoreInt64(&peer.session.sessionInitAt, now.Add(-2*time.Minute).UnixMilli())
+	atomic.StoreInt64(&peer.session.lastInitChunkAt, now.Add(-10*time.Second).UnixMilli())
 	if peer.initProgressTimedOut(now, 45*time.Second) {
 		t.Fatal("expected recent init chunk to extend session init timeout")
 	}
 
-	atomic.StoreInt64(&peer.lastInitChunkAt, now.Add(-50*time.Second).UnixMilli())
+	atomic.StoreInt64(&peer.session.lastInitChunkAt, now.Add(-50*time.Second).UnixMilli())
 	if !peer.initProgressTimedOut(now, 45*time.Second) {
 		t.Fatal("expected timeout when no init progress was observed for too long")
 	}
@@ -295,12 +629,6 @@ func (t *testRLDP) DoQuery(_ context.Context, _ uint64, query, result tl.Seriali
 	up, ok := req.(AddUpdate)
 	if ok {
 		t.queries = append(t.queries, up)
-		return nil
-	}
-
-	upPtr, ok := req.(*AddUpdate)
-	if ok {
-		t.queries = append(t.queries, *upPtr)
 	}
 	return nil
 }
@@ -315,6 +643,28 @@ func (t *testRLDP) SetOnDisconnect(_ func()) {}
 
 func (t *testRLDP) SendAnswer(_ context.Context, _ uint64, _ uint32, _, _ []byte, _ tl.Serializable) error {
 	return nil
+}
+
+func TestPeerConnectionWithQueueSlot_ReleasesSlotOnError(t *testing.T) {
+	conn := &PeerConnection{controlQueue: make(chan struct{}, 1)}
+	expected := errors.New("boom")
+
+	err := conn.withControlQueueSlot(context.Background(), true, func() error {
+		if len(conn.controlQueue) != 1 {
+			t.Fatal("expected control lane to be occupied while callback runs")
+		}
+		return expected
+	})
+	if !errors.Is(err, expected) {
+		t.Fatalf("expected callback error, got %v", err)
+	}
+
+	select {
+	case conn.controlQueue <- struct{}{}:
+		<-conn.controlQueue
+	default:
+		t.Fatal("expected control lane slot to be released after callback error")
+	}
 }
 
 type testADNLPeer struct {
@@ -388,10 +738,10 @@ func TestStoragePeerUpdateInitPieces_InitializesDownloadState(t *testing.T) {
 		pieceMask:    []byte{0b00110101},
 	}
 	peer := &storagePeer{
-		torrent:   tor,
-		conn:      &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
-		overlay:   []byte("overlay"),
-		sessionId: 77,
+		torrent: tor,
+		conn:    &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
+		overlay: []byte("overlay"),
+		session: peerSessionState{sessionId: 77},
 	}
 
 	if err := peer.updateInitPieces(context.Background()); err != nil {
@@ -432,10 +782,10 @@ func TestStoragePeerUpdateInitPieces_InitializesUploadStateAndChunksMask(t *test
 		pieceMask:    mask,
 	}
 	peer := &storagePeer{
-		torrent:   tor,
-		conn:      &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
-		overlay:   []byte("overlay"),
-		sessionId: 88,
+		torrent: tor,
+		conn:    &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
+		overlay: []byte("overlay"),
+		session: peerSessionState{sessionId: 88},
 	}
 
 	if err := peer.updateInitPieces(context.Background()); err != nil {
@@ -495,8 +845,8 @@ func TestStoragePeerUpdateInitPieces_UsesDedicatedInitControlQueue(t *testing.T)
 			controlQueue:     controlQueue,
 			initControlQueue: make(chan struct{}, 1),
 		},
-		overlay:   []byte("overlay"),
-		sessionId: 111,
+		overlay: []byte("overlay"),
+		session: peerSessionState{sessionId: 111},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -519,11 +869,11 @@ func TestStoragePeerUpdateHavePieces_UsesIncrementalCursor(t *testing.T) {
 		knownNodes: map[string]*KnownNode{},
 	}
 	peer := &storagePeer{
-		torrent:   tor,
-		conn:      &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
-		overlay:   []byte("overlay"),
-		sessionId: 99,
-		nodeId:    []byte("node"),
+		torrent: tor,
+		conn:    &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 2)},
+		overlay: []byte("overlay"),
+		nodeId:  []byte("node"),
+		session: peerSessionState{sessionId: 99},
 	}
 	info := &PeerInfo{peer: peer}
 	tor.peers[string(peer.nodeId)] = info
@@ -557,6 +907,81 @@ func TestStoragePeerUpdateHavePieces_UsesIncrementalCursor(t *testing.T) {
 	}
 	if len(second.PieceIDs) != 1 || second.PieceIDs[0] != 8 {
 		t.Fatalf("unexpected second incremental batch: %#v", second.PieceIDs)
+	}
+}
+
+func TestStoragePeerUpdateState_AdvertisesCurrentState(t *testing.T) {
+	rl := &testRLDP{}
+	tor := &Torrent{
+		BagID:        []byte("bag"),
+		globalCtx:    context.Background(),
+		activeUpload: false,
+	}
+	peer := &storagePeer{
+		torrent: tor,
+		conn:    &PeerConnection{rldp: rl, controlQueue: make(chan struct{}, 1)},
+		overlay: []byte("overlay"),
+		session: peerSessionState{sessionId: 77},
+	}
+
+	if err := peer.updateState(context.Background()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rl.queries) != 1 {
+		t.Fatalf("expected one state update, got %d", len(rl.queries))
+	}
+	update, ok := rl.queries[0].Update.(UpdateState)
+	if !ok {
+		t.Fatalf("expected UpdateState, got %T", rl.queries[0].Update)
+	}
+	if update.State.WillUpload {
+		t.Fatal("expected WillUpload=false when local upload is disabled")
+	}
+	if !update.State.WantDownload {
+		t.Fatal("expected WantDownload=true while torrent is active")
+	}
+}
+
+func TestStoragePeerInitializeSessionIgnoresStaleAttemptAfterNetwork(t *testing.T) {
+	var peer *storagePeer
+	rl := &testRLDP{
+		onQuery: func(query tl.Serializable, result tl.Serializable) error {
+			atomic.StoreUint64(&peer.session.sessionGen, 2)
+			return nil
+		},
+	}
+	tor := &Torrent{
+		BagID:     []byte("bag"),
+		Info:      &TorrentInfo{PieceSize: 4096, FileSize: 4096, HeaderSize: 1},
+		globalCtx: context.Background(),
+		pieceMask: []byte{0x00},
+		wake:      newWakeSig(),
+	}
+	closed := int32(0)
+	peer = &storagePeer{
+		torrent:   tor,
+		conn:      &PeerConnection{rldp: rl, initControlQueue: make(chan struct{}, 1), controlQueue: make(chan struct{}, 1)},
+		overlay:   []byte("overlay"),
+		nodeId:    []byte("node"),
+		closerCtx: context.Background(),
+		session:   peerSessionState{sessionId: 77, sessionGen: 1},
+		stop: func() {
+			atomic.AddInt32(&closed, 1)
+		},
+	}
+	attempt := newPeerSessionAttempt(context.Background(), 77, 1)
+
+	if err := peer.initializeSession(attempt, false); err != nil {
+		t.Fatalf("stale attempt after network should finish without surfacing an error: %v", err)
+	}
+	if atomic.LoadInt32(&peer.session.localInitSent) != 0 {
+		t.Fatal("stale attempt must not mark local init as sent")
+	}
+	if atomic.LoadInt32(&closed) != 0 {
+		t.Fatal("stale attempt must not close the current peer")
+	}
+	if len(rl.queries) != 1 {
+		t.Fatalf("expected one init query before attempt became stale, got %d", len(rl.queries))
 	}
 }
 
@@ -674,10 +1099,242 @@ func TestStoragePeerPendingHavePieces_FlushAfterInfoReady(t *testing.T) {
 	}
 }
 
+func TestStoragePeerApplySessionUpdate_QueuesInitBeforeInfo(t *testing.T) {
+	tor := &Torrent{
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{torrent: tor}
+
+	err := peer.applySessionUpdate(UpdateInit{
+		HavePieces:       []byte{0x01},
+		HavePiecesOffset: 0,
+		State: State{
+			WillUpload:   true,
+			WantDownload: true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected pending init error: %v", err)
+	}
+	if peer.hasPiece(0) {
+		t.Fatal("expected init chunk to stay queued until torrent info is available")
+	}
+	if atomic.LoadInt32(&peer.session.remoteStateKnown) != 1 || atomic.LoadInt32(&peer.session.remoteWillUpload) != 1 {
+		t.Fatal("expected UpdateInit state to be recorded even before info is available")
+	}
+
+	tor.Info = &TorrentInfo{PieceSize: 1, FileSize: 1, HeaderSize: 1}
+	if err = peer.applySessionUpdate(UpdateHavePieces{}); err != nil {
+		t.Fatalf("unexpected flush trigger error: %v", err)
+	}
+	if !peer.hasPiece(0) {
+		t.Fatal("expected queued init chunk to be applied after info becomes available")
+	}
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) != 1 {
+		t.Fatal("expected queued init chunk to mark remote init complete")
+	}
+}
+
+func TestStoragePeerApplySessionUpdate_LegacyHavePiecesBeforeInfoAndInit(t *testing.T) {
+	tor := &Torrent{
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{torrent: tor}
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+
+	if err := peer.applySessionUpdate(UpdateHavePieces{PieceIDs: []int32{2, 4}}); err != nil {
+		t.Fatalf("unexpected pending have-pieces error: %v", err)
+	}
+	if peer.hasPiece(2) || peer.hasPiece(4) {
+		t.Fatal("expected have-pieces update to stay queued until torrent info is available")
+	}
+	if peer.isDownloadUsable() {
+		t.Fatal("expected peer to stay unusable before queued pieces can be applied")
+	}
+
+	tor.Info = &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1}
+	if err := peer.applySessionUpdate(UpdateInit{
+		HavePieces:       []byte{0x01},
+		HavePiecesOffset: 0,
+		State: State{
+			WillUpload:   true,
+			WantDownload: true,
+		},
+	}); err != nil {
+		t.Fatalf("unexpected init-after-have error: %v", err)
+	}
+
+	if !peer.hasPiece(0) || !peer.hasPiece(2) || !peer.hasPiece(4) {
+		t.Fatal("expected queued have-pieces and later init chunk to be applied")
+	}
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) != 1 {
+		t.Fatal("expected later init chunk to mark remote init complete")
+	}
+	if !peer.isDownloadUsable() {
+		t.Fatal("expected peer to become usable after legacy reordered updates")
+	}
+}
+
+func TestStoragePeerApplySessionUpdate_LegacyInitChunksOutOfOrderAndRetry(t *testing.T) {
+	piecesNum := uint32(maxPiecesBytesPerRequest*8 + 1)
+	tor := &Torrent{
+		Info:      &TorrentInfo{PieceSize: 1, FileSize: uint64(piecesNum), HeaderSize: 1},
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{torrent: tor}
+
+	tail := UpdateInit{
+		HavePieces:       []byte{0x01},
+		HavePiecesOffset: int32(maxPiecesBytesPerRequest * 8),
+		State:            State{WillUpload: true, WantDownload: true},
+	}
+	if err := peer.applySessionUpdate(tail); err != nil {
+		t.Fatalf("unexpected tail init chunk error: %v", err)
+	}
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) != 0 {
+		t.Fatal("expected init to stay incomplete until the missing first chunk arrives")
+	}
+	if !peer.hasPiece(piecesNum - 1) {
+		t.Fatal("expected tail chunk to be applied before first chunk")
+	}
+	if peer.hasPiece(0) {
+		t.Fatal("did not expect first piece before first chunk arrives")
+	}
+
+	if err := peer.applySessionUpdate(tail); err != nil {
+		t.Fatalf("expected duplicate retry of the same init chunk to be accepted: %v", err)
+	}
+
+	firstMask := make([]byte, maxPiecesBytesPerRequest)
+	firstMask[0] = 0x01
+	if err := peer.applySessionUpdate(UpdateInit{
+		HavePieces:       firstMask,
+		HavePiecesOffset: 0,
+		State:            State{WillUpload: true, WantDownload: true},
+	}); err != nil {
+		t.Fatalf("unexpected first init chunk error: %v", err)
+	}
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) != 1 {
+		t.Fatal("expected out-of-order chunks to complete remote init")
+	}
+	if !peer.hasPiece(0) || !peer.hasPiece(piecesNum-1) {
+		t.Fatal("expected first and tail pieces to be tracked")
+	}
+
+	conflictingTail := tail
+	conflictingTail.HavePieces = []byte{0x00}
+	if err := peer.applySessionUpdate(conflictingTail); err != nil {
+		t.Fatalf("expected stale duplicate init chunk to be accepted: %v", err)
+	}
+	if !peer.hasPiece(piecesNum - 1) {
+		t.Fatal("expected stale duplicate init chunk to preserve already known pieces")
+	}
+}
+
+func TestStoragePeerApplySessionUpdate_LegacyStateBeforeInit(t *testing.T) {
+	tor := &Torrent{
+		Info:      &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1},
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{torrent: tor}
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+
+	if err := peer.applySessionUpdate(UpdateState{State: State{WillUpload: false, WantDownload: true}}); err != nil {
+		t.Fatalf("unexpected pre-init state error: %v", err)
+	}
+	if err := peer.applySessionUpdate(UpdateHavePieces{PieceIDs: []int32{3}}); err != nil {
+		t.Fatalf("unexpected have-pieces error: %v", err)
+	}
+	if !peer.hasPiece(3) {
+		t.Fatal("expected have-pieces to apply with info ready")
+	}
+	if peer.isDownloadUsable() {
+		t.Fatal("expected WillUpload=false sent before init to block download usability")
+	}
+
+	if err := peer.applySessionUpdate(UpdateInit{
+		HavePieces:       []byte{0x01},
+		HavePiecesOffset: 0,
+		State:            State{WillUpload: true, WantDownload: true},
+	}); err != nil {
+		t.Fatalf("unexpected init after state error: %v", err)
+	}
+	if !peer.isDownloadUsable() {
+		t.Fatal("expected later UpdateInit state with WillUpload=true to restore usability")
+	}
+}
+
+func TestPrepareStoragePeer_LegacyAddUpdateBeforePingThenUpdatesReordered(t *testing.T) {
+	tor := &Torrent{
+		BagID:     []byte("bag"),
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	conn := &PeerConnection{
+		adnl:       &testADNLPeer{},
+		usedByBags: map[string]*storagePeer{},
+	}
+
+	updateSessionID := int64(991)
+	peer, attempt := tor.prepareStoragePeer([]byte("overlay"), nil, conn, &updateSessionID)
+	if attempt == nil {
+		t.Fatal("expected AddUpdate-before-Ping session id to create a local init attempt")
+	}
+	if attempt.id != updateSessionID {
+		t.Fatalf("expected attempt id %d, got %d", updateSessionID, attempt.id)
+	}
+
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	if err := peer.applySessionUpdate(UpdateHavePieces{PieceIDs: []int32{5}}); err != nil {
+		t.Fatalf("unexpected pending have-pieces error: %v", err)
+	}
+	tor.Info = &TorrentInfo{PieceSize: 1, FileSize: 8, HeaderSize: 1}
+	if err := peer.applySessionUpdate(UpdateInit{
+		HavePieces:       []byte{0x01},
+		HavePiecesOffset: 0,
+		State:            State{WillUpload: true, WantDownload: true},
+	}); err != nil {
+		t.Fatalf("unexpected init error after AddUpdate-before-Ping: %v", err)
+	}
+	if !peer.hasPiece(0) || !peer.hasPiece(5) {
+		t.Fatal("expected reordered legacy updates to be applied after info arrives")
+	}
+	if !peer.isDownloadUsable() {
+		t.Fatal("expected peer to be usable after AddUpdate-before-Ping compatibility flow")
+	}
+}
+
+func TestStoragePeerApplySessionUpdate_AppliesUpdateState(t *testing.T) {
+	tor := &Torrent{
+		globalCtx: context.Background(),
+		wake:      newWakeSig(),
+	}
+	peer := &storagePeer{torrent: tor}
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreUint32(&peer.knownPieces, 1)
+
+	if err := peer.applySessionUpdate(UpdateState{State: State{WillUpload: false, WantDownload: true}}); err != nil {
+		t.Fatalf("unexpected update state error: %v", err)
+	}
+	if atomic.LoadInt32(&peer.session.remoteStateKnown) != 1 {
+		t.Fatal("expected remote state to be marked known")
+	}
+	if atomic.LoadInt32(&peer.session.remoteWillUpload) != 0 || atomic.LoadInt32(&peer.session.remoteWantDownload) != 1 {
+		t.Fatal("expected remote state flags to be stored")
+	}
+	if peer.isDownloadUsable() {
+		t.Fatal("expected WillUpload=false state to make peer unusable for downloads")
+	}
+}
+
 func TestStoragePeerIsDownloadUsable_WithKnownPiecesBeforeFullInit(t *testing.T) {
 	peer := &storagePeer{}
-	atomic.StoreInt32(&peer.sessionInitialized, 1)
-	atomic.StoreInt32(&peer.updateInitReceived, 0)
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 0)
 	atomic.StoreUint32(&peer.knownPieces, 3)
 
 	if !peer.isDownloadUsable() {
@@ -692,14 +1349,34 @@ func TestStoragePeerIsDownloadUsable_RequiresSessionOrPieces(t *testing.T) {
 		t.Fatal("expected empty peer to be unusable")
 	}
 
-	atomic.StoreInt32(&peer.sessionInitialized, 1)
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
 	if peer.isDownloadUsable() {
 		t.Fatal("expected initialized peer without piece knowledge to stay unusable until init data arrives")
 	}
 
-	atomic.StoreInt32(&peer.updateInitReceived, 1)
+	atomic.StoreInt32(&peer.session.remoteInitComplete, 1)
 	if !peer.isDownloadUsable() {
 		t.Fatal("expected fully initialized peer to be usable")
+	}
+}
+
+func TestStoragePeerIsDownloadUsable_HonorsRemoteWillUpload(t *testing.T) {
+	peer := &storagePeer{}
+	atomic.StoreInt32(&peer.session.localInitSent, 1)
+	atomic.StoreUint32(&peer.knownPieces, 1)
+
+	if !peer.isDownloadUsable() {
+		t.Fatal("expected unknown remote state to preserve legacy partial-init usability")
+	}
+
+	peer.setRemoteState(State{WillUpload: false, WantDownload: true})
+	if peer.isDownloadUsable() {
+		t.Fatal("expected peer to be unusable when remote advertises WillUpload=false")
+	}
+
+	peer.setRemoteState(State{WillUpload: true, WantDownload: true})
+	if !peer.isDownloadUsable() {
+		t.Fatal("expected peer to become usable again when remote advertises WillUpload=true")
 	}
 }
 
@@ -711,11 +1388,11 @@ func TestStoragePeerPingWithRetry_RetriesTransientFailures(t *testing.T) {
 		},
 	}
 	peer := &storagePeer{
-		torrent:   &Torrent{BagID: []byte("bag")},
-		conn:      &PeerConnection{adnl: adnlPeer},
-		nodeId:    []byte("node"),
-		nodeAddr:  "127.0.0.1:1",
-		sessionId: 77,
+		torrent:  &Torrent{BagID: []byte("bag")},
+		conn:     &PeerConnection{adnl: adnlPeer},
+		nodeId:   []byte("node"),
+		nodeAddr: "127.0.0.1:1",
+		session:  peerSessionState{sessionId: 77},
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

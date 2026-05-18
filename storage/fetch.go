@@ -19,12 +19,14 @@ type piecePack struct {
 }
 
 type PreFetcher struct {
-	torrent    *Torrent
-	ready      atomic.Int32
-	processed  atomic.Int32
-	prefetch   uint32
-	pieces     map[uint32]*piecePack
-	piecesList []byte
+	torrent     *Torrent
+	ready       atomic.Int32
+	processed   atomic.Int32
+	prefetch    uint32
+	pieceCursor uint32
+	roundRobin  bool
+	pieces      map[uint32]*piecePack
+	piecesList  []byte
 
 	report func(Event)
 
@@ -39,10 +41,19 @@ type Progress struct {
 }
 
 func NewPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), prefetch uint32, pieces []byte) *PreFetcher {
+	return newPreFetcher(ctx, torrent, report, prefetch, pieces, false)
+}
+
+func NewUnorderedPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), prefetch uint32, pieces []byte) *PreFetcher {
+	return newPreFetcher(ctx, torrent, report, prefetch, pieces, true)
+}
+
+func newPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), prefetch uint32, pieces []byte, roundRobin bool) *PreFetcher {
 	ff := &PreFetcher{
 		prefetch:   prefetch,
 		torrent:    torrent,
 		report:     report,
+		roundRobin: roundRobin,
 		piecesList: pieces,
 		pieces:     map[uint32]*piecePack{},
 	}
@@ -99,6 +110,90 @@ func (f *PreFetcher) Free(piece uint32) {
 	delete(f.pieces, piece)
 	f.processed.Add(1)
 	f.torrent.wake.fire()
+}
+
+func (f *PreFetcher) markPieceForRetry(piece uint32) {
+	if int(piece) >= len(f.piecesList) {
+		return
+	}
+	if f.piecesList[piece] == 2 {
+		f.piecesList[piece] = 1
+	}
+	if !f.roundRobin && piece < f.pieceCursor {
+		f.pieceCursor = piece
+	}
+}
+
+func effectiveMaxInflightPieces(conn *PeerConnection) int32 {
+	max := conn.MaxInflightPieces.Load()
+	if max < 1 {
+		max = 1
+	}
+	if conn.dataQueue == nil {
+		return max
+	}
+
+	dataCap := int32(cap(conn.dataQueue))
+	if dataCap > 0 && max > dataCap {
+		return dataCap
+	}
+	return max
+}
+
+func dataQueueInflightCap(conn *PeerConnection) int32 {
+	if conn.dataQueue == nil {
+		return 0
+	}
+	return int32(cap(conn.dataQueue))
+}
+
+func (f *PreFetcher) nextPieceForPeer(peer *storagePeer, available int32) (uint32, bool) {
+	if available <= 0 || len(f.piecesList) == 0 {
+		return 0, false
+	}
+	if f.roundRobin {
+		return f.nextRoundRobinPieceForPeer(peer)
+	}
+
+	start := int(f.pieceCursor)
+	for start < len(f.piecesList) && f.piecesList[start] != 1 {
+		start++
+	}
+	if start >= len(f.piecesList) {
+		f.pieceCursor = uint32(len(f.piecesList))
+		return 0, false
+	}
+	f.pieceCursor = uint32(start)
+
+	for idx := start; idx < len(f.piecesList); idx++ {
+		if f.piecesList[idx] != 1 {
+			continue
+		}
+
+		if peer.hasPieceLocked(uint32(idx)) {
+			return uint32(idx), true
+		}
+		available--
+		if available <= 0 {
+			break
+		}
+	}
+	return 0, false
+}
+
+func (f *PreFetcher) nextRoundRobinPieceForPeer(peer *storagePeer) (uint32, bool) {
+	start := int(f.pieceCursor % uint32(len(f.piecesList)))
+	for off := 0; off < len(f.piecesList); off++ {
+		idx := (start + off) % len(f.piecesList)
+		if f.piecesList[idx] != 1 {
+			continue
+		}
+		if peer.hasPieceLocked(uint32(idx)) {
+			f.pieceCursor = uint32((idx + 1) % len(f.piecesList))
+			return uint32(idx), true
+		}
+	}
+	return 0, false
 }
 
 type nodeRTTInfo struct {
@@ -253,7 +348,7 @@ func (f *PreFetcher) balancer() {
 			}
 
 			curInflight := peer.conn.InflightPieces.Load()
-			maxInflight := peer.conn.MaxInflightPieces.Load()
+			maxInflight := effectiveMaxInflightPieces(peer.conn)
 			if curInflight >= maxInflight {
 				continue
 			}
@@ -264,7 +359,7 @@ func (f *PreFetcher) balancer() {
 
 				bestScore := scoreOf(bestNode.conn.IsLastSuccess.Load(), bestNodeRttInfo.LastRTT.Load(), int64(bestNodeFails),
 					bestNode.conn.UpStreak.Load(), bestNode.conn.DownStreak.Load(),
-					bestNode.conn.InflightPieces.Load(), bestNode.conn.MaxInflightPieces.Load())
+					bestNode.conn.InflightPieces.Load(), effectiveMaxInflightPieces(bestNode.conn))
 
 				// balance load
 				if thisScore >= bestScore {
@@ -273,26 +368,17 @@ func (f *PreFetcher) balancer() {
 			}
 
 			peer.piecesMx.RLock()
-			f.mx.RLock()
-			for pieceIndex, v := range f.piecesList {
-				if v == 1 {
-					available--
-
-					if peer.hasPiece(uint32(pieceIndex)) {
-						piece = uint32(pieceIndex)
-						bestNode = peer
-						bestInflight = curInflight
-						bestNodeRttInfo = rttInfo
-						bestNodeFails = fails
-						break
-					} else if available <= 0 {
-						// wait for ready pieces processing before download new
-						break
-					}
-				}
-			}
-			f.mx.RUnlock()
+			f.mx.Lock()
+			nextPiece, ok := f.nextPieceForPeer(peer, available)
+			f.mx.Unlock()
 			peer.piecesMx.RUnlock()
+			if ok {
+				piece = nextPiece
+				bestNode = peer
+				bestInflight = curInflight
+				bestNodeRttInfo = rttInfo
+				bestNodeFails = fails
+			}
 		}
 
 		if bestNode == nil {
@@ -305,7 +391,7 @@ func (f *PreFetcher) balancer() {
 		if !bestNode.conn.InflightPieces.CompareAndSwap(bestInflight, bestInflight+1) {
 			// conflict, retry
 			bestInflight = bestNode.conn.InflightPieces.Load()
-			if bestInflight >= bestNode.conn.MaxInflightPieces.Load() {
+			if bestInflight >= effectiveMaxInflightPieces(bestNode.conn) {
 				// full
 				continue
 			}
@@ -322,6 +408,7 @@ func (f *PreFetcher) balancer() {
 			if inf >= maxInf || !bestNode.conn.srv.downloadInflight.CompareAndSwap(inf, inf+1) {
 				select {
 				case <-f.ctx.Done():
+					bestNode.conn.InflightPieces.Add(-1)
 					return
 				default:
 					runtime.Gosched()
@@ -339,6 +426,9 @@ func (f *PreFetcher) balancer() {
 			if err != nil {
 				select {
 				case <-f.ctx.Done():
+					f.ready.Add(-1)
+					bestNode.conn.InflightPieces.Add(-1)
+					bestNode.conn.srv.downloadInflight.Add(-1)
 					return
 				default:
 					time.Sleep(2 * time.Millisecond)
@@ -363,7 +453,8 @@ func (f *PreFetcher) balancer() {
 			pc, rtt, err := bestNode.downloadPiece(ctx, piece)
 			cancel()
 			lastChange := bestNode.conn.LastChange.Load()
-			curMax := bestNode.conn.MaxInflightPieces.Load()
+			actualMax := bestNode.conn.MaxInflightPieces.Load()
+			curMax := effectiveMaxInflightPieces(bestNode.conn)
 			cur := bestNode.conn.InflightPieces.Load()
 
 			if err != nil {
@@ -376,14 +467,14 @@ func (f *PreFetcher) balancer() {
 
 					uns := bestNode.conn.UnstableCount.Add(1)
 
-					if uns >= 3 && curMax > 1 && lastChange < time.Now().UnixMilli()-minChangeMs {
-						newMax := curMax - 1
-						if nm := curMax / 10; nm > 1 {
+					if uns >= 3 && actualMax > 1 && lastChange < time.Now().UnixMilli()-minChangeMs {
+						newMax := actualMax - 1
+						if nm := actualMax / 10; nm > 1 {
 							// 10% reduce
-							newMax = curMax - nm
+							newMax = actualMax - nm
 						}
 
-						if bestNode.conn.MaxInflightPieces.CompareAndSwap(curMax, newMax) {
+						if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, newMax) {
 							bestNode.conn.DownStreak.Add(1)
 							bestNode.conn.UpStreak.Store(0)
 							bestNode.conn.UnstableCount.Store(0)
@@ -406,9 +497,7 @@ func (f *PreFetcher) balancer() {
 				f.ready.Add(-1) // free slot to redownload
 
 				f.mx.Lock()
-				if f.piecesList[piece] == 2 {
-					f.piecesList[piece] = 1
-				}
+				f.markPieceForRetry(piece)
 				f.mx.Unlock()
 
 				return
@@ -452,14 +541,17 @@ func (f *PreFetcher) balancer() {
 						}
 
 						if stable >= int64(need) && lastChange < nowMs-minChangeMs {
-							if bestNode.conn.MaxInflightPieces.CompareAndSwap(curMax, curMax+1) {
-								bestNode.conn.UpStreak.Add(1)
-								bestNode.conn.DownStreak.Store(0)
+							maxCap := dataQueueInflightCap(bestNode.conn)
+							if maxCap == 0 || actualMax < maxCap {
+								if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, actualMax+1) {
+									bestNode.conn.UpStreak.Add(1)
+									bestNode.conn.DownStreak.Store(0)
 
-								// fmt.Println("-- UP", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
+									// fmt.Println("-- UP", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
 
-								bestNode.conn.LastChange.Store(nowMs)
-								bestNode.conn.StableCount.Store(0)
+									bestNode.conn.LastChange.Store(nowMs)
+									bestNode.conn.StableCount.Store(0)
+								}
 							}
 						}
 					}
@@ -475,7 +567,7 @@ func (f *PreFetcher) balancer() {
 					}
 
 					if uns >= int64(need) && lastChange < nowMs-minChangeMs {
-						if curMax > 1 && bestNode.conn.MaxInflightPieces.CompareAndSwap(curMax, curMax-1) {
+						if actualMax > 1 && bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, actualMax-1) {
 							bestNode.conn.DownStreak.Add(1)
 							bestNode.conn.UpStreak.Store(0)
 

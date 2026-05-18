@@ -6,10 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/tl"
+	"sort"
 )
+
+const maxTorrentHeaderFiles = 1_000_000
 
 func init() {
 	tl.Register(TorrentInfoContainer{}, "storage.torrentInfo data:bytes = storage.TorrentInfo")
+	tl.Register(StorageError{}, "storage.error message:string = storage.Error")
 	tl.Register(GetTorrentInfo{}, "storage.getTorrentInfo = storage.TorrentInfo")
 	tl.Register(Piece{}, "storage.piece proof:bytes data:bytes = storage.Piece")
 	tl.Register(GetPiece{}, "storage.getPiece piece_id:int = storage.Piece")
@@ -79,6 +83,14 @@ type UpdateState struct {
 
 type Ok struct{}
 
+type StorageError struct {
+	Message string `tl:"string"`
+}
+
+func (e StorageError) Error() string {
+	return e.Message
+}
+
 type FECInfoNone struct{}
 
 type TorrentHeader struct {
@@ -95,11 +107,19 @@ type TorrentHeader struct {
 }
 
 func (t *TorrentHeader) Parse(data []byte) (_ []byte, err error) {
+	*t = TorrentHeader{}
+
 	// Manual parse because of not standard array definition
 	if len(data) < 28 {
 		return nil, fmt.Errorf("too short sizes data to parse")
 	}
 	t.FilesCount = binary.LittleEndian.Uint32(data)
+	if t.FilesCount == 0 {
+		return nil, fmt.Errorf("header has no files")
+	}
+	if t.FilesCount > maxTorrentHeaderFiles {
+		return nil, fmt.Errorf("too many files in header")
+	}
 	data = data[4:]
 	t.TotalNameSize = binary.LittleEndian.Uint64(data)
 	data = data[8:]
@@ -112,24 +132,107 @@ func (t *TorrentHeader) Parse(data []byte) (_ []byte, err error) {
 	t.DirNameSize = binary.LittleEndian.Uint32(data)
 	data = data[4:]
 
-	if uint64(len(data)) < uint64(t.DirNameSize)+uint64(t.FilesCount*8*2)+t.TotalNameSize+t.TotalDataSize {
+	indexBytes := uint64(t.FilesCount) * 8
+	arraysSize, ok := checkedAddUint64(uint64(t.DirNameSize), indexBytes, indexBytes, t.TotalNameSize, t.TotalDataSize)
+	if !ok || uint64(len(data)) < arraysSize {
 		return nil, fmt.Errorf("too short arrays data to parse")
 	}
 
 	t.DirName = data[:t.DirNameSize]
 	data = data[t.DirNameSize:]
 
+	t.NameIndex = make([]uint64, t.FilesCount)
+	t.DataIndex = make([]uint64, t.FilesCount)
 	for i := uint32(0); i < t.FilesCount; i++ {
-		t.NameIndex = append(t.NameIndex, binary.LittleEndian.Uint64(data[i*8:]))
-		t.DataIndex = append(t.DataIndex, binary.LittleEndian.Uint64(data[t.FilesCount*8+i*8:]))
+		t.NameIndex[i] = binary.LittleEndian.Uint64(data[uint64(i)*8:])
+		t.DataIndex[i] = binary.LittleEndian.Uint64(data[indexBytes+uint64(i)*8:])
 	}
-	data = data[t.FilesCount*8*2:]
+	data = data[indexBytes*2:]
 
 	t.Names = data[:t.TotalNameSize]
 	data = data[t.TotalNameSize:]
 	t.Data = data[:t.TotalDataSize]
 	data = data[t.TotalDataSize:]
+
+	if err = t.validateStatic(); err != nil {
+		return nil, err
+	}
 	return data, nil
+}
+
+func checkedAddUint64(vals ...uint64) (uint64, bool) {
+	var total uint64
+	for _, v := range vals {
+		if total+v < total {
+			return 0, false
+		}
+		total += v
+	}
+	return total, true
+}
+
+func (t *TorrentHeader) validateStatic() error {
+	if err := t.validateShape(); err != nil {
+		return err
+	}
+
+	var prevName uint64
+	for i, end := range t.NameIndex {
+		if end < prevName {
+			return fmt.Errorf("corrupted header, non-monotonic name index %d", i)
+		}
+		if end > uint64(len(t.Names)) {
+			return fmt.Errorf("corrupted header, too short names data")
+		}
+		name := string(t.Names[prevName:end])
+		if err := validateFileName(name, true); err != nil {
+			return fmt.Errorf("malicious file name %q: %w", name, err)
+		}
+		prevName = end
+	}
+	if prevName != uint64(len(t.Names)) {
+		return fmt.Errorf("corrupted header, unindexed names data")
+	}
+
+	var prevData uint64
+	for i, end := range t.DataIndex {
+		if end < prevData {
+			return fmt.Errorf("corrupted header, non-monotonic data index %d", i)
+		}
+		prevData = end
+	}
+	return nil
+}
+
+func (t *TorrentHeader) validateShape() error {
+	if t == nil {
+		return fmt.Errorf("header is nil")
+	}
+	if t.FilesCount == 0 {
+		return fmt.Errorf("header has no files")
+	}
+	if t.FilesCount > maxTorrentHeaderFiles {
+		return fmt.Errorf("too many files in header")
+	}
+	if uint32(len(t.NameIndex)) != t.FilesCount || uint32(len(t.DataIndex)) != t.FilesCount {
+		return fmt.Errorf("corrupted header, lack of files info")
+	}
+	if uint64(len(t.Names)) != t.TotalNameSize {
+		return fmt.Errorf("corrupted header, incorrect names size")
+	}
+	if uint64(len(t.Data)) != t.TotalDataSize {
+		return fmt.Errorf("corrupted header, incorrect data size")
+	}
+	if t.DirNameSize != uint32(len(t.DirName)) {
+		return fmt.Errorf("corrupted header, incorrect dir name size")
+	}
+	if len(t.DirName) > 256 {
+		return fmt.Errorf("too big dir name > 256")
+	}
+	if err := validateFileName(string(t.DirName), false); err != nil {
+		return fmt.Errorf("malicious dir name: %w", err)
+	}
+	return nil
 }
 
 func (t *TorrentHeader) Serialize(buffer *bytes.Buffer) error {
@@ -180,22 +283,15 @@ func (t *Torrent) calcFileIndexes() error {
 		return nil
 	}
 
-	t.filesIndex = map[string]uint32{}
+	filesIndex := map[string]uint32{}
 	for i := uint32(0); i < t.Header.FilesCount; i++ {
-		if uint64(len(t.Header.Names)) < t.Header.NameIndex[i] {
-			return fmt.Errorf("corrupted header, too short names data")
+		name, _, _, err := t.fileBoundsByID(i)
+		if err != nil {
+			return err
 		}
-		if t.Info.FileSize < t.Header.DataIndex[i]+t.Info.HeaderSize {
-			return fmt.Errorf("corrupted header, data out of range")
-		}
-
-		nameFrom := uint64(0)
-		if i > 0 {
-			nameFrom = t.Header.NameIndex[i-1]
-		}
-		name := t.Header.Names[nameFrom:t.Header.NameIndex[i]]
-		t.filesIndex[string(name)] = i
+		filesIndex[name] = i
 	}
+	t.filesIndex = filesIndex
 	return nil
 }
 
@@ -216,20 +312,30 @@ func (t *Torrent) GetFileOffsets(name string) (*FileInfo, error) {
 func (t *Torrent) GetFilesInPiece(piece uint32) ([]*FileInfo, error) {
 	start := uint64(piece) * uint64(t.Info.PieceSize)
 	end := uint64(piece+1) * uint64(t.Info.PieceSize)
+	if end <= t.Info.HeaderSize {
+		return nil, nil
+	}
+
+	dataStart := uint64(0)
+	if start > t.Info.HeaderSize {
+		dataStart = start - t.Info.HeaderSize
+	}
+	dataEnd := end - t.Info.HeaderSize
 
 	var files []*FileInfo
-	for i := range t.Header.DataIndex {
+	first := sort.Search(len(t.Header.DataIndex), func(i int) bool {
+		return t.Header.DataIndex[i] > dataStart
+	})
+	for i := first; i < len(t.Header.DataIndex); i++ {
 		fileStart, fileEnd := uint64(0), t.Header.DataIndex[i]
 		if i > 0 {
 			fileStart = t.Header.DataIndex[i-1]
 		}
-		fileStart += t.Info.HeaderSize
-		fileEnd += t.Info.HeaderSize
 
-		if fileStart >= end {
+		if fileStart >= dataEnd {
 			break
 		}
-		if fileEnd <= start {
+		if fileEnd <= dataStart {
 			continue
 		}
 
@@ -244,31 +350,73 @@ func (t *Torrent) GetFilesInPiece(piece uint32) ([]*FileInfo, error) {
 }
 
 func (t *Torrent) GetFileOffsetsByID(i uint32) (*FileInfo, error) {
-	if int(i) >= len(t.Header.DataIndex) {
-		return nil, ErrFileNotExist
+	name, start, end, err := t.fileBoundsByID(i)
+	if err != nil {
+		return nil, err
 	}
 	info := &FileInfo{
 		Index: i,
 	}
 
-	var end = t.Header.DataIndex[i]
-	var start uint64 = 0
+	absStart := t.Info.HeaderSize + start
+	absEnd := t.Info.HeaderSize + end
+	pieceSize := uint64(t.Info.PieceSize)
+
+	info.FromPiece = uint32(absStart / pieceSize)
+	info.FromPieceOffset = uint32(absStart % pieceSize)
+	if absEnd == absStart {
+		info.ToPiece = info.FromPiece
+		info.ToPieceOffset = info.FromPieceOffset
+	} else {
+		lastByte := absEnd - 1
+		info.ToPiece = uint32(lastByte / pieceSize)
+		info.ToPieceOffset = uint32(absEnd - uint64(info.ToPiece)*pieceSize)
+	}
+	info.Size = end - start
+	info.Name = name
+
+	return info, nil
+}
+
+func (t *Torrent) fileBoundsByID(i uint32) (name string, start uint64, end uint64, err error) {
+	if t.Header == nil || t.Info == nil {
+		return "", 0, 0, fmt.Errorf("torrent metadata is not loaded")
+	}
+	if t.Info.PieceSize == 0 || t.Info.FileSize < t.Info.HeaderSize {
+		return "", 0, 0, fmt.Errorf("corrupted torrent info sizes")
+	}
+	if err = t.Header.validateShape(); err != nil {
+		return "", 0, 0, err
+	}
+	if i >= t.Header.FilesCount || int(i) >= len(t.Header.DataIndex) || int(i) >= len(t.Header.NameIndex) {
+		return "", 0, 0, ErrFileNotExist
+	}
+
+	end = t.Header.DataIndex[i]
 	if i > 0 {
 		start = t.Header.DataIndex[i-1]
 	}
-	info.FromPiece = uint32((t.Info.HeaderSize + start) / uint64(t.Info.PieceSize))
-	info.ToPiece = uint32((t.Info.HeaderSize + end) / uint64(t.Info.PieceSize))
-	info.FromPieceOffset = uint32((t.Info.HeaderSize + start) - uint64(info.FromPiece)*uint64(t.Info.PieceSize))
-	info.ToPieceOffset = uint32((t.Info.HeaderSize + end) - uint64(info.ToPiece)*uint64(t.Info.PieceSize))
-	info.Size = (uint64(info.ToPiece-info.FromPiece)*uint64(t.Info.PieceSize) + uint64(info.ToPieceOffset)) - uint64(info.FromPieceOffset)
+	if end < start {
+		return "", 0, 0, fmt.Errorf("corrupted header, non-monotonic data index")
+	}
+	if end > t.Info.FileSize-t.Info.HeaderSize {
+		return "", 0, 0, fmt.Errorf("corrupted header, data out of range")
+	}
 
-	var nameFrom uint64 = 0
+	nameFrom := uint64(0)
 	if i > 0 {
 		nameFrom = t.Header.NameIndex[i-1]
 	}
-	info.Name = string(t.Header.Names[nameFrom:t.Header.NameIndex[i]])
+	nameTo := t.Header.NameIndex[i]
+	if nameTo < nameFrom || nameTo > uint64(len(t.Header.Names)) {
+		return "", 0, 0, fmt.Errorf("corrupted header, names data out of range")
+	}
+	name = string(t.Header.Names[nameFrom:nameTo])
+	if err = validateFileName(name, true); err != nil {
+		return "", 0, 0, fmt.Errorf("malicious file name %q: %w", name, err)
+	}
 
-	return info, nil
+	return name, start, end, nil
 }
 
 func (t *Torrent) ListFiles() ([]string, error) {

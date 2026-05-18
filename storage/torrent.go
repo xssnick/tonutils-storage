@@ -9,7 +9,6 @@ import (
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/tl"
 	"io"
-	"math/bits"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -94,7 +93,9 @@ type NetConnector interface {
 }
 
 type TorrentStats struct {
-	Uploaded uint64
+	Uploaded                  uint64
+	StoredUploaded            uint64
+	LastUploadStatsStoredAtMs int64
 }
 
 type KnownNode struct {
@@ -136,6 +137,8 @@ type Torrent struct {
 	filesIndex map[string]uint32
 
 	pieceMask                []byte
+	downloadedPieces         atomic.Uint32
+	downloadedPiecesCountSet atomic.Bool
 	lastVerified             time.Time
 	isVerificationInProgress bool
 
@@ -165,6 +168,8 @@ func (t *Torrent) InitMask() {
 	t.maskMx.Lock()
 	if len(t.pieceMask) == 0 {
 		t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
+		t.downloadedPieces.Store(countBitsetOnes(t.pieceMask))
+		t.downloadedPiecesCountSet.Store(true)
 	}
 	t.maskMx.Unlock()
 }
@@ -211,6 +216,8 @@ func (t *Torrent) GetUploadStats() uint64 {
 
 func (t *Torrent) SetUploadStats(val uint64) {
 	atomic.StoreUint64(&t.stats.Uploaded, val)
+	atomic.StoreUint64(&t.stats.StoredUploaded, val)
+	atomic.StoreInt64(&t.stats.LastUploadStatsStoredAtMs, time.Now().UnixMilli())
 }
 
 func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
@@ -240,6 +247,7 @@ func (t *Torrent) Stop() {
 
 	t.activeUpload = false
 	t.pause()
+	t.flushUploadStats()
 }
 
 func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
@@ -369,7 +377,7 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 				continue
 			}
 
-			if atomic.LoadInt32(&peer.sessionInitialized) == 0 {
+			if !peer.isLocalInitSent() {
 				continue
 			}
 
@@ -499,14 +507,21 @@ func (t *Torrent) getPiece(id uint32) (*PieceInfo, error) {
 }
 
 func (t *Torrent) removePiece(id uint32) error {
+	if err := t.db.RemovePiece(t.BagID, id); err != nil {
+		return err
+	}
+
 	i := id / 8
 	y := id % 8
 
 	t.maskMx.Lock()
-	t.pieceMask[i] &= ^(1 << y)
+	t.ensureDownloadedPiecesCountLocked()
+	if t.pieceMask[i]&(1<<y) != 0 {
+		t.pieceMask[i] &= ^(1 << y)
+		t.downloadedPieces.Add(^uint32(0))
+	}
 	t.maskMx.Unlock()
-
-	return t.db.RemovePiece(t.BagID, id)
+	return nil
 }
 
 func (t *Torrent) setPiece(id uint32, p *PieceInfo, onlyHeader bool) error {
@@ -520,13 +535,17 @@ func (t *Torrent) setPiece(id uint32, p *PieceInfo, onlyHeader bool) error {
 	i := id / 8
 	y := id % 8
 
-	t.maskMx.Lock()
-	t.pieceMask[i] |= 1 << y
-	t.maskMx.Unlock()
-
 	if err := t.db.SetPiece(t.BagID, id, p); err != nil {
 		return err
 	}
+
+	t.maskMx.Lock()
+	t.ensureDownloadedPiecesCountLocked()
+	if t.pieceMask[i]&(1<<y) == 0 {
+		t.pieceMask[i] |= 1 << y
+		t.downloadedPieces.Add(1)
+	}
+	t.maskMx.Unlock()
 
 	t.enqueueNewPiece(id)
 
@@ -645,35 +664,34 @@ func (t *Torrent) compactNewPieces() {
 }
 
 func (t *Torrent) IsCompleted() bool {
-	mask := t.PiecesMask()
-	if len(mask) == 0 {
+	if t.Info == nil {
 		return false
 	}
 
 	num := t.Info.PiecesNum()
-	for i, b := range mask {
-		ones := 8
-		if i == len(mask)-1 {
-			if ones = int(num % 8); ones == 0 {
-				ones = 8
-			}
-		}
-
-		if bits.OnesCount8(b) != ones {
-			return false
-		}
-	}
-	return true
+	return num > 0 && t.DownloadedPiecesNum() == int(num)
 }
 
 func (t *Torrent) DownloadedPiecesNum() int {
-	mask := t.PiecesMask()
-
-	pieces := 0
-	for _, b := range mask {
-		pieces += bits.OnesCount8(b)
+	t.maskMx.RLock()
+	initialized := t.downloadedPiecesCountSet.Load()
+	if initialized {
+		pieces := t.downloadedPieces.Load()
+		t.maskMx.RUnlock()
+		return int(pieces)
 	}
-	return pieces
+	mask := append([]byte(nil), t.pieceMask...)
+	t.maskMx.RUnlock()
+
+	return int(countBitsetOnes(mask))
+}
+
+func (t *Torrent) ensureDownloadedPiecesCountLocked() {
+	if t.downloadedPiecesCountSet.Load() {
+		return
+	}
+	t.downloadedPieces.Store(countBitsetOnes(t.pieceMask))
+	t.downloadedPiecesCountSet.Store(true)
 }
 
 func (t *Torrent) LoadActiveFilesIDs() error {

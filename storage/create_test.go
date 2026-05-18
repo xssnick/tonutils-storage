@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -212,16 +213,19 @@ func testTree(depth int, hashesCount int, b *testing.B) {
 	hashes := createHashes(hashesCount)
 	var hash []byte
 	for i := 0; i < b.N; i++ {
-		hash = buildMerkleTree(hashes, depth).Hash(0)
+		tree, err := buildMerkleTree(context.Background(), hashes, depth)
+		if err != nil {
+			b.Fatal(err)
+		}
+		hash = tree.Hash(0)
 	}
 	_ = hash
 }
 
-func createHashes(size int) [][]byte {
-	hashes := make([][]byte, size)
+func createHashes(size int) []merkleHash {
+	hashes := make([]merkleHash, size)
 	for i := 0; i < len(hashes); i++ {
-		hashes[i] = make([]byte, 32)
-		rand.Read(hashes[i])
+		_, _ = rand.Read(hashes[i][:])
 	}
 	return hashes
 }

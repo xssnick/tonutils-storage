@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/csv"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,6 +42,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -238,8 +241,8 @@ func main() {
 					e.Tunnel.SetOutAddressChangedHandler(func(addr *net.UDPAddr) {
 						log.Info().Str("addr", addr.IP.String()).Int("port", addr.Port).Msg("out updated for storage")
 
-						gate.SetAddressList([]*adnlAddress.UDP{
-							{
+						gate.SetAddressList([]adnlAddress.Address{
+							&adnlAddress.UDP{
 								IP:   addr.IP,
 								Port: int32(addr.Port),
 							},
@@ -283,8 +286,8 @@ func main() {
 
 	serverMode := ip != nil
 	if ip != nil {
-		gate.SetAddressList([]*adnlAddress.UDP{
-			{
+		gate.SetAddressList([]adnlAddress.Address{
+			&adnlAddress.UDP{
 				IP:   ip,
 				Port: int32(port),
 			},
@@ -407,6 +410,26 @@ func main() {
 						continue
 					}
 					download(parts[1])
+				case "verify":
+					bagID, showFiles := parseVerifyArgs(parts)
+					if bagID == "" {
+						pterm.Error.Println("Usage: verify [bag_id] [files]")
+						continue
+					}
+					verify(bagID, showFiles)
+				case "verify_all":
+					workers, err := parseVerifyAllWorkers(parts)
+					if err != nil {
+						pterm.Error.Println("Usage: verify_all [workers]")
+						continue
+					}
+					verifyAll(workers)
+				case "info":
+					if len(parts) < 2 {
+						pterm.Error.Println("Usage: info [bag_id]")
+						continue
+					}
+					info(parts[1])
 				case "create":
 					if len(parts) < 3 {
 						pterm.Error.Println("Usage: create [path] [description]")
@@ -455,6 +478,9 @@ func main() {
 					pterm.Info.Print("Commands:\n" +
 						"create [path] [description]\n" +
 						"download [bag_id]\n" +
+						"info [bag_id]\n" +
+						"verify [bag_id] [files]\n" +
+						"verify_all [workers]\n" +
 						"remove [bag_id] [with files? (true/false)]\n" +
 						"list\n" +
 						"providers [bag_id] [owner_address]\n" +
@@ -505,6 +531,702 @@ func download(bagId string) {
 	}
 
 	pterm.Success.Println("Bag added")
+}
+
+const verifyPiecesLineWidth = 128
+
+type verifyAllResult struct {
+	BagID         string
+	Name          string
+	CreatedAt     time.Time
+	TotalPieces   uint32
+	DamagedPieces uint32
+	Passed        bool
+}
+
+func parseVerifyArgs(parts []string) (bagID string, showFiles bool) {
+	if len(parts) < 2 {
+		return "", false
+	}
+	if parts[1] == "files" {
+		if len(parts) < 3 {
+			return "", false
+		}
+		return parts[2], true
+	}
+	return parts[1], len(parts) > 2 && strings.EqualFold(parts[2], "files")
+}
+
+func parseVerifyAllWorkers(parts []string) (int, error) {
+	if len(parts) == 1 {
+		return 1, nil
+	}
+	if len(parts) != 2 {
+		return 0, fmt.Errorf("invalid arguments")
+	}
+
+	workers, err := strconv.Atoi(parts[1])
+	if err != nil || workers < 1 {
+		return 0, fmt.Errorf("invalid workers count")
+	}
+	return workers, nil
+}
+
+func verify(bagId string, showFiles bool) {
+	bag, err := hex.DecodeString(bagId)
+	if err != nil {
+		pterm.Error.Println("Invalid bag id:", err.Error())
+		return
+	}
+
+	if len(bag) != 32 {
+		pterm.Error.Println("Invalid bag id: should be 32 bytes hex")
+		return
+	}
+
+	tor := Storage.GetTorrent(bag)
+	if tor == nil {
+		pterm.Error.Println("Bag is unknown")
+		return
+	}
+
+	report, err := tor.CheckPiecesProofs(context.Background())
+	if err != nil {
+		pterm.Error.Println("Failed to verify bag:", err.Error())
+		return
+	}
+
+	pterm.Println("Legend: . ok, ! mismatch, ? no local piece")
+	for _, line := range renderVerifyPieceLines(report.Statuses, verifyPiecesLineWidth) {
+		pterm.Println(line)
+	}
+
+	failedPieces := len(report.Failed)
+	switch {
+	case failedPieces == 0 && report.MissingPieces == 0 && len(report.MissingFiles) == 0:
+		pterm.Success.Println("Result: all pieces are valid and all expected files exist.",
+			"Pieces:", report.TotalPieces, "Files:", report.CheckedFiles)
+	case failedPieces == 0 && len(report.MissingFiles) == 0:
+		pterm.Warning.Println("Result: no mismatches found, but some pieces are missing locally.",
+			"OK:", report.OKPieces, "Missing pieces:", report.MissingPieces, "Total:", report.TotalPieces)
+	default:
+		pterm.Error.Println("Result: verification failed.",
+			"OK:", report.OKPieces, "Failed:", failedPieces,
+			"Missing pieces:", report.MissingPieces, "Missing files:", len(report.MissingFiles), "Total:", report.TotalPieces)
+		if showFiles && failedPieces > 0 {
+			files, err := collectVerifyFailedPieceFiles(tor, report)
+			if err != nil {
+				pterm.Warning.Println("Failed to collect files in corrupted pieces:", err.Error())
+			} else if len(files) > 0 {
+				pterm.Error.Println("Files in corrupted pieces:")
+				for _, path := range files {
+					pterm.Println("  " + path)
+				}
+			}
+		}
+		if len(report.MissingFiles) > 0 {
+			pterm.Error.Println("Missing files:")
+			for _, path := range report.MissingFiles {
+				pterm.Println("  " + path)
+			}
+		}
+	}
+}
+
+func verifyAll(workers int) {
+	bags := Storage.GetAll()
+	if len(bags) == 0 {
+		pterm.Info.Println("No bags to verify")
+		return
+	}
+
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(bags) {
+		workers = len(bags)
+	}
+
+	progress, _ := termui.StartProgressbar(len(bags), fmt.Sprintf("Verifying %d bags with %d worker(s)...", len(bags), workers))
+	defer progress.Stop()
+
+	jobs := make(chan *storage.Torrent, len(bags))
+	results := make(chan verifyAllResult, len(bags))
+
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			for tor := range jobs {
+				results <- verifyAllBag(tor)
+			}
+		}()
+	}
+
+	for _, tor := range bags {
+		jobs <- tor
+	}
+	close(jobs)
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	failed := make([]verifyAllResult, 0)
+	passed := 0
+	for result := range results {
+		progress.Increment()
+		if result.Passed {
+			passed++
+			continue
+		}
+		failed = append(failed, result)
+	}
+
+	sort.Slice(failed, func(i, j int) bool {
+		if failed[i].Name != failed[j].Name {
+			return failed[i].Name < failed[j].Name
+		}
+		return failed[i].BagID < failed[j].BagID
+	})
+
+	reportPath, err := writeVerifyAllReport(failed)
+	if err != nil {
+		pterm.Error.Println("verify_all completed, but failed to write report:", err.Error())
+		return
+	}
+
+	if len(failed) == 0 {
+		pterm.Success.Println("verify_all completed.",
+			"Total:", len(bags), "Passed:", passed, "Failed:", 0, "Report:", reportPath)
+		return
+	}
+
+	pterm.Error.Println("verify_all completed.",
+		"Total:", len(bags), "Passed:", passed, "Failed:", len(failed), "Report:", reportPath)
+}
+
+func verifyAllBag(tor *storage.Torrent) verifyAllResult {
+	result := verifyAllResult{
+		BagID:     hex.EncodeToString(tor.BagID),
+		Name:      bagDisplayName(tor),
+		CreatedAt: tor.CreatedAt,
+	}
+	if tor.Info != nil {
+		result.TotalPieces = tor.Info.PiecesNum()
+	}
+
+	report, err := tor.CheckPiecesProofs(context.Background())
+	if err != nil {
+		return result
+	}
+
+	result.TotalPieces = report.TotalPieces
+	result.DamagedPieces = uint32(len(report.Failed)) + report.MissingPieces
+	result.Passed = verifyReportPassed(report)
+	return result
+}
+
+func verifyReportPassed(report *storage.PieceProofReport) bool {
+	if report == nil {
+		return false
+	}
+	return len(report.Failed) == 0 && report.MissingPieces == 0 && len(report.MissingFiles) == 0
+}
+
+func writeVerifyAllReport(failed []verifyAllResult) (string, error) {
+	reportPath := filepath.Join(*DBPath, fmt.Sprintf("verify_all_report_%s.csv", time.Now().Format("20060102_150405")))
+	absPath, err := filepath.Abs(reportPath)
+	if err == nil {
+		reportPath = absPath
+	}
+
+	fl, err := os.Create(reportPath)
+	if err != nil {
+		return "", err
+	}
+	defer fl.Close()
+
+	writer := csv.NewWriter(fl)
+	rows := buildVerifyAllCSVRows(failed)
+	for _, row := range rows {
+		if err = writer.Write(row); err != nil {
+			return "", err
+		}
+	}
+	writer.Flush()
+	if err = writer.Error(); err != nil {
+		return "", err
+	}
+
+	return reportPath, nil
+}
+
+func buildVerifyAllCSVRows(failed []verifyAllResult) [][]string {
+	rows := make([][]string, 0, len(failed)+1)
+	rows = append(rows, []string{"bag_id", "name", "created_at", "total_pieces", "damaged_pieces"})
+	for _, result := range failed {
+		rows = append(rows, []string{
+			result.BagID,
+			result.Name,
+			formatVerifyAllCreatedAt(result.CreatedAt),
+			strconv.FormatUint(uint64(result.TotalPieces), 10),
+			strconv.FormatUint(uint64(result.DamagedPieces), 10),
+		})
+	}
+	return rows
+}
+
+func formatVerifyAllCreatedAt(ts time.Time) string {
+	if ts.IsZero() {
+		return ""
+	}
+	return ts.Format(time.RFC3339)
+}
+
+func collectVerifyFailedPieceFiles(tor *storage.Torrent, report *storage.PieceProofReport) ([]string, error) {
+	if tor.Header == nil {
+		return nil, nil
+	}
+
+	filesMap := map[string]struct{}{}
+	for _, failed := range report.Failed {
+		files, err := tor.GetFilesInPiece(failed.Piece)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get files for piece %d: %w", failed.Piece, err)
+		}
+		for _, file := range files {
+			filesMap[bagFileLocalPath(tor, file)] = struct{}{}
+		}
+	}
+
+	files := make([]string, 0, len(filesMap))
+	for path := range filesMap {
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+type bagInfoSnapshot struct {
+	Name              string
+	Description       string
+	DirName           string
+	LocalPath         string
+	Status            string
+	CreatedAt         time.Time
+	LastVerifiedAt    time.Time
+	VerificationState string
+	CreatedLocally    bool
+	InfoLoaded        bool
+	HeaderLoaded      bool
+	DownloadAll       bool
+	DownloadOrdered   bool
+	ActiveDownload    bool
+	ActiveUpload      bool
+	Completed         bool
+	FilesTotal        int
+	FilesSelected     int
+	BagDataSize       uint64
+	SelectedDataSize  uint64
+	DownloadedData    uint64
+	HeaderSize        uint64
+	BagSize           uint64
+	PieceSize         uint32
+	TotalPieces       uint32
+	DownloadedPieces  int
+	PeersCount        int
+	DownloadSpeed     uint64
+	UploadSpeed       uint64
+	UploadedTotal     uint64
+	RootHash          string
+	HeaderHash        string
+}
+
+type bagPeerSnapshot struct {
+	ID            string
+	Addr          string
+	DownloadSpeed uint64
+	UploadSpeed   uint64
+	Downloaded    uint64
+	Uploaded      uint64
+}
+
+func info(bagId string) {
+	bag, err := hex.DecodeString(bagId)
+	if err != nil {
+		pterm.Error.Println("Invalid bag id:", err.Error())
+		return
+	}
+
+	if len(bag) != 32 {
+		pterm.Error.Println("Invalid bag id: should be 32 bytes hex")
+		return
+	}
+
+	tor := Storage.GetTorrent(bag)
+	if tor == nil {
+		pterm.Error.Println("Bag is unknown")
+		return
+	}
+
+	summary, peers, err := collectBagInfo(tor)
+	if err != nil {
+		pterm.Error.Println("Failed to collect bag info:", err.Error())
+		return
+	}
+
+	pterm.Println("Bag info: " + pterm.Cyan(bagId))
+	infoTable := pterm.TableData{
+		{"Field", "Value"},
+		{"Name", summary.Name},
+		{"Description", summary.Description},
+		{"Created", formatBagInfoTime(summary.CreatedAt)},
+		{"Status", summary.Status},
+		{"Verification", summary.VerificationState},
+		{"Bag ID", bagId},
+		{"Local Path", summary.LocalPath},
+		{"Directory", summary.DirName},
+		{"Files", fmt.Sprintf("%d total / %d selected", summary.FilesTotal, summary.FilesSelected)},
+		{"Mode", bagInfoMode(summary.DownloadAll, summary.DownloadOrdered)},
+		{"Data", fmt.Sprintf("%s selected / %s total", storage.ToSz(summary.SelectedDataSize), storage.ToSz(summary.BagDataSize))},
+		{"Downloaded", fmt.Sprintf("%s / %s", storage.ToSz(summary.DownloadedData), storage.ToSz(summary.SelectedDataSize))},
+		{"Header Size", storage.ToSz(summary.HeaderSize)},
+		{"Bag Size", storage.ToSz(summary.BagSize)},
+		{"Piece Size", storage.ToSz(uint64(summary.PieceSize))},
+		{"Pieces", fmt.Sprintf("%d / %d", summary.DownloadedPieces, summary.TotalPieces)},
+		{"Peers", fmt.Sprintf("%d", summary.PeersCount)},
+		{"Speeds", "D " + storage.ToSpeed(summary.DownloadSpeed) + " | U " + storage.ToSpeed(summary.UploadSpeed)},
+		{"Uploaded", storage.ToSz(summary.UploadedTotal)},
+		{"Completed", bagInfoYesNo(summary.Completed)},
+		{"Created Locally", bagInfoYesNo(summary.CreatedLocally)},
+		{"Active", fmt.Sprintf("download %s / upload %s", bagInfoOnOff(summary.ActiveDownload), bagInfoOnOff(summary.ActiveUpload))},
+		{"Info Loaded", bagInfoYesNo(summary.InfoLoaded)},
+		{"Header Loaded", bagInfoYesNo(summary.HeaderLoaded)},
+		{"Root Hash", summary.RootHash},
+		{"Header Hash", summary.HeaderHash},
+	}
+	_ = pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(infoTable).Render()
+
+	if len(peers) == 0 {
+		return
+	}
+
+	peerTable := pterm.TableData{
+		{"Peer ID", "Address", "Download", "Upload", "Downloaded", "Uploaded"},
+	}
+	for _, peer := range peers {
+		peerTable = append(peerTable, []string{
+			peer.ID,
+			peer.Addr,
+			storage.ToSpeed(peer.DownloadSpeed),
+			storage.ToSpeed(peer.UploadSpeed),
+			storage.ToSz(peer.Downloaded),
+			storage.ToSz(peer.Uploaded),
+		})
+	}
+
+	pterm.Println("Peers (" + pterm.Cyan(fmt.Sprint(len(peers))) + ")")
+	_ = pterm.DefaultTable.WithHasHeader().WithBoxed().WithData(peerTable).Render()
+}
+
+func collectBagInfo(tor *storage.Torrent) (*bagInfoSnapshot, []bagPeerSnapshot, error) {
+	summary := &bagInfoSnapshot{
+		Name:            bagDisplayName(tor),
+		Description:     bagValueOrDash(""),
+		DirName:         bagValueOrDash(""),
+		LocalPath:       tor.Path,
+		Status:          "Resolving",
+		CreatedAt:       tor.CreatedAt,
+		CreatedLocally:  tor.CreatedLocally,
+		DownloadAll:     tor.IsDownloadAll(),
+		DownloadOrdered: tor.IsDownloadOrdered(),
+		UploadedTotal:   tor.GetUploadStats(),
+		RootHash:        "-",
+		HeaderHash:      "-",
+	}
+
+	verifyInProgress, lastVerified := tor.GetLastVerifiedAt()
+	summary.LastVerifiedAt = lastVerified
+	summary.VerificationState = bagVerificationState(verifyInProgress, lastVerified)
+	summary.ActiveDownload, summary.ActiveUpload = tor.IsActive()
+	if !summary.ActiveDownload {
+		summary.Status = "Inactive"
+	}
+
+	var activeFilesSize uint64
+	if tor.Info != nil {
+		summary.InfoLoaded = true
+		summary.PieceSize = tor.Info.PieceSize
+		summary.HeaderSize = tor.Info.HeaderSize
+		summary.BagSize = tor.Info.FileSize
+		summary.BagDataSize = tor.Info.FileSize - tor.Info.HeaderSize
+		summary.SelectedDataSize = summary.BagDataSize
+		summary.TotalPieces = tor.Info.PiecesNum()
+		summary.DownloadedPieces = tor.DownloadedPiecesNum()
+		summary.RootHash = hex.EncodeToString(tor.Info.RootHash)
+		summary.HeaderHash = hex.EncodeToString(tor.Info.HeaderHash)
+		summary.Description = bagValueOrDash(tor.Info.Description.Value)
+
+		downloadedPieces := summary.DownloadedPieces
+		downloaded := uint64(downloadedPieces*int(tor.Info.PieceSize)) - tor.Info.HeaderSize
+		if uint64(downloadedPieces*int(tor.Info.PieceSize)) < tor.Info.HeaderSize {
+			downloaded = 0
+		}
+		if downloaded > summary.BagDataSize {
+			downloaded = summary.BagDataSize
+		}
+
+		summary.Completed = uint32(downloadedPieces) == tor.Info.PiecesNum()
+		if !summary.Completed && !tor.IsDownloadAll() {
+			mask := tor.PiecesMask()
+			summary.Completed = true
+			for _, f := range tor.GetActiveFilesIDs() {
+				off, err := tor.GetFileOffsetsByID(f)
+				if err != nil {
+					continue
+				}
+				activeFilesSize += off.Size
+
+				if summary.Completed {
+					for pc := off.FromPiece; pc <= off.ToPiece; pc++ {
+						if !bagHasPiece(mask, pc) {
+							summary.Completed = false
+							break
+						}
+					}
+				}
+			}
+
+			summary.SelectedDataSize = activeFilesSize
+			if downloaded > activeFilesSize {
+				downloaded = activeFilesSize
+			}
+		}
+		summary.DownloadedData = downloaded
+
+		if verifyInProgress {
+			summary.Status = "Verifying"
+		} else if summary.Completed {
+			summary.Status = "Downloaded"
+			if summary.ActiveUpload {
+				summary.Status = "Seeding"
+			}
+		} else if summary.ActiveDownload {
+			if len(tor.GetActiveFilesIDs()) == 0 && !tor.IsDownloadAll() {
+				summary.Status = "Header downloaded"
+			} else {
+				summary.Status = "Downloading"
+			}
+		}
+	}
+
+	if tor.Header != nil {
+		summary.HeaderLoaded = true
+		dirName := strings.TrimSuffix(string(tor.Header.DirName), "/")
+		summary.DirName = bagValueOrDash(dirName)
+		summary.FilesTotal = int(tor.Header.FilesCount)
+		if tor.IsDownloadAll() {
+			summary.FilesSelected = int(tor.Header.FilesCount)
+		} else {
+			summary.FilesSelected = len(tor.GetActiveFilesIDs())
+		}
+		summary.LocalPath = bagLocalPath(tor)
+		summary.Name = bagDisplayName(tor)
+
+		if summary.SelectedDataSize == 0 && tor.Info != nil && !tor.IsDownloadAll() {
+			for _, f := range tor.GetActiveFilesIDs() {
+				off, err := tor.GetFileOffsetsByID(f)
+				if err != nil {
+					continue
+				}
+				summary.SelectedDataSize += off.Size
+			}
+		}
+	}
+
+	if !summary.InfoLoaded {
+		summary.Description = "-"
+	}
+	if summary.SelectedDataSize == 0 && summary.InfoLoaded && summary.DownloadAll {
+		summary.SelectedDataSize = summary.BagDataSize
+	}
+
+	peersMap := tor.GetPeers()
+	summary.PeersCount = len(peersMap)
+
+	peers := make([]bagPeerSnapshot, 0, len(peersMap))
+	for id, peer := range peersMap {
+		summary.DownloadSpeed += peer.GetDownloadSpeed()
+		summary.UploadSpeed += peer.GetUploadSpeed()
+		peers = append(peers, bagPeerSnapshot{
+			ID:            id,
+			Addr:          peer.Addr,
+			DownloadSpeed: peer.GetDownloadSpeed(),
+			UploadSpeed:   peer.GetUploadSpeed(),
+			Downloaded:    peer.Downloaded,
+			Uploaded:      peer.Uploaded,
+		})
+	}
+
+	sort.Slice(peers, func(i, j int) bool {
+		left := peers[i].DownloadSpeed + peers[i].UploadSpeed
+		right := peers[j].DownloadSpeed + peers[j].UploadSpeed
+		if left != right {
+			return left > right
+		}
+		if peers[i].Downloaded+peers[i].Uploaded != peers[j].Downloaded+peers[j].Uploaded {
+			return peers[i].Downloaded+peers[i].Uploaded > peers[j].Downloaded+peers[j].Uploaded
+		}
+		return peers[i].ID < peers[j].ID
+	})
+
+	return summary, peers, nil
+}
+
+func bagDisplayName(tor *storage.Torrent) string {
+	if tor.Header != nil {
+		if dir := strings.TrimSuffix(string(tor.Header.DirName), "/"); dir != "" {
+			return dir
+		}
+
+		if tor.Header.FilesCount == 1 {
+			if file, err := tor.GetFileOffsetsByID(0); err == nil && file.Name != "" {
+				return file.Name
+			}
+		}
+	}
+
+	if tor.Info != nil && tor.Info.Description.Value != "" {
+		return tor.Info.Description.Value
+	}
+	return "-"
+}
+
+func bagLocalPath(tor *storage.Torrent) string {
+	if tor.Header == nil {
+		return tor.Path
+	}
+
+	dir := strings.TrimSuffix(string(tor.Header.DirName), "/")
+	if dir == "" {
+		if tor.Header.FilesCount == 1 {
+			if file, err := tor.GetFileOffsetsByID(0); err == nil && file.Name != "" {
+				return filepath.Join(tor.Path, file.Name)
+			}
+		}
+		return tor.Path
+	}
+	return filepath.Join(tor.Path, dir)
+}
+
+func bagFileLocalPath(tor *storage.Torrent, file *storage.FileInfo) string {
+	if tor.Header == nil || file == nil {
+		return tor.Path
+	}
+	return filepath.Join(bagLocalPath(tor), file.Name)
+}
+
+func bagInfoMode(downloadAll, downloadOrdered bool) string {
+	mode := "selected files"
+	if downloadAll {
+		mode = "all files"
+	}
+	if downloadOrdered {
+		return mode + ", ordered"
+	}
+	return mode + ", parallel"
+}
+
+func bagVerificationState(inProgress bool, ts time.Time) string {
+	if inProgress {
+		return "in progress"
+	}
+	if ts.IsZero() {
+		return "never"
+	}
+	return formatBagInfoTime(ts)
+}
+
+func formatBagInfoTime(ts time.Time) string {
+	if ts.IsZero() {
+		return "-"
+	}
+	return ts.Format("2006-01-02 15:04:05 MST")
+}
+
+func bagValueOrDash(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "-"
+	}
+	return v
+}
+
+func bagInfoYesNo(v bool) string {
+	if v {
+		return "yes"
+	}
+	return "no"
+}
+
+func bagInfoOnOff(v bool) string {
+	if v {
+		return "on"
+	}
+	return "off"
+}
+
+func bagHasPiece(mask []byte, piece uint32) bool {
+	if int(piece/8) >= len(mask) {
+		return false
+	}
+	return mask[piece/8]&(1<<(piece%8)) != 0
+}
+
+func renderVerifyPieceLines(statuses []storage.PieceProofStatus, width int) []string {
+	if width <= 0 {
+		width = verifyPiecesLineWidth
+	}
+	if len(statuses) == 0 {
+		return nil
+	}
+
+	digits := len(fmt.Sprint(len(statuses) - 1))
+	lines := make([]string, 0, (len(statuses)+width-1)/width)
+	for start := 0; start < len(statuses); start += width {
+		end := start + width
+		if end > len(statuses) {
+			end = len(statuses)
+		}
+
+		var line strings.Builder
+		if len(statuses) > width {
+			line.WriteString(fmt.Sprintf("%*d-%*d ", digits, start, digits, end-1))
+		}
+		line.WriteByte('[')
+		for _, status := range statuses[start:end] {
+			line.WriteByte(renderVerifyPieceChar(status))
+		}
+		line.WriteByte(']')
+		lines = append(lines, line.String())
+	}
+	return lines
+}
+
+func renderVerifyPieceChar(status storage.PieceProofStatus) byte {
+	switch status {
+	case storage.PieceProofStatusOK:
+		return '.'
+	case storage.PieceProofStatusMismatch:
+		return '!'
+	case storage.PieceProofStatusMissing:
+		return '?'
+	default:
+		return '?'
+	}
 }
 
 func remove(bagId string, withFiles bool) {

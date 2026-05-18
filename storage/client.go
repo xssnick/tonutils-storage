@@ -32,7 +32,7 @@ const (
 )
 
 type DHT interface {
-	StoreAddress(ctx context.Context, addresses address.List, ttl time.Duration, ownerKey ed25519.PrivateKey, copies int) (int, []byte, error)
+	StoreAddress(ctx context.Context, addresses address.List, ttl time.Duration, ownerKey ed25519.PrivateKey) (int, []byte, error)
 	FindAddresses(ctx context.Context, key []byte) (*address.List, ed25519.PublicKey, error)
 	FindOverlayNodes(ctx context.Context, overlayId []byte, continuation ...*dht.Continuation) (*overlay.NodesList, *dht.Continuation, error)
 	Close()
@@ -58,23 +58,42 @@ type torrentDownloader struct {
 	downloadCancel func()
 }
 
+type peerSessionAttempt struct {
+	ctx        context.Context
+	id         int64
+	generation uint64
+}
+
+type peerSessionState struct {
+	sessionId       int64
+	sessionSeqno    int64
+	sessionGen      uint64
+	localInitSent   int32
+	sessionInitAt   int64
+	lastInitChunkAt int64
+
+	remoteInitComplete int32
+	remoteStateKnown   int32
+	remoteWillUpload   int32
+	remoteWantDownload int32
+	remoteSeqno        int64
+
+	initScheduledGen uint64
+}
+
 type storagePeer struct {
 	torrent        *Torrent
 	nodeAddr       string
 	overlay        []byte
 	overlayNode    *overlay.Node
 	nodeId         []byte
-	sessionId      int64
-	sessionSeqno   int64
 	conn           *PeerConnection
 	lastActivityAt int64
+	session        peerSessionState
 
 	currentPing           int64
 	lastPingAt            time.Time
 	lastNeighboursAt      time.Time
-	sessionInitialized    int32
-	sessionInitAt         int64
-	updateInitReceived    int32
 	lastUpdatePiecesAt    int64
 	lastUpdatePiecesSeqno int64
 	lastSentNewPiecesPos  uint64
@@ -87,7 +106,6 @@ type storagePeer struct {
 	initExpectedChunks uint32
 	initReceivedChunks uint32
 	initChunksMask     []byte
-	lastInitChunkAt    int64
 	pendingInitChunks  map[uint32][]byte
 	pendingInitBytes   int
 	pendingHavePieces  []int32
@@ -100,7 +118,6 @@ type storagePeer struct {
 
 	closeOnce sync.Once
 
-	sessionCtx  context.Context
 	stopSession func()
 
 	closerCtx context.Context
@@ -109,6 +126,8 @@ type storagePeer struct {
 
 const maxPendingInitBytes = 32 << 20
 const maxPendingHavePieces = 1 << 20
+
+var errStaleSessionAttempt = errors.New("stale session attempt")
 
 func piecesBitsetBytes(bits uint32) int {
 	if bits == 0 {
@@ -205,9 +224,9 @@ func (p *storagePeer) waitForPiecesNum(ctx context.Context) (uint32, error) {
 	}
 }
 
-func (p *storagePeer) initProgressTimedOut(now time.Time, timeout time.Duration) bool {
-	lastProgressAt := atomic.LoadInt64(&p.lastInitChunkAt)
-	sessionInitAt := atomic.LoadInt64(&p.sessionInitAt)
+func (s *peerSessionState) initProgressTimedOut(now time.Time, timeout time.Duration) bool {
+	lastProgressAt := atomic.LoadInt64(&s.lastInitChunkAt)
+	sessionInitAt := atomic.LoadInt64(&s.sessionInitAt)
 	if lastProgressAt == 0 || lastProgressAt < sessionInitAt {
 		lastProgressAt = sessionInitAt
 	}
@@ -217,10 +236,144 @@ func (p *storagePeer) initProgressTimedOut(now time.Time, timeout time.Duration)
 	return now.UnixMilli()-lastProgressAt > timeout.Milliseconds()
 }
 
+func (p *storagePeer) initProgressTimedOut(now time.Time, timeout time.Duration) bool {
+	return p.session.initProgressTimedOut(now, timeout)
+}
+
+func newPeerSessionAttempt(ctx context.Context, id int64, generation uint64) *peerSessionAttempt {
+	return &peerSessionAttempt{
+		ctx:        ctx,
+		id:         id,
+		generation: generation,
+	}
+}
+
+func (s *peerSessionState) currentAttempt(ctx context.Context) peerSessionAttempt {
+	return peerSessionAttempt{
+		ctx:        ctx,
+		id:         atomic.LoadInt64(&s.sessionId),
+		generation: atomic.LoadUint64(&s.sessionGen),
+	}
+}
+
+func (p *storagePeer) currentSessionAttempt(ctx context.Context) peerSessionAttempt {
+	return p.session.currentAttempt(ctx)
+}
+
+func (s *peerSessionState) isAttemptCurrent(attempt peerSessionAttempt) bool {
+	return atomic.LoadInt64(&s.sessionId) == attempt.id &&
+		atomic.LoadUint64(&s.sessionGen) == attempt.generation
+}
+
+func (p *storagePeer) isSessionAttemptCurrent(attempt peerSessionAttempt) bool {
+	return p.session.isAttemptCurrent(attempt)
+}
+
+func boolToInt32(v bool) int32 {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+func (s *peerSessionState) resetRemoteState() {
+	atomic.StoreInt32(&s.remoteStateKnown, 0)
+	atomic.StoreInt32(&s.remoteWillUpload, 0)
+	atomic.StoreInt32(&s.remoteWantDownload, 0)
+}
+
+func (s *peerSessionState) setRemoteState(state State) {
+	atomic.StoreInt32(&s.remoteWillUpload, boolToInt32(state.WillUpload))
+	atomic.StoreInt32(&s.remoteWantDownload, boolToInt32(state.WantDownload))
+	atomic.StoreInt32(&s.remoteStateKnown, 1)
+}
+
+func (p *storagePeer) setRemoteState(state State) {
+	p.session.setRemoteState(state)
+}
+
+func (s *peerSessionState) remoteAllowsDownload() bool {
+	return atomic.LoadInt32(&s.remoteStateKnown) == 0 ||
+		atomic.LoadInt32(&s.remoteWillUpload) == 1
+}
+
+func (p *storagePeer) remoteAllowsDownload() bool {
+	return p.session.remoteAllowsDownload()
+}
+
+func (s *peerSessionState) markLocalInitSent() {
+	atomic.StoreInt32(&s.localInitSent, 1)
+}
+
+func (s *peerSessionState) markRemoteInitComplete() {
+	atomic.StoreInt32(&s.remoteInitComplete, 1)
+}
+
+func (p *storagePeer) markRemoteInitComplete() {
+	p.session.markRemoteInitComplete()
+	p.torrent.wake.fire()
+}
+
+func (s *peerSessionState) resetForReinit(sessionID int64, now time.Time) uint64 {
+	atomic.StoreInt64(&s.sessionInitAt, now.UnixMilli())
+	atomic.StoreInt32(&s.localInitSent, 0)
+	atomic.StoreInt32(&s.remoteInitComplete, 0)
+	atomic.StoreInt64(&s.sessionId, sessionID)
+	atomic.StoreInt64(&s.sessionSeqno, 0)
+	atomic.StoreInt64(&s.remoteSeqno, 0)
+	generation := atomic.AddUint64(&s.sessionGen, 1)
+	atomic.StoreInt64(&s.lastInitChunkAt, 0)
+	s.resetRemoteState()
+	return generation
+}
+
+func (s *peerSessionState) acceptRemoteSeqno(seqno int64) bool {
+	if seqno <= 0 {
+		return false
+	}
+	for {
+		current := atomic.LoadInt64(&s.remoteSeqno)
+		if seqno <= current {
+			return false
+		}
+		if atomic.CompareAndSwapInt64(&s.remoteSeqno, current, seqno) {
+			return true
+		}
+	}
+}
+
+func (s *peerSessionState) tryScheduleInit(attempt peerSessionAttempt) bool {
+	if !s.isAttemptCurrent(attempt) {
+		return false
+	}
+
+	for {
+		scheduled := atomic.LoadUint64(&s.initScheduledGen)
+		if scheduled >= attempt.generation {
+			return false
+		}
+		if atomic.CompareAndSwapUint64(&s.initScheduledGen, scheduled, attempt.generation) {
+			return true
+		}
+	}
+}
+
+func (p *storagePeer) torrentInfoSnapshot() *TorrentInfo {
+	p.torrent.mx.RLock()
+	defer p.torrent.mx.RUnlock()
+
+	return p.torrent.Info
+}
+
 func (p *storagePeer) hasPiece(id uint32) bool {
 	p.piecesMx.RLock()
 	defer p.piecesMx.RUnlock()
 
+	return p.hasPieceLocked(id)
+}
+
+// hasPieceLocked expects piecesMx to be held by the caller.
+func (p *storagePeer) hasPieceLocked(id uint32) bool {
 	if id >= p.hasPiecesNum {
 		return false
 	}
@@ -278,19 +431,27 @@ func (p *storagePeer) applyInitChunkUnsafe(piecesNum, off uint32, have []byte) (
 
 	now := time.Now().UnixMilli()
 	if !bitsetSet(p.initChunksMask, chunkIdx) {
-		if !bytes.Equal(p.hasPieces[start:start+len(have)], have) {
-			return false, fmt.Errorf("conflicting init chunk")
-		}
-		atomic.StoreInt64(&p.lastInitChunkAt, now)
+		atomic.AddUint32(&p.knownPieces, mergeBitset(p.hasPieces[start:start+len(have)], have))
+		atomic.StoreInt64(&p.session.lastInitChunkAt, now)
 		return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
 	}
 
-	copy(p.hasPieces[start:start+len(have)], have)
-	atomic.AddUint32(&p.knownPieces, countBitsetOnes(have))
+	atomic.AddUint32(&p.knownPieces, mergeBitset(p.hasPieces[start:start+len(have)], have))
 	p.initReceivedChunks++
-	atomic.StoreInt64(&p.lastInitChunkAt, now)
+	atomic.StoreInt64(&p.session.lastInitChunkAt, now)
 
 	return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
+}
+
+func mergeBitset(dst, src []byte) uint32 {
+	var added uint32
+	for i, b := range src {
+		old := dst[i]
+		next := old | b
+		added += uint32(bits.OnesCount8(next &^ old))
+		dst[i] = next
+	}
+	return added
 }
 
 func (p *storagePeer) queuePendingInitChunk(off uint32, have []byte) error {
@@ -317,7 +478,7 @@ func (p *storagePeer) queuePendingInitChunk(off uint32, have []byte) error {
 		if !bytes.Equal(existing, have) {
 			return fmt.Errorf("conflicting init chunk")
 		}
-		atomic.StoreInt64(&p.lastInitChunkAt, time.Now().UnixMilli())
+		atomic.StoreInt64(&p.session.lastInitChunkAt, time.Now().UnixMilli())
 		return nil
 	}
 
@@ -328,7 +489,7 @@ func (p *storagePeer) queuePendingInitChunk(off uint32, have []byte) error {
 	copied := append([]byte(nil), have...)
 	p.pendingInitChunks[off] = copied
 	p.pendingInitBytes += len(copied)
-	atomic.StoreInt64(&p.lastInitChunkAt, time.Now().UnixMilli())
+	atomic.StoreInt64(&p.session.lastInitChunkAt, time.Now().UnixMilli())
 	return nil
 }
 
@@ -388,6 +549,90 @@ func (p *storagePeer) flushPendingPieceUpdates(piecesNum uint32) (bool, error) {
 	}
 
 	return p.initExpectedChunks > 0 && p.initReceivedChunks == p.initExpectedChunks, nil
+}
+
+func (p *storagePeer) applySessionUpdate(update any) error {
+	switch u := update.(type) {
+	case UpdateInit:
+		if u.HavePiecesOffset < 0 {
+			return fmt.Errorf("invalid pieces offset")
+		}
+		off := uint32(u.HavePiecesOffset)
+		p.setRemoteState(u.State)
+
+		info := p.torrentInfoSnapshot()
+		queued := false
+		if info == nil {
+			if err := p.queuePendingInitChunk(off, u.HavePieces); err != nil {
+				return err
+			}
+			queued = true
+
+			info = p.torrentInfoSnapshot()
+			if info == nil {
+				return nil
+			}
+		}
+
+		complete, err := p.flushPendingPieceUpdates(info.PiecesNum())
+		if err != nil {
+			return err
+		}
+		if complete {
+			p.markRemoteInitComplete()
+		}
+		if queued {
+			return nil
+		}
+
+		complete, err = p.applyInitChunk(info.PiecesNum(), off, u.HavePieces)
+		if err != nil {
+			return err
+		}
+		if complete {
+			p.markRemoteInitComplete()
+		}
+	case UpdateHavePieces:
+		info := p.torrentInfoSnapshot()
+		queued := false
+		if info == nil {
+			if err := p.queuePendingHavePieces(u.PieceIDs); err != nil {
+				return err
+			}
+			queued = true
+
+			info = p.torrentInfoSnapshot()
+			if info == nil {
+				return nil
+			}
+		}
+
+		complete, err := p.flushPendingPieceUpdates(info.PiecesNum())
+		if err != nil {
+			return err
+		}
+		if complete {
+			p.markRemoteInitComplete()
+		}
+		if queued {
+			return nil
+		}
+
+		p.piecesMx.Lock()
+		err = p.applyHavePiecesLocked(info.PiecesNum(), u.PieceIDs)
+		p.piecesMx.Unlock()
+		if err != nil {
+			return err
+		}
+		p.torrent.wake.fire()
+	case UpdateState:
+		p.setRemoteState(u.State)
+		p.torrent.wake.fire()
+	default:
+		return fmt.Errorf("unsupported update type %T", update)
+	}
+
+	return nil
 }
 
 type TorrentInfo struct {
@@ -550,20 +795,16 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 			return nil, err
 		}
 
-		if len(header.DirName) > 256 {
-			return nil, fmt.Errorf("too big dir name > 256")
-		}
-
-		if err := validateFileName(string(header.DirName), false); err != nil {
-			return nil, fmt.Errorf("malicious bag: %w", err)
-		}
-
-		if header.FilesCount > 1_000_000 {
+		if header.FilesCount > maxTorrentHeaderFiles {
 			return nil, fmt.Errorf("bag has > 1_000_000 files, looks dangerous")
 		}
 		if uint32(len(header.NameIndex)) != header.FilesCount ||
 			uint32(len(header.DataIndex)) != header.FilesCount {
 			err = fmt.Errorf("corrupted header, lack of files info")
+			return nil, err
+		}
+		if err = header.validateStatic(); err != nil {
+			err = fmt.Errorf("malicious or corrupted header: %w", err)
 			return nil, err
 		}
 
@@ -592,8 +833,8 @@ func (p *storagePeer) Close() {
 	})
 }
 
-func (p *storagePeer) isSessionInitialized() bool {
-	return atomic.LoadInt32(&p.sessionInitialized) == 1
+func (p *storagePeer) isLocalInitSent() bool {
+	return atomic.LoadInt32(&p.session.localInitSent) == 1
 }
 
 func (p *storagePeer) hasKnownPieces() bool {
@@ -601,46 +842,54 @@ func (p *storagePeer) hasKnownPieces() bool {
 }
 
 func (p *storagePeer) isDownloadUsable() bool {
-	return p.isSessionInitialized() && (atomic.LoadInt32(&p.updateInitReceived) == 1 || p.hasKnownPieces())
+	return p.isLocalInitSent() && p.remoteAllowsDownload() &&
+		(atomic.LoadInt32(&p.session.remoteInitComplete) == 1 || p.hasKnownPieces())
 }
 
 func (p *storagePeer) isSessionReady() bool {
-	return p.isSessionInitialized() && atomic.LoadInt32(&p.updateInitReceived) == 1
+	return p.isLocalInitSent() && atomic.LoadInt32(&p.session.remoteInitComplete) == 1
 }
 
-func (p *storagePeer) initializeSession(ctx context.Context, id int64, doPing bool) error {
+func (p *storagePeer) initializeSession(attempt *peerSessionAttempt, doPing bool) error {
+	if attempt == nil {
+		return fmt.Errorf("nil session attempt")
+	}
+
 	var err error
 	defer func() {
 		if err == nil {
-			atomic.StoreInt32(&p.sessionInitialized, 1)
+			if !p.isSessionAttemptCurrent(*attempt) {
+				return
+			}
+			p.session.markLocalInitSent()
 			p.torrent.wake.fire()
 
-			Logger("[STORAGE] SESSION INITIALIZED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", atomic.LoadInt64(&p.sessionId))
+			Logger("[STORAGE] SESSION INITIALIZED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", attempt.id, "GENERATION", attempt.generation)
 			return
 		}
 
-		if atomic.LoadInt64(&p.sessionId) != id {
+		if !p.isSessionAttemptCurrent(*attempt) {
 			return
 		}
 
-		Logger("[STORAGE] SESSION INITIALIZATION FAILED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", atomic.LoadInt64(&p.sessionId), "ERR", err.Error())
+		Logger("[STORAGE] SESSION INITIALIZATION FAILED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", attempt.id, "GENERATION", attempt.generation, "ERR", err.Error())
 		p.Close()
 	}()
 
 	if doPing {
-		err = p.pingWithRetry(ctx)
+		err = p.pingWithRetry(attempt.ctx)
 		if err != nil {
 			err = fmt.Errorf("failed to ping: %w", err)
 			return err
 		}
 	}
 
-	if err = p.prepareTorrentInfo(ctx); err != nil {
+	if err = p.prepareTorrentInfo(attempt.ctx); err != nil {
 		err = fmt.Errorf("failed to prepare torrent info, err: %w", err)
 		return err
 	}
 
-	if err = p.updateInitPieces(ctx); err != nil {
+	if err = p.sendInitPieces(attempt.ctx, *attempt); err != nil {
 		err = fmt.Errorf("failed to send init pieces, err: %w", err)
 		return err
 	}
@@ -662,7 +911,7 @@ func (p *storagePeer) findNeighbours(ctx context.Context) (*overlay.NodesList, e
 }
 
 func (p *storagePeer) ping(ctx context.Context) error {
-	ses := atomic.LoadInt64(&p.sessionId)
+	ses := atomic.LoadInt64(&p.session.sessionId)
 	if ses == 0 {
 		return fmt.Errorf("no session id")
 	}
@@ -714,17 +963,22 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int
 
 	var piece Piece
 	err := func() error {
-		if err := p.conn.AcquireDataQueueSlotWait(ctx); err != nil {
+		err := p.conn.withDataQueueSlot(ctx, true, func() error {
+			err := p.conn.rldp.DoQuery(ctx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
+			if err != nil {
+				return fmt.Errorf("failed to query piece %d. err: %w", id, err)
+			}
+
+			return nil
+		})
+		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			return fmt.Errorf("failed to acquire data queue slot: %w", err)
-		}
-		defer p.conn.FreeDataQueueSlot()
-
-		err := p.conn.rldp.DoQuery(ctx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
-		if err != nil {
-			return fmt.Errorf("failed to query piece %d. err: %w", id, err)
+			if errors.Is(err, ErrQueueIsBusy) {
+				return fmt.Errorf("failed to acquire data queue slot: %w", err)
+			}
+			return err
 		}
 
 		proof, err := cell.FromBOC(piece.Proof)
@@ -799,8 +1053,15 @@ func (t *Torrent) checkProofBranch(proof *cell.Cell, data []byte, piece uint32) 
 		}
 	}
 
-	branchHash := tree.ToRawUnsafe().Data
-	if len(branchHash) != 32 {
+	leaf, err := tree.BeginParse()
+	if err != nil {
+		return err
+	}
+	bits, branchHash, err := leaf.RestBits()
+	if err != nil {
+		return err
+	}
+	if bits != merkleHashBits || len(branchHash) != merkleHashBits/8 {
 		return fmt.Errorf("hash in not 32 bytes")
 	}
 
