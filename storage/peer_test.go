@@ -80,6 +80,45 @@ func TestTorrentUpdateUploadedPeerBatchesPersistentStats(t *testing.T) {
 	}
 }
 
+func TestSpeedInfoReactsQuicklyAndHoldsBriefGaps(t *testing.T) {
+	var s speedInfo
+	start := time.Unix(0, 0)
+	const bytesPerSecond = 10 << 20
+
+	s.calculateAt(0, start)
+
+	var got float64
+	for sec := 1; sec <= 3; sec++ {
+		got = s.calculateAt(uint64(sec*bytesPerSecond), start.Add(time.Duration(sec)*time.Second))
+	}
+	if got < float64(6<<20) {
+		t.Fatalf("expected displayed speed to ramp quickly, got %.0f bytes/s", got)
+	}
+
+	beforeGap := got
+	afterBriefGap := s.calculateAt(3*bytesPerSecond, start.Add(4*time.Second))
+	if afterBriefGap < beforeGap*0.95 {
+		t.Fatalf("expected brief no-progress gap to be held, got %.0f after %.0f", afterBriefGap, beforeGap)
+	}
+
+	afterIdle := s.calculateAt(3*bytesPerSecond, start.Add(12*time.Second))
+	if afterIdle >= afterBriefGap {
+		t.Fatalf("expected longer idle period to decay speed, got %.0f after %.0f", afterIdle, afterBriefGap)
+	}
+}
+
+func TestSpeedInfoResetsWhenCounterDrops(t *testing.T) {
+	var s speedInfo
+	start := time.Unix(0, 0)
+
+	s.calculateAt(1000, start)
+	s.calculateAt(2000, start.Add(time.Second))
+
+	if got := s.calculateAt(10, start.Add(2*time.Second)); got != 0 {
+		t.Fatalf("expected counter reset to clear displayed speed, got %.0f", got)
+	}
+}
+
 func TestStoragePeerIsIdleFallsBackToSessionInitAt(t *testing.T) {
 	peer := &storagePeer{}
 	atomic.StoreInt64(&peer.session.sessionInitAt, time.Now().Add(-peerIdleTimeout-time.Minute).UnixMilli())

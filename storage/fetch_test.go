@@ -58,6 +58,47 @@ func TestEffectiveMaxInflightPiecesCapsToDataQueue(t *testing.T) {
 	}
 }
 
+func TestNextInflightAfterStableUsesSlowStartAndCap(t *testing.T) {
+	oldThreshold := DownloadSlowStartThreshold
+	oldGrowthDiv := DownloadSlowStartGrowthDiv
+	defer func() {
+		DownloadSlowStartThreshold = oldThreshold
+		DownloadSlowStartGrowthDiv = oldGrowthDiv
+	}()
+
+	DownloadSlowStartThreshold = 16
+	DownloadSlowStartGrowthDiv = 2
+
+	if got := nextInflightAfterStable(4, 32); got != 6 {
+		t.Fatalf("expected smooth slow-start growth from 4 to 6, got %d", got)
+	}
+	if got := nextInflightAfterStable(8, 12); got != 12 {
+		t.Fatalf("expected slow-start growth capped at 12, got %d", got)
+	}
+	if got := nextInflightAfterStable(13, 32); got != 16 {
+		t.Fatalf("expected slow-start growth to stop at threshold 16, got %d", got)
+	}
+	if got := nextInflightAfterStable(16, 32); got != 17 {
+		t.Fatalf("expected additive growth after threshold, got %d", got)
+	}
+}
+
+func TestInflightChangeGapUsesConfiguredMinimum(t *testing.T) {
+	oldGap := DownloadInflightChangeMinGap
+	defer func() {
+		DownloadInflightChangeMinGap = oldGap
+	}()
+
+	DownloadInflightChangeMinGap = 500 * time.Millisecond
+
+	if got := inflightChangeGapMs(100); got != 500 {
+		t.Fatalf("expected configured minimum gap, got %d", got)
+	}
+	if got := inflightChangeGapMs(1000); got != 1200 {
+		t.Fatalf("expected srtt based gap, got %d", got)
+	}
+}
+
 func TestPreFetcherWindowCursorReservesEarlyUnavailablePieces(t *testing.T) {
 	fetch := &PreFetcher{
 		piecesList: []byte{1, 1, 1, 1},

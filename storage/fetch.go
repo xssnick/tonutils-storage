@@ -18,6 +18,14 @@ type piecePack struct {
 	proof []byte
 }
 
+var (
+	DownloadInitialPeerInflight  = int32(4)
+	DownloadPeerInflightCap      = int32(32)
+	DownloadSlowStartThreshold   = int32(16)
+	DownloadSlowStartGrowthDiv   = int32(2)
+	DownloadInflightChangeMinGap = 500 * time.Millisecond
+)
+
 type PreFetcher struct {
 	torrent     *Torrent
 	ready       atomic.Int32
@@ -145,6 +153,45 @@ func dataQueueInflightCap(conn *PeerConnection) int32 {
 		return 0
 	}
 	return int32(cap(conn.dataQueue))
+}
+
+func nextInflightAfterStable(actualMax, maxCap int32) int32 {
+	if actualMax < 1 {
+		actualMax = 1
+	}
+
+	next := actualMax + 1
+	if DownloadSlowStartThreshold > 1 && actualMax < DownloadSlowStartThreshold {
+		div := DownloadSlowStartGrowthDiv
+		if div < 1 {
+			div = 1
+		}
+		step := actualMax / div
+		if step < 1 {
+			step = 1
+		}
+		next = actualMax + step
+		if next > DownloadSlowStartThreshold {
+			next = DownloadSlowStartThreshold
+		}
+	}
+
+	if maxCap > 0 && next > maxCap {
+		return maxCap
+	}
+	return next
+}
+
+func inflightChangeGapMs(srtt float64) int64 {
+	gap := int64(srtt * 1.2)
+	minGap := DownloadInflightChangeMinGap.Milliseconds()
+	if minGap < 0 {
+		minGap = 0
+	}
+	if gap < minGap {
+		gap = minGap
+	}
+	return gap
 }
 
 func (f *PreFetcher) nextPieceForPeer(peer *storagePeer, available int32) (uint32, bool) {
@@ -460,10 +507,7 @@ func (f *PreFetcher) balancer() {
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
 					srtt, _, _, _, _ := bestNodeRttInfo.snapshot()
-					minChangeMs := int64(srtt * 1.2)
-					if minChangeMs < 50 {
-						minChangeMs = 50
-					}
+					minChangeMs := inflightChangeGapMs(srtt)
 
 					uns := bestNode.conn.UnstableCount.Add(1)
 
@@ -510,10 +554,7 @@ func (f *PreFetcher) balancer() {
 
 			srtt, _, minrtt, _, _ := bestNodeRttInfo.snapshot()
 
-			minChangeMs := int64(srtt * 1.2)
-			if minChangeMs < 50 {
-				minChangeMs = 50
-			}
+			minChangeMs := inflightChangeGapMs(srtt)
 
 			/*var sp uint64
 			for _, info := range f.torrent.GetPeers() {
@@ -536,14 +577,18 @@ func (f *PreFetcher) balancer() {
 						bestNode.conn.UnstableCount.Store(0)
 
 						need := curMax * 3
+						if DownloadSlowStartThreshold > 1 && actualMax < DownloadSlowStartThreshold {
+							need = curMax
+						}
 						if need < 2 {
 							need = 2
 						}
 
 						if stable >= int64(need) && lastChange < nowMs-minChangeMs {
 							maxCap := dataQueueInflightCap(bestNode.conn)
-							if maxCap == 0 || actualMax < maxCap {
-								if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, actualMax+1) {
+							newMax := nextInflightAfterStable(actualMax, maxCap)
+							if newMax > actualMax {
+								if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, newMax) {
 									bestNode.conn.UpStreak.Add(1)
 									bestNode.conn.DownStreak.Store(0)
 

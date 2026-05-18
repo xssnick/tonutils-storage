@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/hex"
+	"math"
 	"sync/atomic"
 	"time"
 )
@@ -183,6 +184,7 @@ type speedInfo struct {
 
 	prevBytes uint64
 	lastTime  time.Time
+	lastRise  time.Time
 
 	speed float64
 	init  bool
@@ -190,9 +192,33 @@ type speedInfo struct {
 	dispSpeed float64
 }
 
-func (s *speedInfo) calculate(nowBytes uint64) float64 {
-	now := time.Now()
+const (
+	speedRiseAlpha        = 0.45
+	speedFallAlpha        = 0.18
+	speedIdleAlpha        = 0.08
+	speedDisplayRiseAlpha = 0.55
+	speedDisplayFallAlpha = 0.22
+	speedHoldNoRiseFor    = 2 * time.Second
+)
 
+func (s *speedInfo) calculate(nowBytes uint64) float64 {
+	return s.calculateAt(nowBytes, time.Now())
+}
+
+func speedAlpha(base, dtSeconds float64) float64 {
+	if base <= 0 || dtSeconds <= 0 {
+		return 0
+	}
+	if base >= 1 {
+		return 1
+	}
+	if dtSeconds > 10 {
+		dtSeconds = 10
+	}
+	return 1 - math.Pow(1-base, dtSeconds)
+}
+
+func (s *speedInfo) calculateAt(nowBytes uint64, now time.Time) float64 {
 	if !s.init {
 		s.prevBytes = nowBytes
 		s.lastTime = now
@@ -201,20 +227,47 @@ func (s *speedInfo) calculate(nowBytes uint64) float64 {
 		return s.dispSpeed
 	}
 
+	if nowBytes < s.prevBytes {
+		s.prevBytes = nowBytes
+		s.lastTime = now
+		s.lastRise = time.Time{}
+		s.speed = 0
+		s.dispSpeed = 0
+		return s.dispSpeed
+	}
+
 	dt := now.Sub(s.lastTime).Seconds()
 	if dt > 0 {
-		const alpha = 0.05
-		delta := float64(nowBytes - s.prevBytes)
-		instant := delta / dt
-		s.speed = alpha*instant + (1-alpha)*s.speed
+		deltaBytes := nowBytes - s.prevBytes
+		instant := float64(deltaBytes) / dt
+
+		sampleAlpha := speedFallAlpha
+		switch {
+		case deltaBytes == 0 && !s.lastRise.IsZero() && now.Sub(s.lastRise) <= speedHoldNoRiseFor:
+			instant = s.speed
+		case deltaBytes == 0:
+			sampleAlpha = speedIdleAlpha
+		case instant >= s.speed:
+			sampleAlpha = speedRiseAlpha
+			s.lastRise = now
+		default:
+			s.lastRise = now
+		}
+
+		s.speed += (instant - s.speed) * speedAlpha(sampleAlpha, dt)
+
+		displayAlpha := speedDisplayFallAlpha
+		if s.speed >= s.dispSpeed {
+			displayAlpha = speedDisplayRiseAlpha
+		}
+		s.dispSpeed += (s.speed - s.dispSpeed) * speedAlpha(displayAlpha, dt)
+		if s.dispSpeed < 1 {
+			s.dispSpeed = 0
+		}
 	}
 
 	s.prevBytes = nowBytes
 	s.lastTime = now
-
-	// smooth animation
-	const beta = 0.1
-	s.dispSpeed += (s.speed - s.dispSpeed) * beta
 
 	return s.dispSpeed
 }

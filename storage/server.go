@@ -153,10 +153,10 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		usedByBags:       map[string]*storagePeer{},
 		controlQueue:     make(chan struct{}, 4),
 		initControlQueue: make(chan struct{}, 2),
-		dataQueue:        make(chan struct{}, 10),
+		dataQueue:        make(chan struct{}, DownloadPeerInflightCap),
 		bagsInitQueue:    make(chan struct{}, 8),
 	}
-	p.MaxInflightPieces.Store(1)
+	p.MaxInflightPieces.Store(DownloadInitialPeerInflight)
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
 	return p
