@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"fmt"
@@ -206,6 +207,34 @@ func TestInitializeTorrent(t *testing.T) {
 
 	if len(torrent.Header.DataIndex) != 1000 {
 		t.Fatal("invalid torrent.Header.DataIndex size")
+	}
+}
+
+func TestCreateTorrentMarksFreshBagVerified(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/payload.bin"
+	data := bytes.Repeat([]byte{7}, 8192)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("failed to create payload: %v", err)
+	}
+
+	store := newE2EStorage(4096)
+	tor, err := CreateTorrentWithInitialHeader(
+		context.Background(),
+		dir,
+		"fresh bag",
+		&TorrentHeader{},
+		store,
+		nil,
+		[]FileRef{e2eFileRef{path: path, name: "payload.bin", size: uint64(len(data))}},
+		nil,
+		false,
+	)
+	if err != nil {
+		t.Fatalf("failed to create torrent: %v", err)
+	}
+	if tor.lastVerified.IsZero() {
+		t.Fatal("freshly-created torrent should be marked verified")
 	}
 }
 

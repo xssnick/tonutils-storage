@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/xssnick/tonutils-go/tl"
 	"github.com/xssnick/tonutils-go/tlb"
@@ -86,6 +87,7 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 	if err != nil {
 		return nil, err
 	}
+	torrent.lastVerified = time.Now()
 
 	return torrent, nil
 }

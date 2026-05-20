@@ -6,14 +6,15 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 type FDescCache struct {
 	file   *os.File
-	usedAt time.Time
+	usedAt atomic.Int64
 	path   string
-	mx     sync.Mutex
+	mx     sync.RWMutex
 }
 
 // FSControllerCache caches file descriptors to avoid unnecessary open/close of most used files
@@ -46,33 +47,28 @@ func (f *FSControllerCache) AcquireRead(path string, p []byte, off int64) (n int
 				}
 			}
 
-			desc = &FDescCache{
-				path:   path,
-				usedAt: time.Now(),
+			fl, err := os.Open(path)
+			if err != nil {
+				f.mx.Unlock()
+				return 0, err
 			}
-			desc.mx.Lock()
+
+			desc = &FDescCache{
+				file: fl,
+				path: path,
+			}
+			desc.usedAt.Store(time.Now().UnixNano())
+			desc.mx.RLock()
 
 			f.dsc[path] = desc
 			f.mx.Unlock()
-
-			fl, err := os.Open(path)
-			if err != nil {
-				f.mx.Lock()
-				// unlikely, rare case
-				delete(f.dsc, path)
-				f.mx.Unlock()
-
-				desc.mx.Unlock()
-				return 0, err
-			}
-			desc.file = fl
 		} else {
 			f.mx.Unlock()
-			desc.mx.Lock()
+			desc.mx.RLock()
 		}
-		desc.usedAt = time.Now()
+		desc.usedAt.Store(time.Now().UnixNano())
 	}
-	defer desc.mx.Unlock()
+	defer desc.mx.RUnlock()
 
 	return desc.file.ReadAt(p, off)
 }
@@ -80,10 +76,12 @@ func (f *FSControllerCache) AcquireRead(path string, p []byte, off int64) (n int
 func (f *FSControllerCache) acquire(path string) *FDescCache {
 	f.mx.RLock()
 	desc, ok := f.dsc[path]
+	if ok {
+		desc.mx.RLock()
+	}
 	f.mx.RUnlock()
 	if ok {
-		desc.mx.Lock()
-		desc.usedAt = time.Now()
+		desc.usedAt.Store(time.Now().UnixNano())
 		return desc
 	}
 	return nil
@@ -95,7 +93,7 @@ func (f *FSControllerCache) clean() bool {
 
 	// Find the oldest descriptor
 	for _, desc := range f.dsc {
-		if oldest == nil || desc.usedAt.Before(oldest.usedAt) {
+		if oldest == nil || desc.usedAt.Load() < oldest.usedAt.Load() {
 			oldest = desc
 		}
 	}
