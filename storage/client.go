@@ -33,6 +33,7 @@ const (
 
 type DHT interface {
 	StoreAddress(ctx context.Context, addresses address.List, ttl time.Duration, ownerKey ed25519.PrivateKey) (int, []byte, error)
+	StoreOverlayNodes(ctx context.Context, overlayKey []byte, nodes *overlay.NodesList, ttl time.Duration) (int, []byte, error)
 	FindAddresses(ctx context.Context, key []byte) (*address.List, ed25519.PublicKey, error)
 	FindOverlayNodes(ctx context.Context, overlayId []byte, continuation ...*dht.Continuation) (*overlay.NodesList, *dht.Continuation, error)
 	Close()

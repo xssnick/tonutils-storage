@@ -28,7 +28,7 @@ type netCapacity struct {
 
 type Server struct {
 	key            ed25519.PrivateKey
-	dht            *dht.Client
+	dht            DHT
 	gate           *adnl.Gateway
 	store          Storage
 	closeCtx       context.Context
@@ -55,12 +55,12 @@ type dhtCacheEntry struct {
 	expireAt time.Time
 }
 
-func NewServer(dht *dht.Client, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool, dhtParallelism int) *Server {
+func NewServer(dhtClient DHT, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool, dhtParallelism int) *Server {
 	var rateLimit = rldp.NewTokenBucket(1<<20, "storage")
 
 	s := &Server{
 		key:            key,
-		dht:            dht,
+		dht:            dhtClient,
 		gate:           gate,
 		netCtrl:        rateLimit,
 		bootstrapped:   map[string]*PeerConnection{},
@@ -499,6 +499,82 @@ const maxPiecesBytesPerRequest = 6000
 const maxNewPiecesPerRequest = maxPiecesBytesPerRequest / 4
 const peerSearcherInterval = time.Second
 
+const (
+	bagDHTRefreshAge = 3 * time.Minute
+	// tonutils-go treats overlay DHT values as stale when every node version is older than this.
+	bagDHTOverlayNodeFreshFor         = 10 * time.Minute
+	bagDHTSteadyRefreshInterval       = 5 * time.Minute
+	bagDHTSteadyRefreshJitter         = 30 * time.Second
+	bagDHTActiveDownloadRetryInterval = 7 * time.Second
+	bagDHTActiveDownloadPeerInterval  = 45 * time.Second
+	bagDHTZeroPeerRetryInterval       = 15 * time.Second
+	bagDHTZeroPeerMaxRetryInterval    = 7 * time.Minute
+	bagDHTZeroPeerRetryJitter         = 5 * time.Second
+)
+
+func bagDHTNextAttemptAt(lastAttemptAt, lastCompletedAt int64, activeDownload bool, numPeers, usableDownloadPeers int, serverMode bool, zeroPeerSearches uint32, jitter time.Duration) time.Time {
+	baseAt := time.Time{}
+	if lastAttemptAt > 0 {
+		baseAt = time.Unix(0, lastAttemptAt)
+	}
+	// Use completion time after queued work finishes so many bags stay spread across refresh cycles.
+	if lastCompletedAt > lastAttemptAt {
+		baseAt = time.Unix(0, lastCompletedAt)
+	}
+
+	return baseAt.Add(bagDHTAttemptDelay(activeDownload, numPeers, usableDownloadPeers, serverMode, zeroPeerSearches, jitter))
+}
+
+func bagDHTAttemptDelay(activeDownload bool, numPeers, usableDownloadPeers int, serverMode bool, zeroPeerSearches uint32, jitter time.Duration) time.Duration {
+	if activeDownload {
+		if usableDownloadPeers > 0 {
+			return bagDHTActiveDownloadPeerInterval
+		}
+		return bagDHTActiveDownloadRetryInterval
+	}
+
+	if numPeers > 0 {
+		return bagDHTSteadyRefreshInterval + clampDuration(jitter, bagDHTSteadyRefreshJitter)
+	}
+
+	if serverMode {
+		return bagDHTSteadyRefreshInterval + clampDuration(jitter, bagDHTSteadyRefreshJitter)
+	}
+
+	delay := bagDHTZeroPeerRetryInterval * time.Duration(zeroPeerSearches+1)
+	if delay > bagDHTZeroPeerMaxRetryInterval {
+		delay = bagDHTZeroPeerMaxRetryInterval
+	}
+	return delay + clampDuration(jitter, bagDHTZeroPeerRetryJitter)
+}
+
+func bagDHTAttemptJitter(activeDownload bool, numPeers int, serverMode bool) time.Duration {
+	if activeDownload {
+		return 0
+	}
+	if numPeers > 0 || serverMode {
+		return randomDuration(bagDHTSteadyRefreshJitter)
+	}
+	return randomDuration(bagDHTZeroPeerRetryJitter)
+}
+
+func randomDuration(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max)))
+}
+
+func clampDuration(v, max time.Duration) time.Duration {
+	if v < 0 {
+		return 0
+	}
+	if v > max {
+		return max
+	}
+	return v
+}
+
 func (p *storagePeer) updateInitPieces(ctx context.Context) error {
 	attempt := p.currentSessionAttempt(ctx)
 	return p.sendInitPieces(ctx, attempt)
@@ -661,6 +737,35 @@ func (s *Server) updateDHT(ctx context.Context) error {
 	return nil
 }
 
+func (s *Server) storeBagDHTSelf(ctx context.Context, torrent *Torrent) error {
+	node, err := overlay.NewNode(torrent.BagID, s.key)
+	if err != nil {
+		Logger("[STORAGE_DHT] FAILED CREATE OVERLAY NODE FOR", hex.EncodeToString(torrent.BagID), err.Error())
+		return err
+	}
+
+	nodesList := &overlay.NodesList{
+		List: []overlay.Node{*node},
+	}
+
+	return s.storeBagDHTNodes(ctx, torrent, nodesList)
+}
+
+func (s *Server) storeBagDHTNodes(ctx context.Context, torrent *Torrent, nodesList *overlay.NodesList) error {
+	Logger("[STORAGE] STORING BAG DHT RECORD", hex.EncodeToString(torrent.BagID))
+
+	tm := time.Now()
+	ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
+	stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 45*time.Minute)
+	cancel()
+	if err != nil && stored == 0 {
+		Logger("[STORAGE_DHT] FAILED TO STORE DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
+		return err
+	}
+	Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID), "TOOK", time.Since(tm).String())
+	return nil
+}
+
 func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isServer bool) error {
 	Logger("[STORAGE_DHT] CHECKING BAG OVERLAY FOR", hex.EncodeToString(torrent.BagID))
 
@@ -690,11 +795,14 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 	hasExpired := false
 	refreshed := false
 	tooEarly := false
+	now := time.Now()
+	refreshAfter := int32(now.Add(-bagDHTRefreshAge).Unix())
+	expiredBefore := int32(now.Add(-bagDHTOverlayNodeFreshFor).Unix())
 	// refresh if already exists
 	for i := range nodesList.List {
 		id, ok := nodesList.List[i].ID.(keys.PublicKeyED25519)
 		if ok && id.Key.Equal(node.ID.(keys.PublicKeyED25519).Key) {
-			if nodesList.List[i].Version > int32(time.Now().Unix()-(3*60)) {
+			if nodesList.List[i].Version > refreshAfter {
 				tooEarly = true
 			} else {
 				nodesList.List[i] = *node
@@ -704,7 +812,7 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 			break
 		}
 
-		if nodesList.List[i].Version < int32(time.Now().Unix()-(30*60)) {
+		if nodesList.List[i].Version <= expiredBefore {
 			hasExpired = true
 		}
 	}
@@ -737,17 +845,7 @@ func (s *Server) checkAndUpdateBagDHT(ctx context.Context, torrent *Torrent, isS
 	}
 
 	if refreshed && !tooEarly {
-		Logger("[STORAGE] STORING BAG DHT RECORD", hex.EncodeToString(torrent.BagID))
-
-		tm = time.Now()
-		ctxStore, cancel := context.WithTimeout(ctx, 120*time.Second)
-		stored, _, err := s.dht.StoreOverlayNodes(ctxStore, torrent.BagID, nodesList, 45*time.Minute)
-		cancel()
-		if err != nil && stored == 0 {
-			Logger("[STORAGE_DHT] FAILED TO STORE DHT OVERLAY RECORD FOR", hex.EncodeToString(torrent.BagID), err.Error())
-			return err
-		}
-		Logger("[STORAGE_DHT] BAG OVERLAY UPDATED ON", stored, "NODES FOR", hex.EncodeToString(torrent.BagID), "TOOK", time.Since(tm).String())
+		return s.storeBagDHTNodes(ctx, torrent, nodesList)
 	}
 
 	return nil
@@ -1060,38 +1158,24 @@ func (s *Server) startPeerSearcher() {
 			t.peersMx.RUnlock()
 
 			if upload || !completed {
-				at := t.lastDHTStore
-
 				activeDownload := !completed && download
-				if activeDownload {
-					if usableDownloadPeers > 0 { // otherwise retry search immediately
-						at = at.Add(45 * time.Second)
-					} else {
-						at = at.Add(7 * time.Second)
-					}
-				} else {
-					if numPeers > 0 {
-						at = at.Add(10*time.Minute + time.Duration(rand.Intn(60000))*time.Millisecond)
-					} else {
-						if !s.serverMode {
-							tt := 15 * time.Second
-
-							tt *= time.Duration(atomic.LoadUint32(&t.searchesWithZeroPeersNum) + 1)
-
-							if tt > 7*time.Minute {
-								tt = 7 * time.Minute
-							}
-
-							at = at.Add(tt + time.Duration(rand.Intn(5000))*time.Millisecond)
-						} else {
-							at = at.Add(5*time.Minute + time.Duration(rand.Intn(30000))*time.Millisecond)
-						}
-					}
-				}
+				lastAttemptAt := atomic.LoadInt64(&t.lastDHTStoreAt)
+				lastCompletedAt := atomic.LoadInt64(&t.lastDHTStoreCompletedAt)
+				searchesWithZeroPeers := atomic.LoadUint32(&t.searchesWithZeroPeersNum)
+				at := bagDHTNextAttemptAt(
+					lastAttemptAt,
+					lastCompletedAt,
+					activeDownload,
+					numPeers,
+					usableDownloadPeers,
+					s.serverMode,
+					searchesWithZeroPeers,
+					bagDHTAttemptJitter(activeDownload, numPeers, s.serverMode),
+				)
 
 				if time.Now().After(at) &&
-					(t.lastDHTStore.IsZero() || atomic.LoadInt32(&t.lastDHTStoreFailed) != 0 || t.lastDHTStore.UnixNano() < atomic.LoadInt64(&t.lastDHTStoreCompletedAt)) {
-					t.lastDHTStore = time.Now()
+					(lastAttemptAt == 0 || atomic.LoadInt32(&t.lastDHTStoreFailed) != 0 || lastAttemptAt < lastCompletedAt) {
+					atomic.StoreInt64(&t.lastDHTStoreAt, time.Now().UnixNano())
 
 					atomic.StoreInt32(&t.lastDHTStoreFailed, 0)
 
@@ -1111,7 +1195,7 @@ func (s *Server) startPeerSearcher() {
 
 					Logger("[STORAGE] TIME TO MAKE BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID), "PRIORITIZED:", prioritized)
 
-					go func(t *Torrent) {
+					go func(t *Torrent, findPeers bool) {
 						isPr := false
 						// TODO: fair queue
 						if !prioritized {
@@ -1135,7 +1219,12 @@ func (s *Server) startPeerSearcher() {
 						tm := time.Now()
 
 						ctx, cancel := context.WithTimeout(t.globalCtx, time.Duration(90)*time.Second)
-						err := s.checkAndUpdateBagDHT(ctx, t, s.serverMode)
+						var err error
+						if findPeers {
+							err = s.checkAndUpdateBagDHT(ctx, t, s.serverMode)
+						} else {
+							err = s.storeBagDHTSelf(ctx, t)
+						}
 						cancel()
 						if err != nil {
 							atomic.StoreInt32(&t.lastDHTStoreFailed, 1)
@@ -1143,7 +1232,7 @@ func (s *Server) startPeerSearcher() {
 							return
 						}
 						Logger("[STORAGE] BAG DHT RECORD QUERY", hex.EncodeToString(t.BagID), "TOOK", time.Since(tm).String())
-					}(t)
+					}(t, activeDownload)
 				}
 			}
 		}

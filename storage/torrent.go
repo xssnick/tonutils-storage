@@ -142,7 +142,7 @@ type Torrent struct {
 	lastVerified             time.Time
 	isVerificationInProgress bool
 
-	lastDHTStore            time.Time
+	lastDHTStoreAt          int64
 	lastDHTStoreCompletedAt int64
 	lastDHTStoreFailed      int32
 
