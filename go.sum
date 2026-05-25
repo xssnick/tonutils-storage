@@ -118,8 +118,8 @@ github.com/xssnick/raptorq v1.4.0 h1:Bms8lgT7aEPRP8YBRuS+8w7Cic8GP9BbvFT1NrWvi24
 github.com/xssnick/raptorq v1.4.0/go.mod h1:mo5n6T4yaqZkNVMWonRuMS0tcyD4XQ6PwwTjaY3ZwQY=
 github.com/xssnick/ton-payment-network v1.3.0 h1:GCLuMjsr24A8Tj1yL1qivSt9w3tXw/iNCpKSmOwmZXs=
 github.com/xssnick/ton-payment-network v1.3.0/go.mod h1:QbbM7tAahsEEDHa2d87gUtq4DuIagouub+UW7emsd3g=
-github.com/xssnick/tonutils-go v1.17.0 h1:+th/6fDF3PrwSndIYIkk9A/v2W6sT6CXy10yFKXBwGA=
-github.com/xssnick/tonutils-go v1.17.0/go.mod h1:D6EgtZo8DKZrjKwAAcNumc1zAwIesCXjWYhNNu4yrbs=
+github.com/xssnick/tonutils-go v1.17.1 h1:VQyQMApC60HztJGkNy1NlroPgIcdltRkI/+E3BvhAq0=
+github.com/xssnick/tonutils-go v1.17.1/go.mod h1:Ind3q0JM2N/63zfWR7rSGmUpUZaiGxregm9nZc/xGx4=
 github.com/xssnick/tonutils-storage-provider v0.4.1 h1:VeNs3vxXedStVjjBfpcknLarFWQ2WNUwhNzO0hBeCIE=
 github.com/xssnick/tonutils-storage-provider v0.4.1/go.mod h1:pKD0aAEqw44ZFSjnoCbZ9hEAn0JduGLBt+DIVv+KW+A=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

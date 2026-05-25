@@ -82,6 +82,44 @@ func TestBagDHTNextAttemptUsesCompletionTime(t *testing.T) {
 	}
 }
 
+func TestBagDHTSeedNextAttemptUsesSuccessAndFastFailureRetry(t *testing.T) {
+	startedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	successAt := startedAt.Add(2 * time.Minute)
+	completedAt := successAt.Add(bagDHTSeedRefreshInterval)
+
+	got := bagDHTSeedNextAttemptAt(startedAt, []byte{1}, completedAt.UnixNano(), successAt.UnixNano(), false, 0)
+	want := successAt.Add(bagDHTSeedRefreshInterval)
+	if !got.Equal(want) {
+		t.Fatalf("seed refresh should be based on last successful store, got %s want %s", got, want)
+	}
+
+	got = bagDHTSeedNextAttemptAt(startedAt, []byte{1}, completedAt.UnixNano(), successAt.UnixNano(), true, 1)
+	want = completedAt.Add(bagDHTSeedRetryBaseInterval)
+	if !got.Equal(want) {
+		t.Fatalf("failed seed refresh should retry quickly, got %s want %s", got, want)
+	}
+}
+
+func TestBagDHTSeedInitialSpreadAndBudgetCoverLargeSeedSet(t *testing.T) {
+	startedAt := time.Date(2026, 5, 24, 10, 0, 0, 0, time.UTC)
+	bag := make([]byte, 32)
+	bag[0] = 7
+
+	got := bagDHTSeedNextAttemptAt(startedAt, bag, 0, 0, false, 0)
+	if got.Before(startedAt) || !got.Before(startedAt.Add(bagDHTSeedInitialSpreadWindow)) {
+		t.Fatalf("initial seed refresh should be spread inside startup window, got %s", got)
+	}
+
+	seedCount := 2800
+	budget := bagDHTSeedLaunchBudget(seedCount, 50)
+	if budget <= 0 {
+		t.Fatal("launch budget should be positive")
+	}
+	if budget*int(bagDHTSeedRefreshInterval/time.Second) < seedCount {
+		t.Fatalf("budget %d/sec cannot cover %d seeds in %s", budget, seedCount, bagDHTSeedRefreshInterval)
+	}
+}
+
 func TestStoreBagDHTSelfStoresSingleLocalNodeWithoutFind(t *testing.T) {
 	_, key, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -97,8 +135,12 @@ func TestStoreBagDHTSelfStoresSingleLocalNodeWithoutFind(t *testing.T) {
 		dht: dht,
 	}
 
-	if err := srv.storeBagDHTSelf(context.Background(), &Torrent{BagID: bag}); err != nil {
+	stored, err := srv.storeBagDHTSelf(context.Background(), &Torrent{BagID: bag})
+	if err != nil {
 		t.Fatalf("storeBagDHTSelf failed: %v", err)
+	}
+	if stored != 1 {
+		t.Fatalf("unexpected stored count: %d", stored)
 	}
 	if dht.findOverlayCalls != 0 {
 		t.Fatalf("store-only refresh should not call FindOverlayNodes, got %d calls", dht.findOverlayCalls)

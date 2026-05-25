@@ -144,7 +144,9 @@ type Torrent struct {
 
 	lastDHTStoreAt          int64
 	lastDHTStoreCompletedAt int64
+	lastDHTStoreSuccessAt   int64
 	lastDHTStoreFailed      int32
+	dhtStoreFailStreak      uint32
 
 	searchesWithZeroPeersNum uint32
 

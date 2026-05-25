@@ -66,7 +66,7 @@ var (
 	CachedFD            = flag.Int("fd-cache-limit", 800, "Set max open files limit")
 	ForcePieceSize      = flag.Int("force-piece-size", 0, "Set piece size for bag creation, automatically chosen when flag is not set")
 	EnableTunnel        = flag.Bool("enable-tunnel", false, "Enable tunnel mode, to host files with no public ip (should be configured first)")
-	DHTParallelism      = flag.Int("dht-parallelism", 12, "Max parallel threads to search/update dht records of bags")
+	DHTParallelism      = flag.Int("dht-parallelism", 20, "Max parallel threads to search/update dht records of bags")
 	PprofEnableAddr     = flag.String("pprof-addr", "", "Enable pprof HTTP server for performance profiling on specified addr")
 	LimitDownload       = flag.Int("limit-download", 0, "Max bytes per second to download")
 	LimitUpload         = flag.Int("limit-upload", 0, "Max bytes per second to upload")
