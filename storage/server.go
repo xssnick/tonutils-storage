@@ -1243,7 +1243,7 @@ func (s *Server) startPeerSearcher() {
 
 			tm := time.Now()
 
-			ctx, cancel := context.WithTimeout(t.globalCtx, time.Duration(90)*time.Second)
+			ctx, cancel := context.WithTimeout(t.globalCtx, 60*time.Second)
 			var err error
 			stored := 0
 			if findPeers {
@@ -1265,10 +1265,7 @@ func (s *Server) startPeerSearcher() {
 			}
 
 			if seedRefresh && stored < bagDHTSeedMinStoredNodes {
-				atomic.StoreInt32(&t.lastDHTStoreFailed, 1)
-				atomic.AddUint32(&t.dhtStoreFailStreak, 1)
 				Logger("[STORAGE] BAG DHT RECORD LOW REPLICATION", hex.EncodeToString(t.BagID), "STORED", stored, "TOOK", time.Since(tm).String())
-				return
 			}
 
 			atomic.StoreInt32(&t.lastDHTStoreFailed, 0)
