@@ -150,7 +150,7 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 		if t.downloader == nil || !t.downloader.IsActive() {
 			t.downloader, err = t.connector.CreateDownloader(ctx, t)
 			if err != nil {
-				Logger("bag information not resolved: %s", err.Error())
+				Logger("bag information not resolved:", err.Error())
 				time.Sleep(1 * time.Second)
 				continue
 			}
@@ -398,9 +398,19 @@ func (t *Torrent) startDownload(report func(Event)) error {
 		piecesMap := map[uint32]bool{}
 		var list []fileInfo
 
-		if t.Header == nil || t.Info == nil {
+		t.mx.RLock()
+		info, header := t.Info, t.Header
+		t.mx.RUnlock()
+		if header == nil || info == nil {
 			if err := t.prepareDownloader(ctx); err != nil {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
+				return
+			}
+			t.mx.RLock()
+			info, header = t.Info, t.Header
+			t.mx.RUnlock()
+			if header == nil || info == nil {
+				Logger("failed to prepare downloader metadata for", hex.EncodeToString(t.BagID))
 				return
 			}
 		}
@@ -413,11 +423,11 @@ func (t *Torrent) startDownload(report func(Event)) error {
 		}
 
 		var downloaded uint64
-		rootPath := filepath.Join(t.Path, string(t.Header.DirName))
+		rootPath := filepath.Join(t.Path, string(header.DirName))
 
 		var files []uint32
 		if t.downloadAll {
-			for i := uint32(0); i < t.Header.FilesCount; i++ {
+			for i := uint32(0); i < header.FilesCount; i++ {
 				files = append(files, i)
 			}
 		} else {
@@ -462,7 +472,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 		}
 
-		pieces := make([]byte, t.Info.PiecesNum())
+		pieces := make([]byte, info.PiecesNum())
 		for p := range piecesMap {
 			if p >= uint32(len(pieces)) {
 				emit(Event{Name: EventErr, Value: fmt.Errorf("piece %d is out of range", p)})
@@ -476,7 +486,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				uint64(list[j].info.ToPiece)<<32+uint64(list[j].info.ToPieceOffset)
 		})
 
-		emit(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(t.Info.PiecesNum()), PiecesToDownload: len(piecesMap)}})
+		emit(Event{Name: EventBagResolved, Value: PiecesInfo{OverallPieces: int(info.PiecesNum()), PiecesToDownload: len(piecesMap)}})
 		if len(piecesMap) > 0 {
 			if err := t.prepareDownloader(ctx); err != nil {
 				Logger("failed to prepare downloader for", hex.EncodeToString(t.BagID), "err: ", err.Error())
@@ -484,11 +494,11 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			}
 
 			if t.downloadOrdered {
-				prefetch := downloadPrefetchPieces(t.Info.PieceSize, DownloadOrderedPrefetchBytes)
+				prefetch := downloadPrefetchPieces(info.PieceSize, DownloadOrderedPrefetchBytes)
 				fetch := NewPreFetcher(ctx, t, emit, prefetch, pieces)
 				defer fetch.Stop()
 
-				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, report, fetch); err != nil {
+				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, info.PieceSize, report, fetch); err != nil {
 					emit(Event{Name: EventErr, Value: err})
 					return
 				}
@@ -499,7 +509,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				}
 
 				left := len(piecesMap)
-				prefetch := downloadPrefetchPieces(t.Info.PieceSize, DownloadUnorderedPrefetchBytes)
+				prefetch := downloadPrefetchPieces(info.PieceSize, DownloadUnorderedPrefetchBytes)
 				ready := make(chan uint32, prefetch)
 				fetch := NewUnorderedPreFetcher(ctx, t, func(event Event) {
 					if event.Name == EventPieceDownloaded {
@@ -585,7 +595,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 									if notEmptyFile {
 										fileOff := int64(0)
 										if file.FromPiece != piece {
-											fileOff = int64(piece-file.FromPiece)*int64(t.Info.PieceSize) - int64(file.FromPieceOffset)
+											fileOff = int64(piece-file.FromPiece)*int64(info.PieceSize) - int64(file.FromPieceOffset)
 										}
 
 										data := currentPiece
@@ -640,8 +650,8 @@ func (t *Torrent) startDownload(report func(Event)) error {
 
 		emit(Event{Name: EventDone, Value: DownloadResult{
 			Path:        rootPath,
-			Dir:         string(t.Header.DirName),
-			Description: t.Info.Description.Value,
+			Dir:         string(header.DirName),
+			Description: info.Description.Value,
 		}})
 
 		for id := range t.GetPeers() {
@@ -658,7 +668,7 @@ func (t *Torrent) startDownload(report func(Event)) error {
 	return nil
 }
 
-func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap map[uint32]bool, rootPath string, report func(Event), fetch *PreFetcher) error {
+func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap map[uint32]bool, rootPath string, pieceSize uint32, report func(Event), fetch *PreFetcher) error {
 	var currentPieceId uint32
 	var pieceStartFileIndex uint32
 	var currentPiece, currentProof []byte
@@ -705,7 +715,7 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						currentPieceId = piece
 					}
 					part := currentPiece
-					offset := int64(piece-off.info.FromPiece) * int64(t.Info.PieceSize)
+					offset := int64(piece-off.info.FromPiece) * int64(pieceSize)
 					if piece == off.info.ToPiece {
 						part = part[:off.info.ToPieceOffset]
 					}

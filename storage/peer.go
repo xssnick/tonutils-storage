@@ -65,10 +65,15 @@ func (t *Torrent) RemovePeer(id []byte) {
 }
 
 func (t *Torrent) GetPeer(id []byte) *PeerInfo {
-	t.peersMx.Lock()
-	defer t.peersMx.Unlock()
+	t.peersMx.RLock()
+	defer t.peersMx.RUnlock()
 
-	return t.peers[hex.EncodeToString(id)]
+	peer := t.peers[hex.EncodeToString(id)]
+	if peer == nil {
+		return nil
+	}
+	copy := *peer
+	return &copy
 }
 
 func (t *Torrent) ResetDownloadPeer(id []byte) {
@@ -172,11 +177,11 @@ func (t *Torrent) touchPeer(peer *storagePeer) *PeerInfo {
 }
 
 func (p *PeerInfo) GetDownloadSpeed() uint64 {
-	return uint64(p.downloadSpeed.dispSpeed)
+	return uint64(p.downloadSpeed.display())
 }
 
 func (p *PeerInfo) GetUploadSpeed() uint64 {
-	return uint64(p.uploadSpeed.dispSpeed)
+	return uint64(p.uploadSpeed.display())
 }
 
 type speedInfo struct {
@@ -189,7 +194,8 @@ type speedInfo struct {
 	speed float64
 	init  bool
 
-	dispSpeed float64
+	dispSpeed     float64
+	dispSpeedBits atomic.Uint64
 }
 
 const (
@@ -224,6 +230,7 @@ func (s *speedInfo) calculateAt(nowBytes uint64, now time.Time) float64 {
 		s.lastTime = now
 		s.init = true
 		s.dispSpeed = 0
+		s.publishDisplay()
 		return s.dispSpeed
 	}
 
@@ -233,6 +240,7 @@ func (s *speedInfo) calculateAt(nowBytes uint64, now time.Time) float64 {
 		s.lastRise = time.Time{}
 		s.speed = 0
 		s.dispSpeed = 0
+		s.publishDisplay()
 		return s.dispSpeed
 	}
 
@@ -268,6 +276,15 @@ func (s *speedInfo) calculateAt(nowBytes uint64, now time.Time) float64 {
 
 	s.prevBytes = nowBytes
 	s.lastTime = now
+	s.publishDisplay()
 
 	return s.dispSpeed
+}
+
+func (s *speedInfo) display() float64 {
+	return math.Float64frombits(s.dispSpeedBits.Load())
+}
+
+func (s *speedInfo) publishDisplay() {
+	s.dispSpeedBits.Store(math.Float64bits(s.dispSpeed))
 }

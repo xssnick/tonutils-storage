@@ -18,14 +18,6 @@ type piecePack struct {
 	proof []byte
 }
 
-var (
-	DownloadInitialPeerInflight  = int32(4)
-	DownloadPeerInflightCap      = int32(32)
-	DownloadSlowStartThreshold   = int32(16)
-	DownloadSlowStartGrowthDiv   = int32(2)
-	DownloadInflightChangeMinGap = 500 * time.Millisecond
-)
-
 type PreFetcher struct {
 	torrent     *Torrent
 	ready       atomic.Int32
@@ -155,45 +147,6 @@ func dataQueueInflightCap(conn *PeerConnection) int32 {
 	return int32(cap(conn.dataQueue))
 }
 
-func nextInflightAfterStable(actualMax, maxCap int32) int32 {
-	if actualMax < 1 {
-		actualMax = 1
-	}
-
-	next := actualMax + 1
-	if DownloadSlowStartThreshold > 1 && actualMax < DownloadSlowStartThreshold {
-		div := DownloadSlowStartGrowthDiv
-		if div < 1 {
-			div = 1
-		}
-		step := actualMax / div
-		if step < 1 {
-			step = 1
-		}
-		next = actualMax + step
-		if next > DownloadSlowStartThreshold {
-			next = DownloadSlowStartThreshold
-		}
-	}
-
-	if maxCap > 0 && next > maxCap {
-		return maxCap
-	}
-	return next
-}
-
-func inflightChangeGapMs(srtt float64) int64 {
-	gap := int64(srtt * 1.2)
-	minGap := DownloadInflightChangeMinGap.Milliseconds()
-	if minGap < 0 {
-		minGap = 0
-	}
-	if gap < minGap {
-		gap = minGap
-	}
-	return gap
-}
-
 func (f *PreFetcher) nextPieceForPeer(peer *storagePeer, available int32) (uint32, bool) {
 	if available <= 0 || len(f.piecesList) == 0 {
 		return 0, false
@@ -317,7 +270,7 @@ func (f *PreFetcher) balancer() {
 
 	defer f.torrent.wake.fire()
 
-	scoreOf := func(ok bool, rtt, fails, upStreak, downStreak int64, inflight, max int32) float64 {
+	scoreOf := func(ok bool, rtt, fails int64, inflight, max int32) float64 {
 		if rtt <= 0 {
 			rtt = 3000
 		}
@@ -337,13 +290,6 @@ func (f *PreFetcher) balancer() {
 		if !ok {
 			base *= 1.8
 			base += 800
-		}
-
-		if upStreak < 0 {
-			upStreak = 0
-		}
-		if downStreak < 0 {
-			downStreak = 0
 		}
 
 		if base < 1 {
@@ -374,8 +320,6 @@ func (f *PreFetcher) balancer() {
 			peersList[i], peersList[j] = peersList[j], peersList[i]
 		})
 
-		nowMs := time.Now().UnixMilli()
-
 		var piece uint32
 		var bestNodeFails int
 		var bestNode *storagePeer
@@ -401,11 +345,10 @@ func (f *PreFetcher) balancer() {
 			}
 
 			if bestNode != nil {
-				thisScore := scoreOf(peer.conn.IsLastSuccess.Load(), rttInfo.LastRTT.Load(), int64(fails), peer.conn.UpStreak.Load(), peer.conn.DownStreak.Load(),
+				thisScore := scoreOf(peer.conn.IsLastSuccess.Load(), rttInfo.LastRTT.Load(), int64(fails),
 					curInflight, maxInflight)
 
 				bestScore := scoreOf(bestNode.conn.IsLastSuccess.Load(), bestNodeRttInfo.LastRTT.Load(), int64(bestNodeFails),
-					bestNode.conn.UpStreak.Load(), bestNode.conn.DownStreak.Load(),
 					bestNode.conn.InflightPieces.Load(), effectiveMaxInflightPieces(bestNode.conn))
 
 				// balance load
@@ -456,6 +399,7 @@ func (f *PreFetcher) balancer() {
 				select {
 				case <-f.ctx.Done():
 					bestNode.conn.InflightPieces.Add(-1)
+					bestNode.conn.wakeDownloaders()
 					return
 				default:
 					runtime.Gosched()
@@ -476,6 +420,7 @@ func (f *PreFetcher) balancer() {
 					f.ready.Add(-1)
 					bestNode.conn.InflightPieces.Add(-1)
 					bestNode.conn.srv.downloadInflight.Add(-1)
+					bestNode.conn.wakeDownloaders()
 					return
 				default:
 					time.Sleep(2 * time.Millisecond)
@@ -490,51 +435,33 @@ func (f *PreFetcher) balancer() {
 		f.mx.Unlock()
 
 		go func() {
-			defer f.torrent.wake.fire()
+			defer bestNode.conn.wakeDownloaders()
 			defer bestNode.conn.InflightPieces.Add(-1)
 			defer bestNode.conn.srv.downloadInflight.Add(-1)
 
 			tou := bestNodeRttInfo.calcTimeout()
 
+			startedAt := time.Now()
 			ctx, cancel := context.WithTimeout(f.ctx, tou)
 			pc, rtt, err := bestNode.downloadPiece(ctx, piece)
 			cancel()
-			lastChange := bestNode.conn.LastChange.Load()
-			actualMax := bestNode.conn.MaxInflightPieces.Load()
 			curMax := effectiveMaxInflightPieces(bestNode.conn)
 			cur := bestNode.conn.InflightPieces.Load()
+			now := time.Now()
 
 			if err != nil {
 				if !errors.Is(err, context.Canceled) {
-					srtt, _, _, _, _ := bestNodeRttInfo.snapshot()
-					minChangeMs := inflightChangeGapMs(srtt)
-
-					uns := bestNode.conn.UnstableCount.Add(1)
-
-					if uns >= 3 && actualMax > 1 && lastChange < time.Now().UnixMilli()-minChangeMs {
-						newMax := actualMax - 1
-						if nm := actualMax / 10; nm > 1 {
-							// 10% reduce
-							newMax = actualMax - nm
-						}
-
-						if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, newMax) {
-							bestNode.conn.DownStreak.Add(1)
-							bestNode.conn.UpStreak.Store(0)
-							bestNode.conn.UnstableCount.Store(0)
-
-							// fmt.Println("-- FAIL", bestNode.nodeAddr, rtt, curMax)
-
-							bestNode.conn.LastChange.Store(time.Now().UnixMilli())
-						}
-					}
-
-					// log.Println("-- X", bestNode.nodeAddr, rtt, cur, curMax, bestNode.conn.srv.downloadInflight.Load())
-
 					bestNodeRttInfo.onFailure()
-
-					bestNode.conn.StableCount.Store(0)
 					bestNode.conn.IsLastSuccess.Store(false)
+					if decision, changed := bestNode.conn.observeDownloadWindow(downloadWindowSample{
+						startedAt: startedAt,
+						duration:  time.Duration(rtt) * time.Millisecond,
+						success:   false,
+						timeout:   errors.Is(err, context.DeadlineExceeded),
+						saturated: cur >= curMax,
+					}); changed {
+						logDownloadWindowChange(f.torrent, bestNode, decision)
+					}
 					Logger("[STORAGE] BAG", hex.EncodeToString(f.torrent.BagID), "PIECE", piece, "DOWNLOADED FAILED FROM", bestNode.conn.adnl.RemoteAddr(), hex.EncodeToString(bestNode.nodeId), "TOOK", rtt, "MS,", "INFLIGHT", bestNode.conn.InflightPieces.Load(), "MAX", bestNode.conn.MaxInflightPieces.Load(), "REASON", err.Error())
 				}
 
@@ -549,85 +476,15 @@ func (f *PreFetcher) balancer() {
 
 			bestNode.conn.IsLastSuccess.Store(true)
 			bestNodeRttInfo.LastRTT.Store(rtt)
-			now := time.Now()
 			bestNodeRttInfo.onSuccessSample(rtt, now)
-
-			srtt, _, minrtt, _, _ := bestNodeRttInfo.snapshot()
-
-			minChangeMs := inflightChangeGapMs(srtt)
-
-			/*var sp uint64
-			for _, info := range f.torrent.GetPeers() {
-				sp += uint64(info.downloadSpeed.speed)
-			}*/
-
-			if srtt > 0 {
-				queueMs := float64(rtt) - minrtt
-				diff := queueMs / (minrtt + 50)
-				// diffPrc := fmt.Sprintf("%.2f", diff*100.0)
-				// log.Println("-- Q", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, bestNode.conn.srv.downloadInflight.Load(), ToSpeed(sp))
-
-				nowMs = now.UnixMilli()
-
-				if diff < 0.25 || queueMs < 75 {
-					// fmt.Println("-- STABLE", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
-
-					if cur >= curMax {
-						stable := bestNode.conn.StableCount.Add(1)
-						bestNode.conn.UnstableCount.Store(0)
-
-						need := curMax * 3
-						if DownloadSlowStartThreshold > 1 && actualMax < DownloadSlowStartThreshold {
-							need = curMax
-						}
-						if need < 2 {
-							need = 2
-						}
-
-						if stable >= int64(need) && lastChange < nowMs-minChangeMs {
-							maxCap := dataQueueInflightCap(bestNode.conn)
-							newMax := nextInflightAfterStable(actualMax, maxCap)
-							if newMax > actualMax {
-								if bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, newMax) {
-									bestNode.conn.UpStreak.Add(1)
-									bestNode.conn.DownStreak.Store(0)
-
-									// fmt.Println("-- UP", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
-
-									bestNode.conn.LastChange.Store(nowMs)
-									bestNode.conn.StableCount.Store(0)
-								}
-							}
-						}
-					}
-				} else if diff > 0.75 { // float64(rtt) >= decThresh || queueMs > 0.8*srtt
-					uns := bestNode.conn.UnstableCount.Add(1)
-					bestNode.conn.StableCount.Store(0)
-
-					// fmt.Println("-- SLOW", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, sp)
-
-					need := curMax / 2
-					if need < 2 {
-						need = 2
-					}
-
-					if uns >= int64(need) && lastChange < nowMs-minChangeMs {
-						if actualMax > 1 && bestNode.conn.MaxInflightPieces.CompareAndSwap(actualMax, actualMax-1) {
-							bestNode.conn.DownStreak.Add(1)
-							bestNode.conn.UpStreak.Store(0)
-
-							bestNode.conn.LastChange.Store(nowMs)
-							bestNode.conn.UnstableCount.Store(0)
-
-							// fmt.Println("-- DOWN", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
-						}
-					}
-				} else {
-					// fmt.Println("-- UNSTABLE", bestNode.nodeAddr, rtt, diffPrc, minrtt, cur, curMax, available, sp)
-
-					bestNode.conn.StableCount.Store(0)
-					bestNode.conn.UnstableCount.Store(0)
-				}
+			if decision, changed := bestNode.conn.observeDownloadWindow(downloadWindowSample{
+				startedAt: startedAt,
+				duration:  time.Duration(rtt) * time.Millisecond,
+				bytes:     uint64(len(pc.Data)),
+				success:   true,
+				saturated: cur >= curMax,
+			}); changed {
+				logDownloadWindowChange(f.torrent, bestNode, decision)
 			}
 
 			Logger("[STORAGE] BAG", hex.EncodeToString(f.torrent.BagID), "PIECE", piece, "DOWNLOADED FROM", bestNode.conn.adnl.RemoteAddr(), hex.EncodeToString(bestNode.nodeId), "TOOK", rtt, "MS,", "INFLIGHT", bestNode.conn.InflightPieces.Load(), "MAX", bestNode.conn.MaxInflightPieces.Load())
@@ -644,6 +501,25 @@ func (f *PreFetcher) balancer() {
 			}
 		}()
 	}
+}
+
+func logDownloadWindowChange(torrent *Torrent, peer *storagePeer, decision downloadWindowDecision) {
+	Logger(
+		"[STORAGE] DOWNLOAD WINDOW",
+		hex.EncodeToString(peer.nodeId),
+		peer.conn.adnl.RemoteAddr(),
+		"BAG", hex.EncodeToString(torrent.BagID),
+		"FROM", decision.oldWindow,
+		"TO", decision.newWindow,
+		"REASON", decision.reason,
+		"GOODPUT", ToSpeed(uint64(decision.epoch.goodput())),
+		"P50", decision.epoch.p50Ms, "MS",
+		"P90", decision.epoch.p90Ms, "MS",
+		"SUCCESS", decision.epoch.successes,
+		"FAIL", decision.epoch.failures,
+		"TIMEOUT", decision.epoch.timeouts,
+		"LOSS", fmt.Sprintf("%.1f%%", decision.epoch.failureRate()*100),
+	)
 }
 
 func ToSz(sz uint64) string {

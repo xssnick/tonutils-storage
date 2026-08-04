@@ -752,7 +752,15 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 	}()
 
 	// connect to first node and resolve torrent info
-	for t.Info == nil {
+	var info *TorrentInfo
+	for info == nil {
+		t.mx.RLock()
+		info = t.Info
+		t.mx.RUnlock()
+		if info != nil {
+			break
+		}
+
 		select {
 		case <-ctx.Done():
 			err = fmt.Errorf("failed to find storage nodes for this bag, err: %w", ctx.Err())
@@ -761,9 +769,12 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		}
 	}
 
-	if t.Header == nil {
-		hdrPieces := uint32(t.Info.HeaderSize / uint64(t.Info.PieceSize))
-		if t.Info.HeaderSize%uint64(t.Info.PieceSize) > 0 {
+	t.mx.RLock()
+	headerLoaded := t.Header != nil
+	t.mx.RUnlock()
+	if !headerLoaded {
+		hdrPieces := uint32(info.HeaderSize / uint64(info.PieceSize))
+		if info.HeaderSize%uint64(info.PieceSize) > 0 {
 			// add not full piece
 			hdrPieces++
 		}
@@ -776,7 +787,7 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 		pf := NewPreFetcher(globalCtx, t, nil, hdrPieces, hdrMask)
 		defer pf.Stop()
 
-		data := make([]byte, 0, uint64(hdrPieces)*uint64(t.Info.PieceSize))
+		data := make([]byte, 0, uint64(hdrPieces)*uint64(info.PieceSize))
 		proofs := make([][]byte, 0, hdrPieces)
 		for i := uint32(0); i < hdrPieces; i++ {
 			piece, proof, pieceErr := pf.WaitGet(globalCtx, i)
@@ -809,7 +820,11 @@ func (c *Connector) CreateDownloader(ctx context.Context, t *Torrent) (_ Torrent
 			return nil, err
 		}
 
-		t.Header = &header
+		t.mx.Lock()
+		if t.Header == nil {
+			t.Header = &header
+		}
+		t.mx.Unlock()
 
 		for i, proof := range proofs {
 			err = t.setPiece(uint32(i), &PieceInfo{

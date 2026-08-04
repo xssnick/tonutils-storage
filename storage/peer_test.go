@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -116,6 +117,29 @@ func TestSpeedInfoResetsWhenCounterDrops(t *testing.T) {
 
 	if got := s.calculateAt(10, start.Add(2*time.Second)); got != 0 {
 		t.Fatalf("expected counter reset to clear displayed speed, got %.0f", got)
+	}
+}
+
+func TestSpeedInfoDisplayConcurrentWithCalculate(t *testing.T) {
+	var s speedInfo
+	start := time.Unix(0, 0)
+	s.calculateAt(0, start)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for i := 1; i <= 1000; i++ {
+			s.calculateAt(uint64(i*1024), start.Add(time.Duration(i)*time.Millisecond))
+		}
+	})
+	wg.Go(func() {
+		for range 1000 {
+			_ = s.display()
+		}
+	})
+	wg.Wait()
+
+	if got := s.display(); got <= 0 {
+		t.Fatalf("expected published speed to be positive, got %.0f", got)
 	}
 }
 

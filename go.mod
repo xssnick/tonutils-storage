@@ -8,7 +8,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/ton-blockchain/adnl-tunnel v0.2.1
-	github.com/xssnick/tonutils-go v1.18.0
+	github.com/xssnick/tonutils-go v1.18.1-0.20260801052814-fc795b3d6ca7
 	github.com/xssnick/tonutils-storage-provider v0.4.3
 	golang.org/x/sync v0.22.0
 )
@@ -40,10 +40,10 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/xssnick/raptorq v1.5.0 // indirect
+	github.com/xssnick/raptorq v1.5.1 // indirect
 	github.com/xssnick/ton-payment-network v1.3.1 // indirect
-	golang.org/x/crypto v0.53.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/term v0.44.0 // indirect
-	golang.org/x/text v0.38.0 // indirect; indirects
+	golang.org/x/crypto v0.54.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
+	golang.org/x/text v0.40.0 // indirect; indirects
 )

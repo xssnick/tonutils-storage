@@ -616,6 +616,10 @@ func (t *testRLDP) GetRateInfo() (left int64, total int64) {
 	return 0, 0
 }
 
+func (t *testRLDP) Stats() rldp.Stats {
+	return rldp.Stats{}
+}
+
 func (t *testRLDP) Close() {}
 
 func (t *testRLDP) DoQuery(_ context.Context, _ uint64, query, result tl.Serializable) error {
@@ -638,6 +642,8 @@ func (t *testRLDP) DoQueryAsync(_ context.Context, _ uint64, _ []byte, _ tl.Seri
 }
 
 func (t *testRLDP) SetOnQuery(_ func([]byte, *rldp.Query) error) {}
+
+func (t *testRLDP) SetOnMessage(_ func([]byte, []byte) error) {}
 
 func (t *testRLDP) SetOnDisconnect(_ func()) {}
 
@@ -686,6 +692,10 @@ func (t *testADNLPeer) SendCustomMessage(context.Context, tl.Serializable) error
 	return nil
 }
 
+func (t *testADNLPeer) SendNop(context.Context) error {
+	return nil
+}
+
 func (t *testADNLPeer) Query(_ context.Context, _, _ tl.Serializable) error {
 	call := int(t.queryCalls.Add(1)) - 1
 	if call < len(t.queryErrs) && t.queryErrs[call] != nil {
@@ -722,6 +732,10 @@ func (t *testADNLPeer) GetID() []byte {
 
 func (t *testADNLPeer) GetPubKey() ed25519.PublicKey {
 	return nil
+}
+
+func (t *testADNLPeer) Stats() adnl.PeerStats {
+	return adnl.PeerStats{}
 }
 
 func (t *testADNLPeer) Reinit() {}

@@ -30,6 +30,9 @@ type PeerConnection struct {
 	UpStreak      atomic.Int64
 	DownStreak    atomic.Int64
 
+	downloadWindowMx sync.Mutex
+	downloadWindow   downloadWindowController
+
 	mx         sync.RWMutex
 	usedByBags map[string]*storagePeer
 }
@@ -61,6 +64,19 @@ func (c *PeerConnection) GetFor(id []byte) *storagePeer {
 	defer c.mx.RUnlock()
 
 	return c.usedByBags[string(id)]
+}
+
+// wakeDownloaders notifies every torrent sharing this physical connection
+// when a data slot becomes available. Waking only the torrent that released
+// the slot can starve another bag indefinitely while the first downloader
+// keeps the shared inflight window full.
+func (c *PeerConnection) wakeDownloaders() {
+	c.mx.RLock()
+	defer c.mx.RUnlock()
+
+	for _, peer := range c.usedByBags {
+		peer.torrent.wake.fire()
+	}
 }
 
 var ErrQueueIsBusy = errors.New("queue is busy")

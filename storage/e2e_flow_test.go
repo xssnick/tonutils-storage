@@ -318,6 +318,10 @@ func (l *loopbackADNL) SendCustomMessage(context.Context, tl.Serializable) error
 	return nil
 }
 
+func (l *loopbackADNL) SendNop(context.Context) error {
+	return nil
+}
+
 func (l *loopbackADNL) Query(ctx context.Context, req, result tl.Serializable) error {
 	inner, over := overlay.UnwrapQuery(req)
 	switch q := inner.(type) {
@@ -387,6 +391,10 @@ func (l *loopbackADNL) GetPubKey() ed25519.PublicKey {
 	return l.remoteKey
 }
 
+func (l *loopbackADNL) Stats() adnl.PeerStats {
+	return adnl.PeerStats{}
+}
+
 func (l *loopbackADNL) Reinit() {}
 
 func (l *loopbackADNL) Close() {
@@ -409,6 +417,10 @@ func (l *loopbackRLDP) GetADNL() rldp.ADNL {
 
 func (l *loopbackRLDP) GetRateInfo() (left int64, total int64) {
 	return 0, 0
+}
+
+func (l *loopbackRLDP) Stats() rldp.Stats {
+	return rldp.Stats{}
 }
 
 func (l *loopbackRLDP) Close() {}
@@ -491,6 +503,8 @@ func (l *loopbackRLDP) DoQueryAsync(ctx context.Context, maxAnswerSize uint64, i
 }
 
 func (l *loopbackRLDP) SetOnQuery(func(transferId []byte, query *rldp.Query) error) {}
+
+func (l *loopbackRLDP) SetOnMessage(func([]byte, []byte) error) {}
 
 func (l *loopbackRLDP) SetOnDisconnect(func()) {}
 

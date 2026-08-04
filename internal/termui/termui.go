@@ -30,10 +30,18 @@ func Output() io.Writer {
 }
 
 func UseLivePrinters() bool {
-	return runtime.GOOS != "windows"
+	if runtime.GOOS == "windows" {
+		return false
+	}
+	stat, err := os.Stdout.Stat()
+	return err == nil && stat.Mode()&os.ModeCharDevice != 0
 }
 
 func ConfigurePTerm() {
+	if runtime.GOOS == "windows" {
+		pterm.DisableStyling()
+	}
+
 	pterm.SetDefaultOutput(output)
 
 	pterm.Info.Writer = output
@@ -56,7 +64,10 @@ func ConfigureStdLogger() {
 }
 
 func SetZerologLevel(level zerolog.Level) {
-	zlog.Logger = zlog.Output(zerolog.ConsoleWriter{Out: output}).Level(level)
+	zlog.Logger = zlog.Output(zerolog.ConsoleWriter{
+		Out:     output,
+		NoColor: runtime.GOOS == "windows",
+	}).Level(level)
 }
 
 type Spinner struct {
