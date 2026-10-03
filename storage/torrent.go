@@ -115,10 +115,12 @@ type Torrent struct {
 	CreatedLocally bool
 
 	activeFiles     []uint32
+	activeFileSet   map[uint32]struct{}
 	activeUpload    bool
 	downloadAll     bool
 	downloadOrdered bool
 	stats           TorrentStats
+	uploadStatsMx   sync.Mutex
 
 	connector  NetConnector
 	downloader TorrentDownloader
@@ -157,6 +159,9 @@ type Torrent struct {
 
 	mx     sync.RWMutex
 	maskMx sync.RWMutex
+	// Verification must finish before a replacement downloader can write files.
+	dataMx         sync.Mutex
+	verificationMx sync.Mutex
 
 	currentDownloadFlag *bool
 	stopDownload        func()
@@ -167,13 +172,33 @@ type Torrent struct {
 }
 
 func (t *Torrent) InitMask() {
+	if err := t.InitMaskWithError(); err != nil {
+		Logger("failed to initialize pieces mask:", err)
+	}
+}
+
+func (t *Torrent) InitMaskWithError() error {
 	t.maskMx.Lock()
+	defer t.maskMx.Unlock()
 	if len(t.pieceMask) == 0 {
-		t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
+		if t.Info == nil || t.Info.PieceSize == 0 {
+			return fmt.Errorf("torrent metadata is not loaded")
+		}
+		if store, ok := t.db.(interface {
+			PiecesMaskWithError([]byte, uint32) ([]byte, error)
+		}); ok {
+			mask, err := store.PiecesMaskWithError(t.BagID, t.Info.PiecesNum())
+			if err != nil {
+				return err
+			}
+			t.pieceMask = mask
+		} else {
+			t.pieceMask = t.db.PiecesMask(t.BagID, t.Info.PiecesNum())
+		}
 		t.downloadedPieces.Store(countBitsetOnes(t.pieceMask))
 		t.downloadedPiecesCountSet.Store(true)
 	}
-	t.maskMx.Unlock()
+	return nil
 }
 
 func (t *Torrent) GetConnector() NetConnector {
@@ -205,10 +230,14 @@ func (t *Torrent) Wait() {
 }
 
 func (t *Torrent) IsDownloadAll() bool {
+	t.mx.RLock()
+	defer t.mx.RUnlock()
 	return t.downloadAll
 }
 
 func (t *Torrent) IsDownloadOrdered() bool {
+	t.mx.RLock()
+	defer t.mx.RUnlock()
 	return t.downloadOrdered
 }
 
@@ -217,12 +246,16 @@ func (t *Torrent) GetUploadStats() uint64 {
 }
 
 func (t *Torrent) SetUploadStats(val uint64) {
+	t.uploadStatsMx.Lock()
+	defer t.uploadStatsMx.Unlock()
 	atomic.StoreUint64(&t.stats.Uploaded, val)
 	atomic.StoreUint64(&t.stats.StoredUploaded, val)
 	atomic.StoreInt64(&t.stats.LastUploadStatsStoredAtMs, time.Now().UnixMilli())
 }
 
 func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
+	t.mx.RLock()
+	defer t.mx.RUnlock()
 	select {
 	case <-t.globalCtx.Done():
 		return false, false
@@ -232,10 +265,14 @@ func (t *Torrent) IsActive() (activeDownload, activeUpload bool) {
 }
 
 func (t *Torrent) GetLastVerifiedAt() (bool, time.Time) {
+	t.mx.RLock()
+	defer t.mx.RUnlock()
 	return t.isVerificationInProgress, t.lastVerified
 }
 
 func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
+	t.mx.RLock()
+	defer t.mx.RUnlock()
 	select {
 	case <-t.globalCtx.Done():
 		return false, false
@@ -247,41 +284,22 @@ func (t *Torrent) IsActiveRaw() (activeDownload, activeUpload bool) {
 func (t *Torrent) Stop() {
 	defer t.wake.fire()
 
+	t.mx.Lock()
 	t.activeUpload = false
 	t.pause()
+	t.mx.Unlock()
 	t.flushUploadStats()
 }
 
 func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err error) {
-	t.activeUpload = withUpload
-
 	defer t.wake.fire()
 
 	t.mx.Lock()
 	defer t.mx.Unlock()
 
-	if d, _ := t.IsActive(); d && t.downloadAll == downloadAll && t.downloadOrdered == downloadOrdered {
+	t.activeUpload = withUpload
+	if t.globalCtx.Err() == nil && t.downloadAll == downloadAll && t.downloadOrdered == downloadOrdered {
 		return nil
-	}
-
-	if !t.isVerificationInProgress && t.lastVerified.Before(time.Now().Add(-30*time.Second)) {
-		if t.db.VerifyOnStartup() {
-			t.isVerificationInProgress = true
-			t.opWg.Add(1)
-			go func() {
-				defer t.opWg.Done()
-				// it will remove corrupted pieces
-				if _, err = t.Verify(t.globalCtx, true); err != nil {
-					Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", err.Error())
-				}
-
-				t.mx.Lock()
-				defer t.mx.Unlock()
-
-				t.lastVerified = time.Now()
-				t.isVerificationInProgress = false
-			}()
-		}
 	}
 
 	t.downloadAll = downloadAll
@@ -296,18 +314,23 @@ func (t *Torrent) Start(withUpload, downloadAll, downloadOrdered bool) (err erro
 	t.opWg.Add(1)
 	go t.peersManager(t.globalCtx)
 
-	if t.IsCompleted() {
-		//	t.complete()
+	if t.db.VerifyOnStartup() && t.lastVerified.Before(time.Now().Add(-30*time.Second)) {
+		workerCtx := t.globalCtx
+		t.isVerificationInProgress = true
+		t.opWg.Add(1)
+		go func() {
+			defer t.opWg.Done()
+			if _, verifyErr := t.Verify(workerCtx, true); verifyErr != nil && workerCtx.Err() == nil {
+				Logger("Verification of", hex.EncodeToString(t.BagID), "failed:", verifyErr.Error())
+			}
+		}()
 		return nil
 	}
 
-	currFlag := t.currentDownloadFlag
-	currPause := t.pause
-	return t.startDownload(func(event Event) {
-		if event.Name == EventErr && currFlag == t.currentDownloadFlag {
-			currPause()
-		}
-	})
+	if t.CreatedLocally {
+		return nil
+	}
+	return t.startDownload(nil)
 }
 
 func (t *Torrent) peersManager(workerCtx context.Context) {
@@ -372,6 +395,11 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 		now := nowTime.UnixMilli()
 		idleSweepDue := lastIdleSweepAt.IsZero() || nowTime.Sub(lastIdleSweepAt) >= peerIdleSweepInterval
 		wg := sync.WaitGroup{}
+		type pieceUpdateResult struct {
+			peer  *storagePeer
+			seqno int64
+		}
+		pieceUpdates := make(chan pieceUpdateResult, 3)
 		for _, peer := range peers {
 			if idleSweepDue && peer.isIdle(nowTime, peerIdleTimeout) {
 				Logger("[STORAGE_PEERS] PEER IDLE TOO LONG, CLOSING CONNECTION", hex.EncodeToString(peer.nodeId), "BAG", hex.EncodeToString(t.BagID), "LAST_ACTIVITY", peer.lastActivity().Format(time.RFC3339))
@@ -385,7 +413,7 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 
 			if updates < 3 && peer.lastUpdatePiecesSeqno < lastUpdatePiecesSeqno && peer.lastUpdatePiecesAt+1000 < now {
 				peer.lastUpdatePiecesAt = now
-				peer.lastUpdatePiecesSeqno = lastUpdatePiecesSeqno
+				updateSeqno := lastUpdatePiecesSeqno
 				updates++ // limit per cycle to not overload network
 
 				wg.Add(1)
@@ -402,6 +430,7 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 						}
 					} else {
 						atomic.StoreInt32(&peer.fails, 0)
+						pieceUpdates <- pieceUpdateResult{peer: peer, seqno: updateSeqno}
 					}
 				}()
 			}
@@ -493,6 +522,10 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 		}
 
 		wg.Wait()
+		close(pieceUpdates)
+		for result := range pieceUpdates {
+			result.peer.lastUpdatePiecesSeqno = result.seqno
+		}
 	}
 }
 
@@ -523,11 +556,14 @@ func (t *Torrent) removePiece(id uint32) error {
 		t.downloadedPieces.Add(^uint32(0))
 	}
 	t.maskMx.Unlock()
+	if err := t.cleanupCachedPiece(id); err != nil {
+		return fmt.Errorf("failed to remove cached piece %d: %w", id, err)
+	}
 	return nil
 }
 
 func (t *Torrent) setPiece(id uint32, p *PieceInfo, onlyHeader bool) error {
-	if onlyHeader && t.Info.HeaderSize%uint64(t.Info.PieceSize) != 0 {
+	if onlyHeader && t.Info.HeaderSize < t.Info.FileSize && t.Info.HeaderSize%uint64(t.Info.PieceSize) != 0 {
 		if id == uint32(t.Info.HeaderSize/uint64(t.Info.PieceSize)) {
 			// we should set an edge piece only when data is downloaded
 			return nil
@@ -701,12 +737,25 @@ func (t *Torrent) LoadActiveFilesIDs() error {
 	if err != nil {
 		return fmt.Errorf("failed to load active files from db: %w", err)
 	}
+	t.mx.Lock()
 	t.activeFiles = files
+	t.activeFileSet = fileIDsSet(files)
+	t.mx.Unlock()
 	return nil
 }
 
 func (t *Torrent) GetActiveFilesIDs() []uint32 {
-	return t.activeFiles
+	t.mx.RLock()
+	defer t.mx.RUnlock()
+	return append([]uint32(nil), t.activeFiles...)
+}
+
+func fileIDsSet(ids []uint32) map[uint32]struct{} {
+	set := make(map[uint32]struct{}, len(ids))
+	for _, id := range ids {
+		set[id] = struct{}{}
+	}
+	return set
 }
 
 func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
@@ -718,14 +767,9 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 	}
 
 	t.downloadAll = false
-	t.activeFiles = ids
-	currFlag := t.currentDownloadFlag
-	currPause := t.pause
-	return t.startDownload(func(event Event) {
-		if event.Name == EventErr && currFlag == t.currentDownloadFlag {
-			currPause()
-		}
-	})
+	t.activeFiles = append([]uint32(nil), ids...)
+	t.activeFileSet = fileIDsSet(ids)
+	return t.startDownload(nil)
 }
 
 func (t *Torrent) SetActiveFiles(names []string) error {
@@ -745,8 +789,11 @@ func (t *Torrent) SetActiveFiles(names []string) error {
 }
 
 func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
+	t.mx.RLock()
+	ctx := t.globalCtx
+	t.mx.RUnlock()
 	select {
-	case <-t.globalCtx.Done():
+	case <-ctx.Done():
 		return nil, fmt.Errorf("torrent paused")
 	default:
 	}
@@ -754,73 +801,82 @@ func (t *Torrent) GetPiece(id uint32) (*Piece, error) {
 }
 
 func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
-	if id >= t.Info.PiecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.Info.PiecesNum())
+	t.mx.RLock()
+	info, header := t.Info, t.Header
+	downloadAll := t.downloadAll
+	activeFileSet := t.activeFileSet
+	t.mx.RUnlock()
+	if info == nil || header == nil || info.PieceSize == 0 {
+		return nil, fmt.Errorf("torrent metadata is not loaded")
 	}
-
+	if id >= info.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, info.PiecesNum())
+	}
 	piece, err := t.getPiece(id)
 	if err != nil {
 		return nil, fmt.Errorf("piece %d is not downloaded (%w)", id, err)
 	}
-
-	offset := 0
-	block := make([]byte, t.Info.PieceSize)
-
-	var headerData []byte
-	fileFrom := piece.StartFileIndex
-	for {
-		isHdr := t.Info.HeaderSize > uint64(id)*uint64(t.Info.PieceSize)+uint64(offset)
-
-		// header
-		if isHdr {
-			if headerData == nil {
-				headerData, err = tl.Serialize(t.Header, true)
-				if err != nil {
-					return nil, fmt.Errorf("failed to serialize header: %w", err)
-				}
-			}
-			offset += copy(block[offset:], headerData[id*t.Info.PieceSize:])
-		} else {
-			f, err := t.GetFileOffsetsByID(fileFrom)
-			if err != nil {
-				return nil, fmt.Errorf("offsets for %d %d are not exists (%w)", id, fileFrom, err)
-			}
-
-			path := filepath.Join(t.Path, string(t.Header.DirName), f.Name)
-
-			read := func(path string, from int64) error {
-				n, err := t.db.GetFS().GetController().AcquireRead(path, block[offset:], from)
-				if err != nil && err != io.EOF {
-					return err
-				}
-
-				offset += n
-				return nil
-			}
-
-			var fileOff int64 = 0
-			if f.FromPiece != id {
-				fileOff = int64(id-f.FromPiece)*int64(t.Info.PieceSize) - int64(f.FromPieceOffset)
-			}
-
-			if err = read(path, fileOff); err != nil {
-				return nil, err
-			}
-			fileFrom++
-
-			if fileFrom >= uint32(len(t.Header.DataIndex)) {
-				// end reached
-				break
-			}
+	pieceStart := uint64(id) * uint64(info.PieceSize)
+	pieceEnd := min(pieceStart+uint64(info.PieceSize), info.FileSize)
+	var block []byte
+	cached := piece.StartFileIndex == cachedPieceStartFileIndex
+	if cached {
+		var found bool
+		block, found, err = t.readCachedPiece(id)
+		if err != nil {
+			return nil, err
 		}
-
-		if offset == int(t.Info.PieceSize) {
-			break
+		if !found {
+			return nil, fmt.Errorf("cache for piece %d is missing", id)
 		}
+		if !verify {
+			return &Piece{Proof: piece.Proof, Data: block}, nil
+		}
+	} else {
+		block = make([]byte, int(pieceEnd-pieceStart))
 	}
-
-	if offset > 0 {
-		block = block[:offset]
+	if pieceStart < info.HeaderSize {
+		headerData, err := tl.Serialize(header, true)
+		if err != nil {
+			return nil, fmt.Errorf("failed to serialize header: %w", err)
+		}
+		end := min(pieceEnd, info.HeaderSize)
+		if end > uint64(len(headerData)) {
+			return nil, fmt.Errorf("header size does not match torrent info")
+		}
+		copy(block, headerData[pieceStart:end])
+	}
+	metadata := &Torrent{Info: info, Header: header}
+	files, err := metadata.GetFilesInPiece(id)
+	if err != nil {
+		return nil, err
+	}
+	if cached && !downloadAll && activeFileSet == nil {
+		t.mx.RLock()
+		activeFileSet = fileIDsSet(t.activeFiles)
+		t.mx.RUnlock()
+	}
+	for _, file := range files {
+		if cached && !downloadAll {
+			if _, selected := activeFileSet[file.Index]; !selected {
+				continue
+			}
+		}
+		fileStart := uint64(file.FromPiece)*uint64(info.PieceSize) + uint64(file.FromPieceOffset)
+		from := max(pieceStart, fileStart)
+		to := min(pieceEnd, fileStart+file.Size)
+		if to <= from {
+			continue
+		}
+		filePath := filepath.Join(t.Path, string(header.DirName), file.Name)
+		data := block[from-pieceStart : to-pieceStart]
+		n, readErr := t.db.GetFS().GetController().AcquireRead(filePath, data, int64(from-fileStart))
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			return nil, fmt.Errorf("failed to read %s: %w", file.Name, readErr)
+		}
+		if n != len(data) {
+			return nil, fmt.Errorf("short read of %s: %w", file.Name, io.ErrUnexpectedEOF)
+		}
 	}
 
 	if verify {
@@ -829,7 +885,7 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 			return nil, fmt.Errorf("failed to parse proof cell: %w", err)
 		}
 
-		if err = cell.CheckProof(proof, t.Info.RootHash); err != nil {
+		if err = cell.CheckProof(proof, info.RootHash); err != nil {
 			return nil, fmt.Errorf("proof check of piece %d failed: %w, %s", id, err, proof.Dump())
 		}
 

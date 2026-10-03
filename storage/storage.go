@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-go/tl"
+	"path"
 	"sort"
 )
 
@@ -177,6 +178,7 @@ func (t *TorrentHeader) validateStatic() error {
 	}
 
 	var prevName uint64
+	names := make(map[string]struct{}, t.FilesCount)
 	for i, end := range t.NameIndex {
 		if end < prevName {
 			return fmt.Errorf("corrupted header, non-monotonic name index %d", i)
@@ -188,10 +190,18 @@ func (t *TorrentHeader) validateStatic() error {
 		if err := validateFileName(name, true); err != nil {
 			return fmt.Errorf("malicious file name %q: %w", name, err)
 		}
+		cleanName := path.Clean(name)
+		if _, exists := names[cleanName]; exists {
+			return fmt.Errorf("duplicate file name %q", name)
+		}
+		names[cleanName] = struct{}{}
 		prevName = end
 	}
 	if prevName != uint64(len(t.Names)) {
 		return fmt.Errorf("corrupted header, unindexed names data")
+	}
+	if err := validateFilePathPrefixes(names); err != nil {
+		return err
 	}
 
 	var prevData uint64
@@ -200,6 +210,17 @@ func (t *TorrentHeader) validateStatic() error {
 			return fmt.Errorf("corrupted header, non-monotonic data index %d", i)
 		}
 		prevData = end
+	}
+	return nil
+}
+
+func validateFilePathPrefixes(names map[string]struct{}) error {
+	for name := range names {
+		for parent := path.Dir(name); parent != "."; parent = path.Dir(parent) {
+			if _, exists := names[parent]; exists {
+				return fmt.Errorf("file name %q conflicts with parent file %q", name, parent)
+			}
+		}
 	}
 	return nil
 }
@@ -277,6 +298,9 @@ func (t *TorrentHeader) Serialize(buffer *bytes.Buffer) error {
 func (t *Torrent) calcFileIndexes() error {
 	t.mx.Lock()
 	defer t.mx.Unlock()
+	if t.Header == nil || t.Info == nil {
+		return fmt.Errorf("torrent metadata is not loaded")
+	}
 
 	// already calculated
 	if t.filesIndex != nil {
@@ -284,12 +308,21 @@ func (t *Torrent) calcFileIndexes() error {
 	}
 
 	filesIndex := map[string]uint32{}
+	paths := make(map[string]struct{}, t.Header.FilesCount)
 	for i := uint32(0); i < t.Header.FilesCount; i++ {
 		name, _, _, err := t.fileBoundsByID(i)
 		if err != nil {
 			return err
 		}
+		cleanName := path.Clean(name)
+		if _, exists := paths[cleanName]; exists {
+			return fmt.Errorf("duplicate file name %q", name)
+		}
+		paths[cleanName] = struct{}{}
 		filesIndex[name] = i
+	}
+	if err := validateFilePathPrefixes(paths); err != nil {
+		return err
 	}
 	t.filesIndex = filesIndex
 	return nil
@@ -424,7 +457,7 @@ func (t *Torrent) ListFiles() ([]string, error) {
 		return nil, err
 	}
 
-	files := make([]string, len(t.filesIndex), len(t.filesIndex))
+	files := make([]string, t.Header.FilesCount)
 	for s, idx := range t.filesIndex {
 		files[idx] = s
 	}

@@ -7,9 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"path"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"github.com/xssnick/tonutils-go/tlb"
 	"github.com/xssnick/tonutils-go/tvm/cell"
 	"github.com/xssnick/tonutils-storage/internal/termui"
+	"golang.org/x/sync/errgroup"
 )
 
 type FileRef interface {
@@ -24,6 +26,13 @@ type FileRef interface {
 	GetSize() uint64
 	CreateReader() (io.ReaderAt, func() error, error)
 }
+
+type sizedFileRef struct {
+	FileRef
+	size uint64
+}
+
+func (f sizedFileRef) GetSize() uint64 { return f.size }
 
 func CreateTorrent(ctx context.Context, filesRootPath, dirName, description string, db Storage, connector NetConnector, files []FileRef, progressCallback func(done uint64, max uint64)) (*Torrent, error) {
 	if dirName == "/" {
@@ -51,6 +60,9 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 	dataSize, err := initializeTorrentHeader(torrent, files, verbose)
 	if err != nil {
 		return nil, err
+	}
+	if err = header.validateStatic(); err != nil {
+		return nil, fmt.Errorf("invalid torrent header: %w", err)
 	}
 
 	var pieceSize = db.GetForcedPieceSize()
@@ -95,8 +107,20 @@ func CreateTorrentWithInitialHeader(ctx context.Context, filesRootPath, descript
 // initializeTorrentHeader will perform a scan on torrent files passed and initialize torrent header. Returning the initialized
 // torrent and the data size.
 func initializeTorrentHeader(torrent *Torrent, files []FileRef, verbose bool) (uint64, error) {
+	if torrent.Header == nil {
+		return 0, fmt.Errorf("header is nil")
+	}
 	if len(files) == 0 {
 		return 0, fmt.Errorf("0 files in torrent")
+	}
+	if len(files) > maxTorrentHeaderFiles {
+		return 0, fmt.Errorf("too many files in torrent")
+	}
+	if torrent.Header.FilesCount != 0 || len(torrent.Header.Names) != 0 || len(torrent.Header.NameIndex) != 0 || len(torrent.Header.DataIndex) != 0 {
+		return 0, fmt.Errorf("initial header already contains files")
+	}
+	if err := validateFileName(string(torrent.Header.DirName), false); err != nil {
+		return 0, err
 	}
 	var waiter *termui.Spinner
 	if verbose {
@@ -105,6 +129,7 @@ func initializeTorrentHeader(torrent *Torrent, files []FileRef, verbose bool) (u
 	}
 
 	var dataSize uint64
+	names := make(map[string]struct{}, len(files))
 	// iterate over files to build torrent headers
 	for _, file := range files {
 		name := file.GetName()
@@ -112,13 +137,22 @@ func initializeTorrentHeader(torrent *Torrent, files []FileRef, verbose bool) (u
 		if err := validateFileName(name, true); err != nil {
 			return 0, fmt.Errorf("malicious file name %q: %w", name, err)
 		}
+		cleanName := path.Clean(name)
+		if _, exists := names[cleanName]; exists {
+			return 0, fmt.Errorf("duplicate file name %q", name)
+		}
+		names[cleanName] = struct{}{}
+		size := file.GetSize()
+		if size > math.MaxInt64 || dataSize > math.MaxInt64-size {
+			return 0, fmt.Errorf("torrent data size exceeds supported file offsets")
+		}
 
 		torrent.Header.FilesCount++
 		torrent.Header.TotalNameSize += uint64(len(name))
 		torrent.Header.Names = append(torrent.Header.Names, name...)
 		torrent.Header.NameIndex = append(torrent.Header.NameIndex, torrent.Header.TotalNameSize)
 
-		dataSize += file.GetSize()
+		dataSize += size
 
 		torrent.Header.DataIndex = append(torrent.Header.DataIndex, dataSize)
 	}
@@ -141,22 +175,38 @@ func computeHashesAndJoinPieces(
 	waiter *termui.Spinner,
 	progressCallback func(done uint64, max uint64),
 ) error {
-	fullSz := uint64(len(headerData)) + dataSize
+	if pieceSize == 0 {
+		return fmt.Errorf("piece size is zero")
+	}
+	fullSz, ok := checkedAddUint64(uint64(len(headerData)), dataSize)
+	if !ok || fullSz > math.MaxInt64 {
+		return fmt.Errorf("torrent size exceeds supported file offsets")
+	}
 	piecesNum := fullSz / uint64(pieceSize)
 	if fullSz%uint64(pieceSize) != 0 {
 		piecesNum++
+	}
+	if piecesNum > math.MaxUint32 {
+		return fmt.Errorf("too many pieces in torrent")
 	}
 
 	var (
 		maxProgress  = piecesNum * 4
 		doneProgress uint64
 	)
+	fileRefs := make([]FileRef, len(files))
+	var previousEnd uint64
+	for i, file := range files {
+		end := torrent.Header.DataIndex[i]
+		fileRefs[i] = sizedFileRef{FileRef: file, size: end - previousEnd}
+		previousEnd = end
+	}
 
 	hashes, piecesStartIndexes, err := computeFileHashes(
 		ctx,
 		pieceSize,
 		headerData,
-		files,
+		fileRefs,
 		piecesNum, &doneProgress, maxProgress,
 		waiter,
 		progressCallback,
@@ -218,61 +268,46 @@ func joinTorrentPieces(
 	progress *termui.ProgressBar,
 	progressCallback func(done uint64, max uint64),
 ) error {
-	wg := sync.WaitGroup{}
-	threads := runtime.NumCPU()
-	toCalcErr := make(chan error, threads)
-	wg.Add(threads)
-
+	workerCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	group, groupCtx := errgroup.WithContext(workerCtx)
+	threads := max(1, min(runtime.GOMAXPROCS(0), len(piecesStartIndexes)))
 	type calcReq struct {
 		id         uint32
 		startIndex uint32
 	}
-	toCalc := make(chan *calcReq, threads)
-	for i := 0; i < threads; i++ {
-		go func() {
-			defer func() {
-				wg.Done()
-			}()
-
+	toCalc := make(chan calcReq, threads)
+	for range threads {
+		group.Go(func() error {
 			for {
-				var p *calcReq
 				select {
-				case <-ctx.Done():
-					return
-				case p = <-toCalc:
-					if p == nil {
-						return
+				case <-groupCtx.Done():
+					return groupCtx.Err()
+				case request, ok := <-toCalc:
+					if !ok {
+						return nil
+					}
+					proof, err := torrent.fastProof(hashTree, request.id, torrent.Info.PiecesNum())
+					if err != nil {
+						return err
+					}
+					if err = torrent.setPiece(request.id, &PieceInfo{
+						StartFileIndex: request.startIndex,
+						Proof:          proof.ToBOCWithFlags(false),
+					}, false); err != nil {
+						return err
 					}
 				}
-
-				proof, err := torrent.fastProof(hashTree, p.id, torrent.Info.PiecesNum())
-				if err != nil {
-					toCalcErr <- err
-					return
-				}
-
-				err = torrent.setPiece(p.id, &PieceInfo{
-					StartFileIndex: p.startIndex,
-					Proof:          proof.ToBOCWithFlags(false),
-				}, false)
-				if err != nil {
-					toCalcErr <- err
-					return
-				}
 			}
-		}()
+		})
 	}
 
-	for i, idx := range piecesStartIndexes {
+submit:
+	for i, index := range piecesStartIndexes {
 		select {
-		case <-ctx.Done():
-			if progress != nil {
-				_ = progress.Stop()
-			}
-			return ctx.Err()
-		case err := <-toCalcErr:
-			return fmt.Errorf("failed to calc proof for piece: %w", err)
-		case toCalc <- &calcReq{id: uint32(i), startIndex: idx}:
+		case <-groupCtx.Done():
+			break submit
+		case toCalc <- calcReq{id: uint32(i), startIndex: index}:
 			if progress != nil {
 				progress.Increment()
 			}
@@ -282,8 +317,15 @@ func joinTorrentPieces(
 		}
 	}
 	close(toCalc)
-
-	wg.Wait()
+	if progress != nil {
+		defer progress.Stop()
+	}
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("failed to create piece proofs: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	torrent.activeFiles = make([]uint32, 0, len(files))
 	for i := range files {
@@ -305,194 +347,167 @@ func computeFileHashes(
 	waiter *termui.Spinner,
 	progressCallback func(done uint64, max uint64),
 ) ([]merkleHash, []uint32, error) {
-	hashes := make([]merkleHash, piecesNum)
-	piecesStartFileIndexes := make([]uint32, piecesNum)
-	pieceStartFileIndex := uint32(0)
-	cb := make([]byte, pieceSize)
-	cbOffset := 0
-	var filesProcessed uint32
-	var piecesProcessed int64
-
-	process := func(isHeader bool, size uint64, rd io.ReaderAt, progress *termui.ProgressBar) error {
-		var fileOffset int64 = 0
-		end := false
-		for !end {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			if cbOffset == 0 {
-				pieceStartFileIndex = filesProcessed
-
-				// we start parallel execution only for full pieces and when file is big enough
-				if !isHeader && size/piecesNum > 10000 {
-					type job struct {
-						offset int64
-						piece  int64
-					}
-
-					var done = make(chan error, 130)
-					var task = make(chan job, 130)
-
-					ctxWorker, cancelWorker := context.WithCancel(ctx)
-
-					for i := 0; i < runtime.NumCPU(); i++ {
-						go func() {
-							var buf = make([]byte, pieceSize)
-							for {
-								select {
-								case <-ctxWorker.Done():
-									return
-								case j := <-task:
-									_, err := rd.ReadAt(buf, j.offset)
-									if err != nil {
-										done <- err
-										break
-									}
-
-									hashes[j.piece] = sha256.Sum256(buf)
-									piecesStartFileIndexes[j.piece] = pieceStartFileIndex
-
-									select {
-									case done <- nil:
-									case <-ctxWorker.Done():
-										return
-									}
-								}
-							}
-						}()
-					}
-
-					fullPiecesLeft := (int64(size) - fileOffset) / int64(pieceSize)
-
-					go func() {
-						for i := int64(0); i < fullPiecesLeft; i++ {
-							select {
-							case <-ctxWorker.Done():
-								return
-							case task <- job{
-								offset: fileOffset + i*int64(pieceSize),
-								piece:  piecesProcessed + i,
-							}:
-							}
-						}
-					}()
-
-					// process only full pieces in parallel
-					for i := int64(0); i < fullPiecesLeft; i++ {
-						select {
-						case <-ctx.Done():
-							cancelWorker()
-							return ctx.Err()
-						case err := <-done:
-							if err != nil {
-								cancelWorker()
-								return err
-							}
-							if progress != nil {
-								progress.Increment()
-							}
-							if progressCallback != nil {
-								progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
-							}
-						}
-					}
-
-					piecesProcessed += fullPiecesLeft
-					fileOffset += fullPiecesLeft * int64(pieceSize)
-					cancelWorker()
-				}
-			}
-
-			n, err := rd.ReadAt(cb[cbOffset:], fileOffset)
-			if err != nil {
-				if errors.Is(err, io.EOF) {
-					end = true
-					err = nil
-				} else {
-					return err
-				}
-			}
-			fileOffset += int64(n)
-			cbOffset += n
-
-			if cbOffset == int(pieceSize) {
-				hashes[piecesProcessed] = sha256.Sum256(cb)
-				// save index of file where block starts
-				piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
-
-				piecesProcessed++
-
-				cbOffset = 0
-				if progress != nil {
-					progress.Increment()
-				}
-				if progressCallback != nil {
-					progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
-				}
-			}
-		}
-
-		if !isHeader { // if not header
-			filesProcessed++
-		}
-		return nil
+	if pieceSize == 0 || piecesNum == 0 || piecesNum > math.MaxUint32 {
+		return nil, nil, fmt.Errorf("invalid piece dimensions")
 	}
+	hashes := make([]merkleHash, piecesNum)
+	indexes := make([]uint32, piecesNum)
+	buffer := make([]byte, pieceSize)
+	bufferOffset := 0
+	var pieceIndex uint64
+	var fileIndex, pieceStartFileIndex uint32
 	var progress *termui.ProgressBar
 	if waiter != nil {
 		progress, _ = termui.StartProgressbar(int(piecesNum), "Hashing pieces...")
 	}
-	err := process(true, uint64(len(headerData)), bytes.NewReader(headerData), progress)
-	if err != nil {
-		if waiter != nil {
-			waiter.Fail(err.Error())
-		}
-		return nil, nil, fmt.Errorf("failed to process header piece: %w", err)
+	if progress != nil {
+		defer progress.Stop()
 	}
-	if waiter != nil {
-		waiter.Success()
-	}
-	// add files
-	for _, f := range files {
-		select {
-		case <-ctx.Done():
-			return nil, nil, ctx.Err()
-		default:
-		}
-
-		rd, closer, err := f.CreateReader()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to read file %s: %w", f.GetName(), err)
-		}
-
-		err = process(false, f.GetSize(), rd, progress)
-		_ = closer()
-		if err != nil {
-			return nil, nil, fmt.Errorf("failed to process file %s: %w", f.GetName(), err)
-		}
-	}
-
-	if cbOffset != 0 {
-		// last data hash
-		hashes[piecesProcessed] = sha256.Sum256(cb[:cbOffset])
-
-		// save index of file where block starts
-		piecesStartFileIndexes[piecesProcessed] = pieceStartFileIndex
-
-		piecesProcessed++
+	report := func(count uint64) {
 		if progress != nil {
-			progress.Increment()
+			for range count {
+				progress.Increment()
+			}
 		}
 		if progressCallback != nil {
-			progressCallback(atomic.AddUint64(doneProgress, 3), maxProgress)
+			progressCallback(atomic.AddUint64(doneProgress, count*3), maxProgress)
 		}
 	}
-	if progress != nil {
-		_ = progress.Stop()
+	process := func(isHeader bool, size uint64, reader io.ReaderAt) error {
+		if size > math.MaxInt64 {
+			return fmt.Errorf("file size exceeds supported offsets")
+		}
+		var offset uint64
+		for offset < size {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if bufferOffset == 0 {
+				pieceStartFileIndex = fileIndex
+				fullPieces := (size - offset) / uint64(pieceSize)
+				if !isHeader && fullPieces > 1 {
+					if pieceIndex+fullPieces > piecesNum {
+						return fmt.Errorf("source size does not match torrent size")
+					}
+					if err := hashFullFilePieces(ctx, reader, offset, fullPieces, pieceIndex, fileIndex, pieceSize, hashes, indexes); err != nil {
+						return err
+					}
+					pieceIndex += fullPieces
+					offset += fullPieces * uint64(pieceSize)
+					report(fullPieces)
+					continue
+				}
+			}
+			readSize := min(uint64(len(buffer)-bufferOffset), size-offset)
+			n, err := reader.ReadAt(buffer[bufferOffset:bufferOffset+int(readSize)], int64(offset))
+			if n != int(readSize) {
+				return fmt.Errorf("source size changed: %w", io.ErrUnexpectedEOF)
+			}
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			offset += uint64(n)
+			bufferOffset += n
+			if bufferOffset == len(buffer) {
+				if pieceIndex >= piecesNum {
+					return fmt.Errorf("source size does not match torrent size")
+				}
+				hashes[pieceIndex] = sha256.Sum256(buffer)
+				indexes[pieceIndex] = pieceStartFileIndex
+				pieceIndex++
+				bufferOffset = 0
+				report(1)
+			}
+		}
+		var extra [1]byte
+		n, err := reader.ReadAt(extra[:], int64(size))
+		if n != 0 || err == nil {
+			return fmt.Errorf("source size changed: file grew beyond declared size")
+		}
+		if !errors.Is(err, io.EOF) {
+			return err
+		}
+		if !isHeader {
+			fileIndex++
+		}
+		return nil
 	}
-	return hashes, piecesStartFileIndexes, nil
+	if err := process(true, uint64(len(headerData)), bytes.NewReader(headerData)); err != nil {
+		return nil, nil, fmt.Errorf("failed to hash header: %w", err)
+	}
+	for _, file := range files {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, err
+		}
+		reader, closeReader, err := file.CreateReader()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to open %s: %w", file.GetName(), err)
+		}
+		err = process(false, file.GetSize(), reader)
+		closeErr := closeReader()
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to hash %s: %w", file.GetName(), err)
+		}
+		if closeErr != nil {
+			return nil, nil, fmt.Errorf("failed to close %s: %w", file.GetName(), closeErr)
+		}
+	}
+	if bufferOffset > 0 {
+		if pieceIndex >= piecesNum {
+			return nil, nil, fmt.Errorf("source size does not match torrent size")
+		}
+		hashes[pieceIndex] = sha256.Sum256(buffer[:bufferOffset])
+		indexes[pieceIndex] = pieceStartFileIndex
+		pieceIndex++
+		report(1)
+	}
+	if pieceIndex != piecesNum {
+		return nil, nil, fmt.Errorf("source size does not match torrent size")
+	}
+	return hashes, indexes, nil
+}
+
+func hashFullFilePieces(ctx context.Context, reader io.ReaderAt, offset, count, firstPiece uint64, fileIndex, pieceSize uint32, hashes []merkleHash, indexes []uint32) error {
+	group, workerCtx := errgroup.WithContext(ctx)
+	workers := max(1, min(runtime.GOMAXPROCS(0), int(count)))
+	jobs := make(chan uint64, workers)
+	for range workers {
+		group.Go(func() error {
+			buffer := make([]byte, pieceSize)
+			for {
+				select {
+				case <-workerCtx.Done():
+					return workerCtx.Err()
+				case index, ok := <-jobs:
+					if !ok {
+						return nil
+					}
+					n, err := reader.ReadAt(buffer, int64(offset+index*uint64(pieceSize)))
+					if n != len(buffer) {
+						return fmt.Errorf("source size changed: %w", io.ErrUnexpectedEOF)
+					}
+					if err != nil && !errors.Is(err, io.EOF) {
+						return err
+					}
+					hashes[firstPiece+index] = sha256.Sum256(buffer)
+					indexes[firstPiece+index] = fileIndex
+				}
+			}
+		})
+	}
+submit:
+	for index := uint64(0); index < count; index++ {
+		select {
+		case <-workerCtx.Done():
+			break submit
+		case jobs <- index:
+		}
+	}
+	close(jobs)
+	if err := group.Wait(); err != nil {
+		return err
+	}
+	return ctx.Err()
 }
 
 func calcHash(cb []byte) []byte {
@@ -501,6 +516,9 @@ func calcHash(cb []byte) []byte {
 }
 
 func validateFileName(name string, isFile bool) error {
+	if strings.EqualFold(strings.SplitN(name, "/", 2)[0], ".tonutils-storage-pieces") {
+		return fmt.Errorf("name uses reserved storage metadata directory")
+	}
 	if strings.Contains(name, "\x00") {
 		return fmt.Errorf("name cannot contain NUL byte")
 	}

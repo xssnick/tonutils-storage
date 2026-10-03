@@ -1,10 +1,12 @@
 package db
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,32 +21,46 @@ type FDescCache struct {
 
 // FSControllerCache caches file descriptors to avoid unnecessary open/close of most used files
 type FSControllerCache struct {
-	dsc      map[string]*FDescCache
-	mx       sync.RWMutex
-	noRemove bool
+	dsc       map[string]*FDescCache
+	mx        sync.RWMutex
+	noRemove  bool
+	available chan struct{}
 }
 
 var CachedFDLimit = 800
 
 func NewFSControllerCache(noRemove bool) *FSControllerCache {
 	return &FSControllerCache{
-		dsc:      map[string]*FDescCache{},
-		noRemove: noRemove,
+		dsc:       map[string]*FDescCache{},
+		noRemove:  noRemove,
+		available: make(chan struct{}, 1),
 	}
 }
 
 func (f *FSControllerCache) AcquireRead(path string, p []byte, off int64) (n int, err error) {
-	desc := f.acquire(path)
-
-	if desc == nil {
+	path = filepath.Clean(path)
+	for {
+		desc := f.acquire(path)
+		if desc != nil {
+			return f.read(desc, p, off)
+		}
 		f.mx.Lock()
 		desc = f.dsc[path]
 		if desc == nil {
-			if len(f.dsc) >= CachedFDLimit {
-				for !f.clean() {
-					// Retry till we clean something
-					runtime.Gosched()
+			if CachedFDLimit <= 0 {
+				f.mx.Unlock()
+				fl, err := os.Open(path)
+				if err != nil {
+					return 0, err
 				}
+				defer fl.Close()
+				return fl.ReadAt(p, off)
+			}
+			if len(f.dsc) >= CachedFDLimit && !f.clean() {
+				f.mx.Unlock()
+				// A completed read or removal makes another eviction possible.
+				<-f.available
+				continue
 			}
 
 			fl, err := os.Open(path)
@@ -63,14 +79,27 @@ func (f *FSControllerCache) AcquireRead(path string, p []byte, off int64) (n int
 			f.dsc[path] = desc
 			f.mx.Unlock()
 		} else {
-			f.mx.Unlock()
 			desc.mx.RLock()
+			f.mx.Unlock()
 		}
 		desc.usedAt.Store(time.Now().UnixNano())
+		return f.read(desc, p, off)
 	}
-	defer desc.mx.RUnlock()
+}
 
+func (f *FSControllerCache) read(desc *FDescCache, p []byte, off int64) (n int, err error) {
+	defer func() {
+		desc.mx.RUnlock()
+		f.signalAvailable()
+	}()
 	return desc.file.ReadAt(p, off)
+}
+
+func (f *FSControllerCache) signalAvailable() {
+	select {
+	case f.available <- struct{}{}:
+	default:
+	}
 }
 
 func (f *FSControllerCache) acquire(path string) *FDescCache {
@@ -91,17 +120,25 @@ func (f *FSControllerCache) acquire(path string) *FDescCache {
 func (f *FSControllerCache) clean() bool {
 	var oldest *FDescCache
 
-	// Find the oldest descriptor
+	// Keep the oldest idle descriptor locked until it has been removed.
 	for _, desc := range f.dsc {
-		if oldest == nil || desc.usedAt.Load() < oldest.usedAt.Load() {
-			oldest = desc
+		if oldest != nil && desc.usedAt.Load() >= oldest.usedAt.Load() {
+			continue
 		}
+		if !desc.mx.TryLock() {
+			continue
+		}
+		if oldest != nil {
+			oldest.mx.Unlock()
+		}
+		oldest = desc
 	}
 
-	if oldest != nil && oldest.mx.TryLock() {
+	if oldest != nil {
 		defer oldest.mx.Unlock()
 		_ = oldest.file.Close()
 		delete(f.dsc, oldest.path)
+		f.signalAvailable()
 		return true
 	}
 	return false
@@ -113,17 +150,11 @@ func (f *FSControllerCache) RemoveFile(path string) error {
 		return nil
 	}
 
+	path = filepath.Clean(path)
 	f.mx.Lock()
 	defer f.mx.Unlock()
-
-	if desc := f.dsc[path]; desc != nil {
-		desc.mx.Lock()
-		_ = desc.file.Close()
-		desc.mx.Unlock()
-		delete(f.dsc, path)
-	}
-
-	path = filepath.Clean(path)
+	f.invalidateLocked(path)
+	defer f.signalAvailable()
 
 	remove := func() error {
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
@@ -157,4 +188,41 @@ func (f *FSControllerCache) RemoveFile(path string) error {
 	}
 
 	return remove()
+}
+
+func (f *FSControllerCache) invalidateLocked(path string) {
+	if desc := f.dsc[path]; desc != nil {
+		desc.mx.Lock()
+		_ = desc.file.Close()
+		delete(f.dsc, path)
+		desc.mx.Unlock()
+	}
+}
+
+// ResizeFile preserves already downloaded data and refreshes cached descriptors.
+func (f *FSControllerCache) ResizeFile(path string, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("negative file size")
+	}
+	path = filepath.Clean(path)
+	f.mx.Lock()
+	defer f.mx.Unlock()
+	f.invalidateLocked(path)
+	defer f.signalAvailable()
+	return resizeFile(path, size)
+}
+
+// RemoveDir removes generated cache data, independently of noRemove for content.
+func (f *FSControllerCache) RemoveDir(path string) error {
+	path = filepath.Clean(path)
+	f.mx.Lock()
+	defer f.mx.Unlock()
+	prefix := path + string(filepath.Separator)
+	for name := range f.dsc {
+		if name == path || strings.HasPrefix(name, prefix) {
+			f.invalidateLocked(name)
+		}
+	}
+	defer f.signalAvailable()
+	return os.RemoveAll(path)
 }

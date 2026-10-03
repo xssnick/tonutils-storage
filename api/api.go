@@ -50,6 +50,7 @@ type File struct {
 type Peer struct {
 	Addr          string `json:"addr"`
 	ID            string `json:"id"`
+	Category      string `json:"category"`
 	UploadSpeed   uint64 `json:"upload_speed"`
 	DownloadSpeed uint64 `json:"download_speed"`
 }
@@ -553,6 +554,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 			res.Peers = append(res.Peers, Peer{
 				Addr:          p.Addr,
 				ID:            id,
+				Category:      string(p.Category()),
 				UploadSpeed:   p.GetUploadSpeed(),
 				DownloadSpeed: p.GetDownloadSpeed(),
 			})

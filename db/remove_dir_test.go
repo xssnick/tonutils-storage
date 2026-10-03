@@ -1,10 +1,36 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestRecursiveEmptyDeleteWideDirectory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "bag")
+	for i := 0; i < 150; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("dir-%03d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	done := make(chan error, 1)
+	go func() {
+		done <- recursiveEmptyDelete(buildTreeFromDir(root), NewFSControllerCache(false))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("directory cleanup did not finish")
+	}
+	if _, err := os.Stat(root); !os.IsNotExist(err) {
+		t.Fatalf("directory remains after cleanup: %v", err)
+	}
+}
 
 func TestRecursiveEmptyDeleteRemovesIgnoredSystemFiles(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "bag")

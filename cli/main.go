@@ -849,6 +849,7 @@ type bagInfoSnapshot struct {
 type bagPeerSnapshot struct {
 	ID            string
 	Addr          string
+	Category      storage.PeerCategory
 	DownloadSpeed uint64
 	UploadSpeed   uint64
 	Downloaded    uint64
@@ -916,12 +917,13 @@ func info(bagId string) {
 	}
 
 	peerTable := pterm.TableData{
-		{"Peer ID", "Address", "Download", "Upload", "Downloaded", "Uploaded"},
+		{"Peer ID", "Address", "Category", "Download", "Upload", "Downloaded", "Uploaded"},
 	}
 	for _, peer := range peers {
 		peerTable = append(peerTable, []string{
 			peer.ID,
 			peer.Addr,
+			string(peer.Category),
 			storage.ToSpeed(peer.DownloadSpeed),
 			storage.ToSpeed(peer.UploadSpeed),
 			storage.ToSz(peer.Downloaded),
@@ -1065,6 +1067,7 @@ func collectBagInfo(tor *storage.Torrent) (*bagInfoSnapshot, []bagPeerSnapshot, 
 		peers = append(peers, bagPeerSnapshot{
 			ID:            id,
 			Addr:          peer.Addr,
+			Category:      peer.Category(),
 			DownloadSpeed: peer.GetDownloadSpeed(),
 			UploadSpeed:   peer.GetUploadSpeed(),
 			Downloaded:    peer.Downloaded,

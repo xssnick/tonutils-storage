@@ -22,31 +22,25 @@ func buildTreeFromDir(baseDir string) *Node {
 	root := &Node{
 		Id: baseDir,
 	}
-	queue := make(chan *Node, 100)
-	queue <- root
-	for {
-		if len(queue) == 0 {
-			break
+	queue := []*Node{root}
+	for head := 0; head < len(queue); head++ {
+		data := queue[head]
+		// Iterate all the contents in the dir
+		curDir := (*data).Id
+		isDir, err := ifDir(curDir)
+		if err != nil {
+			continue
 		}
-		data, ok := <-queue
-		if ok {
-			// Iterate all the contents in the dir
-			curDir := (*data).Id
-			isDir, err := ifDir(curDir)
-			if err != nil {
-				continue
-			}
-			if isDir {
-				contents, _ := os.ReadDir(curDir)
+		if isDir {
+			contents, _ := os.ReadDir(curDir)
 
-				data.Children = make([]*Node, len(contents))
-				for i, content := range contents {
-					node := new(Node)
-					node.Id = filepath.Join(curDir, content.Name())
-					data.Children[i] = node
-					if content.IsDir() {
-						queue <- node
-					}
+			data.Children = make([]*Node, len(contents))
+			for i, content := range contents {
+				node := new(Node)
+				node.Id = filepath.Join(curDir, content.Name())
+				data.Children[i] = node
+				if content.IsDir() {
+					queue = append(queue, node)
 				}
 			}
 		}

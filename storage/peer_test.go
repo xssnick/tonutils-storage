@@ -1,11 +1,87 @@
 package storage
 
 import (
+	"context"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestPeerInfoCategoryTracksAdvertisedPieces(t *testing.T) {
+	tor := &Torrent{
+		Info:      &TorrentInfo{PieceSize: 1, FileSize: 9},
+		wake:      newWakeSig(),
+		globalCtx: context.Background(),
+	}
+	peer := &storagePeer{torrent: tor}
+	info := &PeerInfo{peer: peer}
+
+	if got := info.Category(); got != PeerCategoryUnknown {
+		t.Fatalf("before init: got %q, want unknown", got)
+	}
+
+	if err := peer.applySessionUpdate(UpdateInit{HavePieces: []byte{0xff, 0x00}}); err != nil {
+		t.Fatalf("apply partial mask: %v", err)
+	}
+	if got := info.Category(); got != PeerCategoryLeech {
+		t.Fatalf("missing final piece: got %q, want leech", got)
+	}
+
+	if err := peer.applySessionUpdate(UpdateHavePieces{PieceIDs: []int32{8}}); err != nil {
+		t.Fatalf("apply new piece: %v", err)
+	}
+	if got := info.Category(); got != PeerCategorySeed {
+		t.Fatalf("all pieces present: got %q, want seed", got)
+	}
+
+	peer.session.resetForReinit(2, time.Now())
+	peer.piecesMx.Lock()
+	peer.resetPieceTrackingLocked(9)
+	peer.piecesMx.Unlock()
+	if got := info.Category(); got != PeerCategoryUnknown {
+		t.Fatalf("after reinit: got %q, want unknown", got)
+	}
+
+	if err := peer.applySessionUpdate(UpdateInit{HavePieces: []byte{0x00, 0x00}}); err != nil {
+		t.Fatalf("apply empty mask: %v", err)
+	}
+	if got := info.Category(); got != PeerCategoryLeech {
+		t.Fatalf("no pieces: got %q, want leech", got)
+	}
+}
+
+func TestPeerInfoCategoryWaitsForCompleteMask(t *testing.T) {
+	piecesNum := uint32(maxPiecesBytesPerRequest*8 + 1)
+	tor := &Torrent{
+		Info:      &TorrentInfo{PieceSize: 1, FileSize: uint64(piecesNum)},
+		wake:      newWakeSig(),
+		globalCtx: context.Background(),
+	}
+	peer := &storagePeer{torrent: tor}
+	info := &PeerInfo{peer: peer}
+
+	firstChunk := make([]byte, maxPiecesBytesPerRequest)
+	for i := range firstChunk {
+		firstChunk[i] = 0xff
+	}
+	if err := peer.applySessionUpdate(UpdateInit{HavePieces: firstChunk}); err != nil {
+		t.Fatalf("apply first chunk: %v", err)
+	}
+	if got := info.Category(); got != PeerCategoryUnknown {
+		t.Fatalf("before last chunk: got %q, want unknown", got)
+	}
+
+	if err := peer.applySessionUpdate(UpdateInit{
+		HavePiecesOffset: int32(maxPiecesBytesPerRequest * 8),
+		HavePieces:       []byte{0x01},
+	}); err != nil {
+		t.Fatalf("apply last chunk: %v", err)
+	}
+	if got := info.Category(); got != PeerCategorySeed {
+		t.Fatalf("after last chunk: got %q, want seed", got)
+	}
+}
 
 func TestStoragePeerTouchRefreshesActivity(t *testing.T) {
 	tor := &Torrent{

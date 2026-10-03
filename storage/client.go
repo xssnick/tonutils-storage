@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/kevinms/leakybucket-go"
 	"github.com/xssnick/tonutils-go/adnl/address"
 	"github.com/xssnick/tonutils-go/adnl/dht"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
@@ -20,7 +19,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 )
 
 var Logger = func(...any) {}
@@ -112,6 +110,7 @@ type storagePeer struct {
 	pendingHavePieces  []int32
 
 	piecesMx      sync.RWMutex
+	sessionMx     sync.Mutex
 	prepareInfoMx sync.Mutex
 
 	fails  int32
@@ -646,8 +645,10 @@ type TorrentInfo struct {
 }
 
 type SpeedLimit struct {
+	mx          sync.Mutex
 	bytesPerSec uint64
-	bucket      unsafe.Pointer
+	tokens      float64
+	lastAt      time.Time
 }
 
 type TorrentServer interface {
@@ -672,38 +673,49 @@ func NewConnector(srv TorrentServer) *Connector {
 }
 
 func (s *SpeedLimit) SetLimit(bytesPerSec uint64) {
-	if bytesPerSec == 0 {
-		atomic.StoreUint64(&s.bytesPerSec, 0)
-		atomic.StorePointer(&s.bucket, unsafe.Pointer(nil))
-		return
-	}
-
 	if bytesPerSec > math.MaxInt64/3 {
 		bytesPerSec = math.MaxInt64 / 3
 	}
-
-	atomic.StoreUint64(&s.bytesPerSec, bytesPerSec)
-
-	b := leakybucket.NewLeakyBucket(float64(bytesPerSec), int64(bytesPerSec*3))
-	atomic.StorePointer(&s.bucket, unsafe.Pointer(b))
+	s.mx.Lock()
+	defer s.mx.Unlock()
+	s.bytesPerSec = bytesPerSec
+	s.tokens = float64(bytesPerSec * 3)
+	s.lastAt = time.Now()
 }
 
 func (s *SpeedLimit) GetLimit() uint64 {
-	return atomic.LoadUint64(&s.bytesPerSec)
+	s.mx.Lock()
+	defer s.mx.Unlock()
+	return s.bytesPerSec
 }
 
-func (s *SpeedLimit) Throttle(_ context.Context, sz uint64) error {
-	b := (*leakybucket.LeakyBucket)(atomic.LoadPointer(&s.bucket))
-	if b != nil {
-		full := uint64(b.Capacity())
-		if sz < full {
-			full = sz
-		}
-
-		if b.Remaining() < int64(full) || b.Add(int64(sz)) == 0 {
-			return fmt.Errorf("limited")
-		}
+func (s *SpeedLimit) Throttle(ctx context.Context, sz uint64) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	return s.throttleAt(sz, time.Now())
+}
+
+func (s *SpeedLimit) throttleAt(sz uint64, now time.Time) error {
+	s.mx.Lock()
+	defer s.mx.Unlock()
+	if s.bytesPerSec == 0 || sz == 0 {
+		return nil
+	}
+
+	capacity := float64(s.bytesPerSec * 3)
+	if now.After(s.lastAt) {
+		s.tokens = math.Min(capacity, s.tokens+now.Sub(s.lastAt).Seconds()*float64(s.bytesPerSec))
+		s.lastAt = now
+	}
+	required := math.Min(float64(sz), capacity)
+	if s.tokens < required {
+		return fmt.Errorf("limited")
+	}
+	// A piece larger than the burst is admitted only when the bucket is full.
+	// Charge its entire size as debt so repeated oversized pieces still obey
+	// the configured rate instead of paying only the bucket's capacity.
+	s.tokens -= float64(sz)
 	return nil
 }
 
@@ -874,10 +886,13 @@ func (p *storagePeer) initializeSession(attempt *peerSessionAttempt, doPing bool
 	var err error
 	defer func() {
 		if err == nil {
+			p.sessionMx.Lock()
 			if !p.isSessionAttemptCurrent(*attempt) {
+				p.sessionMx.Unlock()
 				return
 			}
 			p.session.markLocalInitSent()
+			p.sessionMx.Unlock()
 			p.torrent.wake.fire()
 
 			Logger("[STORAGE] SESSION INITIALIZED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", attempt.id, "GENERATION", attempt.generation)
@@ -976,11 +991,18 @@ func (p *storagePeer) pingWithRetry(ctx context.Context) error {
 
 func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int64, error) {
 	tm := time.Now()
+	p.torrent.mx.RLock()
+	info := p.torrent.Info
+	p.torrent.mx.RUnlock()
+	if info == nil || info.PieceSize == 0 || id >= info.PiecesNum() {
+		return nil, 0, fmt.Errorf("piece %d is out of range", id)
+	}
+	expectedSize := min(uint64(info.PieceSize), info.FileSize-uint64(id)*uint64(info.PieceSize))
 
 	var piece Piece
 	err := func() error {
 		err := p.conn.withDataQueueSlot(ctx, true, func() error {
-			err := p.conn.rldp.DoQuery(ctx, 4096+uint64(p.torrent.Info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
+			err := p.conn.rldp.DoQuery(ctx, 4096+uint64(info.PieceSize)*2, overlay.WrapQuery(p.overlay, &GetPiece{int32(id)}), &piece)
 			if err != nil {
 				return fmt.Errorf("failed to query piece %d. err: %w", id, err)
 			}
@@ -996,13 +1018,16 @@ func (p *storagePeer) downloadPiece(ctx context.Context, id uint32) (*Piece, int
 			}
 			return err
 		}
+		if uint64(len(piece.Data)) != expectedSize {
+			return fmt.Errorf("piece %d has incorrect size: got %d, want %d", id, len(piece.Data), expectedSize)
+		}
 
 		proof, err := cell.FromBOC(piece.Proof)
 		if err != nil {
 			return fmt.Errorf("failed to parse BoC of piece %d, err: %w", id, err)
 		}
 
-		err = cell.CheckProof(proof, p.torrent.Info.RootHash)
+		err = cell.CheckProof(proof, info.RootHash)
 		if err != nil {
 			return fmt.Errorf("proof check of piece %d failed: %w", id, err)
 		}

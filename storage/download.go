@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
-	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -81,13 +80,15 @@ func (c *pieceCommitter) Flush() error {
 		}
 	}
 
+	pieces := make(map[uint32]*PieceInfo, len(c.pending))
 	for _, piece := range c.pending {
-		if err := c.torrent.setPiece(piece.id, &PieceInfo{
+		pieces[piece.id] = &PieceInfo{
 			StartFileIndex: piece.startFileIndex,
 			Proof:          piece.proof,
-		}, false); err != nil {
-			return fmt.Errorf("failed to save piece %d to db: %w", piece.id, err)
 		}
+	}
+	if err := c.torrent.setPieces(pieces); err != nil {
+		return fmt.Errorf("failed to save pieces to db: %w", err)
 	}
 
 	c.pending = nil
@@ -119,7 +120,10 @@ func (t *Torrent) reportDownloadEvent(downloadFlag *bool, report func(Event), ev
 		report(event)
 	}
 
-	if event.Name != EventErr || t.currentDownloadFlag != downloadFlag {
+	t.mx.RLock()
+	currentFlag, pause := t.currentDownloadFlag, t.pause
+	t.mx.RUnlock()
+	if event.Name != EventErr || currentFlag != downloadFlag {
 		return
 	}
 
@@ -129,8 +133,8 @@ func (t *Torrent) reportDownloadEvent(downloadFlag *bool, report func(Event), ev
 	}
 
 	Logger("download failed for", hex.EncodeToString(t.BagID), "err:", err.Error())
-	if t.pause != nil {
-		t.pause()
+	if pause != nil {
+		pause()
 	}
 }
 
@@ -151,7 +155,13 @@ func (t *Torrent) prepareDownloader(ctx context.Context) error {
 			t.downloader, err = t.connector.CreateDownloader(ctx, t)
 			if err != nil {
 				Logger("bag information not resolved:", err.Error())
-				time.Sleep(1 * time.Second)
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-ctx.Done():
+					timer.Stop()
+					return ctx.Err()
+				case <-timer.C:
+				}
 				continue
 			}
 		}
@@ -182,30 +192,43 @@ func downloadPrefetchPieces(pieceSize uint32, bytesLimit uint64) uint32 {
 }
 
 func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error) {
+	return t.runVerification(ctx, deep)
+}
+
+func (t *Torrent) verify(ctx context.Context, deep, restart bool) (intact bool, err error) {
 	tm := time.Now()
 	Logger("[VERIFICATION] PREPARING:", hex.EncodeToString(t.BagID))
 
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	t.mx.RLock()
+	info, header := t.Info, t.Header
+	downloadAll, currentFlag := t.downloadAll, t.currentDownloadFlag
+	files := append([]uint32(nil), t.activeFiles...)
+	t.mx.RUnlock()
 	intact = true
-	if t.Header == nil {
+	if header == nil || info == nil {
 		return intact, nil
 	}
 
-	rootPath := filepath.Join(t.Path, string(t.Header.DirName))
-	checked := make([]bool, t.Info.PiecesNum())
+	rootPath := filepath.Join(t.Path, string(header.DirName))
+	checked := make([]bool, info.PiecesNum())
 
-	var files []uint32
-	if t.downloadAll {
-		for i := uint32(0); i < t.Header.FilesCount; i++ {
+	if downloadAll {
+		files = nil
+		for i := uint32(0); i < header.FilesCount; i++ {
 			files = append(files, i)
 		}
-	} else {
-		files = t.GetActiveFilesIDs()
 	}
 
-	Logger("[VERIFICATION] STARTED:", hex.EncodeToString(t.BagID), "FILES:", len(files), "DOWNLOAD ALL:", t.downloadAll)
+	Logger("[VERIFICATION] STARTED:", hex.EncodeToString(t.BagID), "FILES:", len(files), "DOWNLOAD ALL:", downloadAll)
 
 	needDownload := false
 	for _, f := range files {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		info, err := t.GetFileOffsetsByID(f)
 		if err != nil {
 			Logger("[VERIFICATION] GET FILE ID ERR:", hex.EncodeToString(t.BagID), err.Error())
@@ -219,84 +242,12 @@ func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error
 		if !t.db.GetFS().Exists(path) {
 			isDelete = true
 			Logger("[VERIFICATION] FAILED FOR FILE:", path, "BAG:", hex.EncodeToString(t.BagID), "Not exists")
-		} else if deep {
+		} else if deep && info.Size > 0 {
 			if info.Size > 256*1024*1024 {
-				type jobRes struct {
-					piece uint32
-					err   error
+				isDelete, err = t.verifyFilePieces(ctx, info, checked)
+				if err != nil {
+					return false, err
 				}
-				type job struct {
-					piece uint32
-					res   chan jobRes
-				}
-
-				jobs := make(chan job, 100)
-				results := make(chan jobRes, 100)
-				ctxWorker, cancel := context.WithCancel(ctx)
-
-				workers := (runtime.NumCPU() / 3) * 2
-				if workers == 0 {
-					workers = 1
-				}
-
-				for i := 0; i < workers; i++ {
-					go func() {
-						for {
-							select {
-							case <-ctxWorker.Done():
-								return
-							case j := <-jobs:
-								_, err := t.getPieceInternal(j.piece, true)
-								select {
-								case <-ctxWorker.Done():
-									return
-								case j.res <- jobRes{piece: j.piece, err: err}:
-								}
-							}
-						}
-					}()
-				}
-
-				go func() {
-					for i := info.FromPiece; i <= info.ToPiece; i++ {
-						if checked[i] {
-							continue
-						}
-
-						select {
-						case <-ctxWorker.Done():
-							return
-						case jobs <- job{piece: i, res: results}:
-						}
-					}
-				}()
-
-				for i := info.FromPiece; i <= info.ToPiece; i++ {
-					if checked[i] {
-						continue
-					}
-
-					select {
-					case <-ctxWorker.Done():
-						cancel()
-						return false, ctxWorker.Err()
-					case res := <-results:
-						if res.err != nil {
-							if !strings.Contains(res.err.Error(), "is not downloaded") {
-								Logger("[VERIFICATION] FAILED FOR PIECE:", res.piece, "BAG:", hex.EncodeToString(t.BagID), res.err.Error())
-								isDelete = true
-							}
-						}
-
-						// mark only for existing pieces to remove not only 1 file in not exist
-						checked[res.piece] = res.err == nil
-					}
-
-					if isDelete {
-						break
-					}
-				}
-				cancel()
 			} else {
 				for i := info.FromPiece; i <= info.ToPiece; i++ {
 					if checked[i] {
@@ -327,12 +278,13 @@ func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error
 			intact = false
 			// we delete whole file because size can be > than expected
 			// and just replace of piece will be not enough
-			for i := info.FromPiece; i <= info.ToPiece; i++ {
-				// file was deleted, delete pieces records also
-				if err = t.removePiece(i); err != nil {
-					Logger("[VERIFICATION] REMOVE PIECE ERR:", hex.EncodeToString(t.BagID), i, err.Error())
-
-					return false, err
+			if info.Size > 0 {
+				for i := info.FromPiece; i <= info.ToPiece; i++ {
+					// file was deleted, delete pieces records also
+					if err = t.removePiece(i); err != nil {
+						Logger("[VERIFICATION] REMOVE PIECE ERR:", hex.EncodeToString(t.BagID), i, err.Error())
+						return false, err
+					}
 				}
 			}
 
@@ -349,15 +301,13 @@ func (t *Torrent) Verify(ctx context.Context, deep bool) (intact bool, err error
 		}
 	}
 
-	if needDownload {
+	if needDownload && restart && ctx.Err() == nil {
 		// restart download of missing pieces
-		currFlag := t.currentDownloadFlag
-		currPause := t.pause
-		_ = t.startDownload(func(event Event) {
-			if event.Name == EventErr && currFlag == t.currentDownloadFlag {
-				currPause()
-			}
-		})
+		t.mx.Lock()
+		if t.currentDownloadFlag == currentFlag && t.globalCtx != nil && t.globalCtx.Err() == nil {
+			_ = t.startDownload(nil)
+		}
+		t.mx.Unlock()
 	}
 
 	Logger("[VERIFICATION] COMPLETED:", hex.EncodeToString(t.BagID), "NEED DOWNLOAD:", needDownload, "INTACT:", intact, "TOOK:", time.Since(tm).String())
@@ -394,12 +344,22 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				stop()
 			}
 		}()
+		t.dataMx.Lock()
+		defer t.dataMx.Unlock()
+		t.mx.RLock()
+		verifying := t.isVerificationInProgress
+		t.mx.RUnlock()
+		if ctx.Err() != nil || verifying {
+			return
+		}
 
 		piecesMap := map[uint32]bool{}
 		var list []fileInfo
 
 		t.mx.RLock()
 		info, header := t.Info, t.Header
+		downloadAll, downloadOrdered := t.downloadAll, t.downloadOrdered
+		files := append([]uint32(nil), t.activeFiles...)
 		t.mx.RUnlock()
 		if header == nil || info == nil {
 			if err := t.prepareDownloader(ctx); err != nil {
@@ -422,51 +382,42 @@ func (t *Torrent) startDownload(report func(Event)) error {
 			return
 		}
 
-		var downloaded uint64
 		rootPath := filepath.Join(t.Path, string(header.DirName))
 
-		var files []uint32
-		if t.downloadAll {
+		if downloadAll {
+			files = nil
 			for i := uint32(0); i < header.FilesCount; i++ {
 				files = append(files, i)
 			}
 		} else {
-			files = t.GetActiveFilesIDs()
 			if len(files) == 0 {
 				// do not stop download because we just loaded headers
 				// TODO: make it better
-				t.stopDownload = nil
+				t.mx.Lock()
+				if t.currentDownloadFlag == &flag {
+					t.stopDownload = nil
+				}
+				t.mx.Unlock()
 			}
 		}
 
 		list = make([]fileInfo, 0, len(files))
+		sort.Slice(files, func(i, j int) bool { return files[i] < files[j] })
+		cacheReader := &downloadCacheReader{}
 		for _, f := range files {
+			if err := ctx.Err(); err != nil {
+				return
+			}
 			info, err := t.GetFileOffsetsByID(f)
 			if err != nil {
 				continue
 			}
 
-			needFile := false
-
-			if !t.db.GetFS().Exists(filepath.Join(rootPath, info.Name)) {
-				needFile = true
-				for i := info.FromPiece; i <= info.ToPiece; i++ {
-					piecesMap[i] = true
-					// file was deleted, delete pieces records also
-					_ = t.removePiece(i)
-				}
-			} else {
-				for i := info.FromPiece; i <= info.ToPiece; i++ {
-					// TODO: read file parts and compare with hashes
-					if _, err = t.getPiece(i); err != nil {
-						needFile = true
-						piecesMap[i] = true
-						continue
-					}
-					downloaded++
-				}
+			needFile, err := t.planDownloadFile(ctx, rootPath, info, piecesMap, cacheReader)
+			if err != nil {
+				emit(Event{Name: EventErr, Value: err})
+				return
 			}
-
 			if needFile {
 				list = append(list, fileInfo{info: info, path: info.Name})
 			}
@@ -493,12 +444,12 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				return
 			}
 
-			if t.downloadOrdered {
+			if downloadOrdered {
 				prefetch := downloadPrefetchPieces(info.PieceSize, DownloadOrderedPrefetchBytes)
 				fetch := NewPreFetcher(ctx, t, emit, prefetch, pieces)
 				defer fetch.Stop()
 
-				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, info.PieceSize, report, fetch); err != nil {
+				if err := writeOrdered(ctx, t, list, piecesMap, rootPath, info.PieceSize, emit, fetch); err != nil {
 					emit(Event{Name: EventErr, Value: err})
 					return
 				}
@@ -544,6 +495,9 @@ func (t *Torrent) startDownload(report func(Event)) error {
 				}()
 
 				for i := 0; i < left; i++ {
+					if err := ctx.Err(); err != nil {
+						return
+					}
 					select {
 					case e := <-ready:
 						err := func(piece uint32) error {
@@ -552,6 +506,10 @@ func (t *Torrent) startDownload(report func(Event)) error {
 								return fmt.Errorf("failed to download piece %d: %w", piece, err)
 							}
 							defer fetch.Free(piece)
+							cached, err := t.cacheBoundaryPiece(piece, currentPiece, filesMap)
+							if err != nil {
+								return fmt.Errorf("failed to cache boundary piece %d: %w", piece, err)
+							}
 
 							pieceFiles, err := t.GetFilesInPiece(piece)
 							if err != nil {
@@ -559,6 +517,9 @@ func (t *Torrent) startDownload(report func(Event)) error {
 							}
 
 							for _, file := range pieceFiles {
+								if err := ctx.Err(); err != nil {
+									return err
+								}
 								if !filesMap[file.Index] {
 									continue
 								}
@@ -580,7 +541,13 @@ func (t *Torrent) startDownload(report func(Event)) error {
 											currentFile, err = t.db.GetFS().Open(filepath.Join(rootPath, file.Name), OpenModeWrite)
 											if err != nil {
 												Logger(fmt.Errorf("failed to create or open file %s: %w", file.Name, err).Error())
-												time.Sleep(time.Duration(x*50) * time.Millisecond)
+												timer := time.NewTimer(time.Duration(x*50) * time.Millisecond)
+												select {
+												case <-ctx.Done():
+													timer.Stop()
+													return ctx.Err()
+												case <-timer.C:
+												}
 												continue
 											}
 											currentFileId = file.Index
@@ -626,7 +593,14 @@ func (t *Torrent) startDownload(report func(Event)) error {
 								}
 							}
 
-							if err = committer.Add(piece, pieceFiles[0].Index, currentProof); err != nil {
+							startFileIndex := uint32(0)
+							if len(pieceFiles) > 0 {
+								startFileIndex = pieceFiles[0].Index
+							}
+							if cached {
+								startFileIndex = cachedPieceStartFileIndex
+							}
+							if err = committer.Add(piece, startFileIndex, currentProof); err != nil {
 								return err
 							}
 
@@ -673,7 +647,14 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 	var pieceStartFileIndex uint32
 	var currentPiece, currentProof []byte
 	committer := newPieceCommitter(t)
+	selected := make(map[uint32]bool, len(list))
+	for _, file := range list {
+		selected[file.info.Index] = true
+	}
 	for _, off := range list {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := func() error {
 			if strings.Contains(off.path, "..") {
 				Logger("Malicious file with path traversal was skipped: " + off.path)
@@ -693,6 +674,9 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 			notEmptyFile := off.info.FromPiece != off.info.ToPiece || off.info.FromPieceOffset != off.info.ToPieceOffset
 			if notEmptyFile {
 				for piece := off.info.FromPiece; piece <= off.info.ToPiece; piece++ {
+					if err := ctx.Err(); err != nil {
+						return err
+					}
 					if !piecesMap[piece] {
 						continue
 					}
@@ -713,6 +697,13 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 						}
 
 						currentPieceId = piece
+						cached, cacheErr := t.cacheBoundaryPiece(piece, currentPiece, selected)
+						if cacheErr != nil {
+							return fmt.Errorf("failed to cache boundary piece %d: %w", piece, cacheErr)
+						}
+						if cached {
+							pieceStartFileIndex = cachedPieceStartFileIndex
+						}
 					}
 					part := currentPiece
 					offset := int64(piece-off.info.FromPiece) * int64(pieceSize)
@@ -742,7 +733,9 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 			if err = committer.Flush(); err != nil {
 				return err
 			}
-			report(Event{Name: EventFileDownloaded, Value: off.path})
+			if report != nil {
+				report(Event{Name: EventFileDownloaded, Value: off.path})
+			}
 			return nil
 		}()
 		if err != nil {

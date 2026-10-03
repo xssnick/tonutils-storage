@@ -17,6 +17,35 @@ type PeerInfo struct {
 	downloadSpeed *speedInfo
 }
 
+type PeerCategory string
+
+const (
+	PeerCategoryUnknown PeerCategory = "unknown"
+	PeerCategorySeed    PeerCategory = "seed"
+	PeerCategoryLeech   PeerCategory = "leech"
+)
+
+// Category classifies the pieces advertised by the peer for this bag.
+// Until the complete initial mask is received, missing bits are not reliable.
+func (p *PeerInfo) Category() PeerCategory {
+	if p.peer == nil {
+		return PeerCategoryUnknown
+	}
+
+	peer := p.peer
+	peer.piecesMx.RLock()
+	defer peer.piecesMx.RUnlock()
+
+	if atomic.LoadInt32(&peer.session.remoteInitComplete) == 0 ||
+		peer.hasPiecesNum == 0 || peer.initReceivedChunks != peer.initExpectedChunks {
+		return PeerCategoryUnknown
+	}
+	if atomic.LoadUint32(&peer.knownPieces) == peer.hasPiecesNum {
+		return PeerCategorySeed
+	}
+	return PeerCategoryLeech
+}
+
 const (
 	peerIdleTimeout       = 10 * time.Minute
 	peerIdleSweepInterval = 30 * time.Second
@@ -90,10 +119,16 @@ func (t *Torrent) ResetDownloadPeer(id []byte) {
 
 func (t *Torrent) UpdateUploadedPeer(peer *storagePeer, bytes uint64) {
 	uploaded := atomic.AddUint64(&t.stats.Uploaded, bytes)
-	t.maybeStoreUploadStats(uploaded, false)
+	closed := peer.closerCtx != nil && peer.closerCtx.Err() != nil
+	t.maybeStoreUploadStats(uploaded, closed)
 
 	t.peersMx.Lock()
 	defer t.peersMx.Unlock()
+	// A final ACK can arrive after this bag released a shared connection.
+	// Count the completed upload without recreating a closed storage peer.
+	if peer.closerCtx != nil && peer.closerCtx.Err() != nil {
+		return
+	}
 
 	p := t.touchPeer(peer)
 	p.Uploaded += bytes
@@ -103,6 +138,12 @@ func (t *Torrent) maybeStoreUploadStats(uploaded uint64, force bool) {
 	if t.db == nil {
 		return
 	}
+	t.uploadStatsMx.Lock()
+	defer t.uploadStatsMx.Unlock()
+	// The caller's snapshot may predate another completed upload or flush.
+	// Read it again after serializing persistence to prevent older writes from
+	// overwriting newer totals.
+	uploaded = atomic.LoadUint64(&t.stats.Uploaded)
 
 	now := time.Now()
 	stored := atomic.LoadUint64(&t.stats.StoredUploaded)
@@ -119,11 +160,12 @@ func (t *Torrent) maybeStoreUploadStats(uploaded uint64, force bool) {
 		}
 	}
 
-	if !atomic.CompareAndSwapUint64(&t.stats.StoredUploaded, stored, uploaded) {
+	if err := t.db.UpdateUploadStats(t.BagID, uploaded); err != nil {
+		Logger("[STORAGE] FAILED TO STORE UPLOAD STATS", hex.EncodeToString(t.BagID), err.Error())
 		return
 	}
+	atomic.StoreUint64(&t.stats.StoredUploaded, uploaded)
 	atomic.StoreInt64(&t.stats.LastUploadStatsStoredAtMs, now.UnixMilli())
-	_ = t.db.UpdateUploadStats(t.BagID, uploaded)
 }
 
 func (t *Torrent) flushUploadStats() {

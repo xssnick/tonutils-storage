@@ -8,7 +8,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/syndtr/goleveldb v1.0.0
 	github.com/ton-blockchain/adnl-tunnel v0.2.1
-	github.com/xssnick/tonutils-go v1.18.1-0.20260912133650-6a71844a3e2b
+	github.com/xssnick/tonutils-go v1.18.1-0.20261001115605-60dbbadb3b59
 	github.com/xssnick/tonutils-storage-provider v0.4.3
 	golang.org/x/sync v0.23.0
 )
@@ -26,7 +26,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/net v0.59.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )
 
@@ -41,10 +41,10 @@ require (
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.23 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	github.com/xssnick/raptorq v1.5.2 // indirect
+	github.com/xssnick/raptorq v1.6.0 // indirect
 	github.com/xssnick/ton-payment-network v1.3.1 // indirect
-	golang.org/x/crypto v0.55.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/term v0.45.0 // indirect
-	golang.org/x/text v0.41.0 // indirect; indirects
+	golang.org/x/crypto v0.57.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/term v0.46.0 // indirect
+	golang.org/x/text v0.42.0 // indirect; indirects
 )

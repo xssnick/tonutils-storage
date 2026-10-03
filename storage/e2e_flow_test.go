@@ -689,6 +689,11 @@ func TestE2E_TwoNodeDownloadFlow(t *testing.T) {
 	if seedTorrent.GetUploadStats() == 0 {
 		t.Fatal("expected seeder to report uploaded bytes")
 	}
+	waitUntil(t, time.Second, func() bool {
+		seedSrv.uploadBudget.mx.Lock()
+		defer seedSrv.uploadBudget.mx.Unlock()
+		return seedSrv.uploadBudget.used == 0
+	}, "seeder to return upload memory after final completion ACKs")
 
 	downTorrent.Stop()
 	seedTorrent.Stop()

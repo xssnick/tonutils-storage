@@ -45,8 +45,11 @@ type Server struct {
 	dhtCacheMx    sync.RWMutex
 	findSemaphore chan struct{}
 
-	downloadMaxInflight atomic.Int64
-	downloadInflight    atomic.Int64
+	downloadMaxInflight  atomic.Int64
+	downloadInflight     atomic.Int64
+	downloadSlotsMu      sync.Mutex
+	downloadSlotsChanged chan struct{}
+	uploadBudget         uploadMemoryBudget
 
 	closer func()
 }
@@ -136,20 +139,7 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		return rl
 	}
 
-	extADNL := overlay.CreateExtendedADNL(client)
-	extADNL.SetOnUnknownOverlayQuery(s.handleQuery(extADNL))
-
-	rl := overlay.CreateExtendedRLDP(rldp.NewClientV2(extADNL))
-	rl.SetOnUnknownOverlayQuery(s.handleRLDPQuery(rl))
-
-	rl.SetOnDisconnect(func() {
-		s.mx.Lock()
-		delete(s.bootstrapped, hex.EncodeToString(client.GetID()))
-		s.mx.Unlock()
-	})
-
 	p := &PeerConnection{
-		rldp:             rl,
 		adnl:             client,
 		srv:              s,
 		usedByBags:       map[string]*storagePeer{},
@@ -158,6 +148,20 @@ func (s *Server) bootstrapPeer(client adnl.Peer) *PeerConnection {
 		dataQueue:        make(chan struct{}, DownloadPeerInflightCap),
 		bagsInitQueue:    make(chan struct{}, 8),
 	}
+	extADNL := overlay.CreateExtendedADNL(&uploadTrackingPeer{Peer: client, conn: p})
+	extADNL.SetOnUnknownOverlayQuery(s.handleQuery(extADNL))
+	rl := overlay.CreateExtendedRLDP(rldp.NewClientV2(extADNL))
+	p.rldp = rl
+	rl.SetOnUnknownOverlayQuery(s.handleRLDPQuery(rl))
+	rl.SetOnDisconnect(func() {
+		s.mx.Lock()
+		delete(s.bootstrapped, hex.EncodeToString(client.GetID()))
+		s.mx.Unlock()
+		// Close transport state synchronously before returning its memory permits.
+		rl.Close()
+		p.closeUploadSender()
+		p.releaseUploads()
+	})
 	p.MaxInflightPieces.Store(DownloadInitialPeerInflight)
 	s.bootstrapped[hex.EncodeToString(client.GetID())] = p
 
@@ -337,8 +341,18 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 
 			tm := time.Now()
+			lease, err := p.reserveUpload(transfer, uint64(t.Info.PieceSize), uploadTransferDeadline(ctx, query.Timeout))
+			if err != nil {
+				return answerRLDPStorageError(peer, transfer, query, err)
+			}
+			retained := false
+			defer func() {
+				if !retained {
+					lease.release(false)
+				}
+			}()
 
-			err := t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
+			err = t.GetConnector().ThrottleUpload(ctx, uint64(t.Info.PieceSize))
 			if err != nil {
 				return answerRLDPStorageError(peer, transfer, query, err)
 			}
@@ -349,8 +363,14 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 
 			Logger("[STORAGE] LOADED PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
+			uploadedBytes := uint64(len(pc.Data))
+			lease.setOnComplete(func() { t.UpdateUploadedPeer(stPeer, uploadedBytes) })
 
-			err = peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, pc)
+			uploadSender, err := p.getUploadSender()
+			if err != nil {
+				return err
+			}
+			err = uploadSender.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, pc)
 			if err != nil {
 				Logger("[STORAGE] FAIL ANSWER PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
 
@@ -358,8 +378,11 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			}
 
 			Logger("[STORAGE] SENT PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
-
-			t.UpdateUploadedPeer(stPeer, uint64(len(pc.Data)))
+			retained = true
+			// SendAnswer may extend an already elapsed peer deadline by one
+			// second. Recompute after its initial burst and keep a one-second
+			// margin so slow disk/serialization cannot retire the lease early.
+			lease.retainUntil(uploadTransferDeadline(ctx, query.Timeout).Add(time.Second))
 		case Ping:
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Pong{})
 			if err != nil {
@@ -459,6 +482,8 @@ type incomingSessionUpdate struct {
 }
 
 func (t *Torrent) routeIncomingSessionUpdate(peer *storagePeer, adnlID []byte, update incomingSessionUpdate) error {
+	peer.sessionMx.Lock()
+	defer peer.sessionMx.Unlock()
 	currentSessionID := atomic.LoadInt64(&peer.session.sessionId)
 	if update.sessionID != currentSessionID {
 		Logger("UPDATE SESSION MISSMATCH", update.sessionID, currentSessionID, hex.EncodeToString(adnlID), hex.EncodeToString(t.BagID))
@@ -660,10 +685,17 @@ func (p *storagePeer) sendInitPieces(ctx context.Context, attempt peerSessionAtt
 	isDow, isUpl := p.torrent.IsActiveRaw()
 	cursor := p.torrent.currentNewPiecesCursor()
 
+	snapshot := p.torrent.PiecesMask()
+	p.sessionMx.Lock()
+	if !p.isSessionAttemptCurrent(attempt) {
+		p.sessionMx.Unlock()
+		return errStaleSessionAttempt
+	}
 	p.piecesMx.Lock()
-	p.lastSentPieces = p.torrent.PiecesMask()
+	p.lastSentPieces = snapshot
 	atomic.StoreUint64(&p.lastSentNewPiecesPos, cursor)
 	p.piecesMx.Unlock()
+	p.sessionMx.Unlock()
 
 	sent := uint32(0)
 	for i := uint32(0); sent < num; i++ {
@@ -671,9 +703,7 @@ func (p *storagePeer) sendInitPieces(ctx context.Context, attempt peerSessionAtt
 			return errStaleSessionAttempt
 		}
 
-		p.piecesMx.RLock()
-		have := p.lastSentPieces[i*maxPiecesBytesPerRequest:]
-		p.piecesMx.RUnlock()
+		have := snapshot[i*maxPiecesBytesPerRequest:]
 
 		if len(have) > maxPiecesBytesPerRequest {
 			have = have[:maxPiecesBytesPerRequest]
@@ -747,10 +777,13 @@ func (p *storagePeer) updateHavePieces(ctx context.Context) error {
 			return fmt.Errorf("failed to send have pieces update: %w", err)
 		}
 
+		p.sessionMx.Lock()
 		if !p.isSessionAttemptCurrent(attempt) {
+			p.sessionMx.Unlock()
 			return nil
 		}
 		atomic.StoreUint64(&p.lastSentNewPiecesPos, nextCursor)
+		p.sessionMx.Unlock()
 		p.torrent.compactNewPieces()
 	}
 }
@@ -1171,11 +1204,15 @@ func (p *storagePeer) prepareTorrentInfo(ctx context.Context) error {
 
 		p.torrent.InitMask()
 
+		p.sessionMx.Lock()
 		p.piecesMx.Lock()
 		p.ensurePieceTrackingLocked(info.PiecesNum())
 		p.piecesMx.Unlock()
+		p.sessionMx.Unlock()
 	}
 
+	p.sessionMx.Lock()
+	defer p.sessionMx.Unlock()
 	p.torrent.mx.RLock()
 	info := p.torrent.Info
 	p.torrent.mx.RUnlock()
@@ -1416,9 +1453,17 @@ func (s *Server) GetADNLPrivateKey() ed25519.PrivateKey {
 
 func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *PeerConnection, sessionId *int64) (*storagePeer, *peerSessionAttempt) {
 	t.mx.Lock()
-	defer t.mx.Unlock()
 
 	if n := conn.GetFor(t.BagID); n != nil {
+		var piecesNum uint32
+		if t.Info != nil {
+			piecesNum = t.Info.PiecesNum()
+		}
+		// Updates take sessionMx before reading torrent metadata. Release the
+		// torrent lock before serializing a reset with those updates.
+		t.mx.Unlock()
+		n.sessionMx.Lock()
+		defer n.sessionMx.Unlock()
 		if sessionId == nil {
 			if n.isDownloadUsable() || !n.initProgressTimedOut(time.Now(), 45*time.Second) {
 				return n, nil
@@ -1439,10 +1484,6 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 		generation := n.session.resetForReinit(*sessionId, time.Now())
 		atomic.StoreUint64(&n.lastSentNewPiecesPos, 0)
 
-		var piecesNum uint32
-		if t.Info != nil {
-			piecesNum = t.Info.PiecesNum()
-		}
 		n.piecesMx.Lock()
 		n.resetPieceTrackingLocked(piecesNum)
 		n.lastSentPieces = nil
@@ -1453,6 +1494,7 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 
 		return n, newPeerSessionAttempt(sessionCtx, *sessionId, generation)
 	}
+	defer t.mx.Unlock()
 
 	if sessionId == nil {
 		v := rand.Int63()

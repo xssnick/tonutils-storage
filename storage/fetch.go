@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
-	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,20 +18,26 @@ type piecePack struct {
 }
 
 type PreFetcher struct {
-	torrent     *Torrent
-	ready       atomic.Int32
-	processed   atomic.Int32
-	prefetch    uint32
-	pieceCursor uint32
-	roundRobin  bool
-	pieces      map[uint32]*piecePack
-	piecesList  []byte
+	torrent            *Torrent
+	ready              atomic.Int32
+	processed          atomic.Int32
+	prefetch           uint32
+	pieceCursor        uint32
+	roundRobin         bool
+	pieces             map[uint32]*piecePack
+	piecesList         []byte
+	pendingPieces      []uint32
+	pendingIndex       map[uint32]int
+	pendingCursor      int
+	pendingInitialized bool
+	piecesChanged      chan struct{}
 
 	report func(Event)
 
 	mx    sync.RWMutex
 	ctx   context.Context
 	close func()
+	wg    sync.WaitGroup
 }
 
 type Progress struct {
@@ -65,8 +70,15 @@ func newPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), pr
 			ff.pieces[uint32(id)] = nil
 		}
 	}
+	if roundRobin {
+		ff.initPendingPiecesLocked()
+	}
 
-	go ff.balancer()
+	ff.wg.Add(1)
+	go func() {
+		defer ff.wg.Done()
+		ff.balancer()
+	}()
 
 	return ff
 }
@@ -74,28 +86,38 @@ func newPreFetcher(ctx context.Context, torrent *Torrent, report func(Event), pr
 func (f *PreFetcher) Stop() {
 	f.close()
 	f.torrent.wake.fire()
+	f.wg.Wait()
 }
 
 func (f *PreFetcher) WaitGet(ctx context.Context, piece uint32) ([]byte, []byte, error) {
-	f.mx.RLock()
-	if _, ok := f.pieces[piece]; !ok {
-		panic("unexpected piece requested")
-	}
-	f.mx.RUnlock()
-
 	for {
-		f.mx.RLock()
-		if p := f.pieces[piece]; p != nil {
-			f.mx.RUnlock()
+		f.mx.Lock()
+		p, ok := f.pieces[piece]
+		if !ok {
+			f.mx.Unlock()
+			panic("unexpected piece requested")
+		}
+		if p != nil {
+			f.mx.Unlock()
 			return p.data, p.proof, nil
 		}
-		f.mx.RUnlock()
+		if f.piecesChanged == nil {
+			f.piecesChanged = make(chan struct{})
+		}
+		changed := f.piecesChanged
+		f.mx.Unlock()
+		var stopped <-chan struct{}
+		if f.ctx != nil {
+			stopped = f.ctx.Done()
+		}
 
 		// wait for piece to be ready
 		select {
 		case <-ctx.Done():
 			return nil, nil, ctx.Err()
-		case <-time.After(5 * time.Millisecond):
+		case <-stopped:
+			return nil, nil, f.ctx.Err()
+		case <-changed:
 		}
 	}
 }
@@ -118,6 +140,13 @@ func (f *PreFetcher) markPieceForRetry(piece uint32) {
 	}
 	if f.piecesList[piece] == 2 {
 		f.piecesList[piece] = 1
+		if f.roundRobin {
+			f.initPendingPiecesLocked()
+			if _, ok := f.pendingIndex[piece]; !ok {
+				f.pendingIndex[piece] = len(f.pendingPieces)
+				f.pendingPieces = append(f.pendingPieces, piece)
+			}
+		}
 	}
 	if !f.roundRobin && piece < f.pieceCursor {
 		f.pieceCursor = piece
@@ -182,18 +211,61 @@ func (f *PreFetcher) nextPieceForPeer(peer *storagePeer, available int32) (uint3
 }
 
 func (f *PreFetcher) nextRoundRobinPieceForPeer(peer *storagePeer) (uint32, bool) {
-	start := int(f.pieceCursor % uint32(len(f.piecesList)))
-	for off := 0; off < len(f.piecesList); off++ {
-		idx := (start + off) % len(f.piecesList)
-		if f.piecesList[idx] != 1 {
+	f.initPendingPiecesLocked()
+	if len(f.pendingPieces) == 0 {
+		return 0, false
+	}
+	start := f.pendingCursor % len(f.pendingPieces)
+	for off := 0; off < len(f.pendingPieces); off++ {
+		idx := (start + off) % len(f.pendingPieces)
+		piece := f.pendingPieces[idx]
+		if f.piecesList[piece] != 1 {
 			continue
 		}
-		if peer.hasPieceLocked(uint32(idx)) {
-			f.pieceCursor = uint32((idx + 1) % len(f.piecesList))
-			return uint32(idx), true
+		if peer.hasPieceLocked(piece) {
+			f.pendingCursor = (idx + 1) % len(f.pendingPieces)
+			f.pieceCursor = piece + 1
+			return piece, true
 		}
 	}
 	return 0, false
+}
+
+func (f *PreFetcher) initPendingPiecesLocked() {
+	if f.pendingInitialized {
+		return
+	}
+	f.pendingInitialized = true
+	f.pendingIndex = make(map[uint32]int)
+	for id, need := range f.piecesList {
+		if need == 1 {
+			f.pendingIndex[uint32(id)] = len(f.pendingPieces)
+			f.pendingPieces = append(f.pendingPieces, uint32(id))
+			if uint32(id) < f.pieceCursor {
+				f.pendingCursor++
+			}
+		}
+	}
+}
+
+func (f *PreFetcher) reservePieceLocked(piece uint32) {
+	f.piecesList[piece] = 2
+	if !f.roundRobin {
+		return
+	}
+	idx, ok := f.pendingIndex[piece]
+	if !ok {
+		return
+	}
+	last := len(f.pendingPieces) - 1
+	lastPiece := f.pendingPieces[last]
+	f.pendingPieces[idx] = lastPiece
+	f.pendingIndex[lastPiece] = idx
+	f.pendingPieces = f.pendingPieces[:last]
+	delete(f.pendingIndex, piece)
+	if idx < f.pendingCursor {
+		f.pendingCursor = idx
+	}
 }
 
 type nodeRTTInfo struct {
@@ -392,22 +464,10 @@ func (f *PreFetcher) balancer() {
 			}
 		}
 
-		for {
-			inf := bestNode.conn.srv.downloadInflight.Load()
-			maxInf := bestNode.conn.srv.downloadMaxInflight.Load()
-			if inf >= maxInf || !bestNode.conn.srv.downloadInflight.CompareAndSwap(inf, inf+1) {
-				select {
-				case <-f.ctx.Done():
-					bestNode.conn.InflightPieces.Add(-1)
-					bestNode.conn.wakeDownloaders()
-					return
-				default:
-					runtime.Gosched()
-					continue
-				}
-			}
-
-			break
+		if err := bestNode.conn.srv.acquireDownloadSlot(f.ctx); err != nil {
+			bestNode.conn.InflightPieces.Add(-1)
+			bestNode.conn.wakeDownloaders()
+			return
 		}
 		f.ready.Add(1) // add now to reserve slot
 
@@ -419,7 +479,7 @@ func (f *PreFetcher) balancer() {
 				case <-f.ctx.Done():
 					f.ready.Add(-1)
 					bestNode.conn.InflightPieces.Add(-1)
-					bestNode.conn.srv.downloadInflight.Add(-1)
+					bestNode.conn.srv.releaseDownloadSlot()
 					bestNode.conn.wakeDownloaders()
 					return
 				default:
@@ -431,13 +491,15 @@ func (f *PreFetcher) balancer() {
 		}
 
 		f.mx.Lock()
-		f.piecesList[piece] = 2
+		f.reservePieceLocked(piece)
 		f.mx.Unlock()
 
+		f.wg.Add(1)
 		go func() {
+			defer f.wg.Done()
 			defer bestNode.conn.wakeDownloaders()
 			defer bestNode.conn.InflightPieces.Add(-1)
-			defer bestNode.conn.srv.downloadInflight.Add(-1)
+			defer bestNode.conn.srv.releaseDownloadSlot()
 
 			tou := bestNodeRttInfo.calcTimeout()
 
@@ -493,6 +555,10 @@ func (f *PreFetcher) balancer() {
 			f.pieces[piece] = &piecePack{
 				data:  pc.Data,
 				proof: pc.Proof,
+			}
+			if f.piecesChanged != nil {
+				close(f.piecesChanged)
+				f.piecesChanged = nil
 			}
 			f.mx.Unlock()
 

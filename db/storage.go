@@ -1,7 +1,6 @@
 package db
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -136,33 +135,43 @@ func (s *Storage) RemoveTorrent(t *storage.Torrent, withFiles bool) error {
 	t.Stop()
 	t.Wait()
 
+	cachePath := filepath.Join(t.Path, ".tonutils-storage-pieces", hex.EncodeToString(t.BagID))
+	if err = s.fs.RemovePieceCacheDir(cachePath); err != nil {
+		return fmt.Errorf("failed to remove piece cache: %w", err)
+	}
 	if t.Header != nil && withFiles {
 		if err = s.removeTorrentFiles(t); err != nil {
 			return err
 		}
 	}
 
-	s.mx.Lock()
-	delete(s.torrents, string(t.BagID))
-	delete(s.torrentsOverlay, string(id))
-	s.mx.Unlock()
-
 	b := &leveldb.Batch{}
 	b.Delete(append([]byte("bags:"), t.BagID...))
 	b.Delete(append([]byte("upl_stat:"), t.BagID...))
+	b.Delete(append([]byte("ai:"), t.BagID...))
+	if err = s.deletePieces(t.BagID, b); err != nil {
+		return err
+	}
 
 	if err = s.db.Write(b, nil); err != nil {
 		return err
 	}
 
-	if t.Info != nil {
-		num := t.Info.PiecesNum()
-		for i := uint32(0); i < num; i++ {
-			_ = s.RemovePiece(t.BagID, i)
-		}
-	}
+	s.mx.Lock()
+	delete(s.torrents, string(t.BagID))
+	delete(s.torrentsOverlay, string(id))
+	s.mx.Unlock()
 	s.notify(EventTorrentUpdated)
 	return nil
+}
+
+func (s *Storage) deletePieces(bagID []byte, batch *leveldb.Batch) error {
+	iter := s.db.NewIterator(util.BytesPrefix(append([]byte("pc:"), bagID...)), nil)
+	defer iter.Release()
+	for iter.Next() {
+		batch.Delete(iter.Key())
+	}
+	return iter.Error()
 }
 
 func (s *Storage) removeTorrentFiles(t *storage.Torrent) error {
@@ -253,11 +262,9 @@ type TorrentStored struct {
 }
 
 func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
-	iter := s.db.NewIterator(&util.Range{Start: []byte("bags:")}, nil)
+	iter := s.db.NewIterator(util.BytesPrefix([]byte("bags:")), nil)
+	defer iter.Release()
 	for iter.Next() {
-		if !bytes.HasPrefix(iter.Key(), []byte("bags:")) {
-			break
-		}
 
 		var tr TorrentStored
 		err := json.Unmarshal(iter.Value(), &tr)
@@ -278,7 +285,9 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 		}
 
 		if t.Info != nil {
-			t.InitMask()
+			if err := t.InitMaskWithError(); err != nil {
+				return fmt.Errorf("failed to load pieces of %s from db: %w", hex.EncodeToString(t.BagID), err)
+			}
 			// cache header
 			/*err = t.BuildCache(int(t.Info.HeaderSize/uint64(t.Info.PieceSize)) + 1)
 			if err != nil {
@@ -307,7 +316,7 @@ func (s *Storage) loadTorrents(startWithoutActiveFilesToo bool) error {
 		}
 	}
 
-	return nil
+	return iter.Error()
 }
 
 func (s *Storage) UpdateUploadStats(bagId []byte, val uint64) error {

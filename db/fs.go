@@ -41,6 +41,39 @@ func (o *OsFs) Delete(name string) error {
 	return o.ctrl.RemoveFile(name)
 }
 
+// Resize preserves existing bytes, so interrupted downloads can resume safely.
+func (o *OsFs) Resize(name string, size int64) error {
+	if ctrl, ok := o.ctrl.(interface{ ResizeFile(string, int64) error }); ok {
+		return ctrl.ResizeFile(name, size)
+	}
+	return resizeFile(name, size)
+}
+
+func resizeFile(name string, size int64) error {
+	if size < 0 {
+		return fmt.Errorf("negative file size")
+	}
+	if err := os.MkdirAll(filepath.Dir(name), os.ModePerm); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(name, os.O_RDWR|os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
+	if err := f.Truncate(size); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+func (o *OsFs) RemovePieceCacheDir(name string) error {
+	if ctrl, ok := o.ctrl.(interface{ RemoveDir(string) error }); ok {
+		return ctrl.RemoveDir(name)
+	}
+	return os.RemoveAll(name)
+}
+
 func (s *Storage) GetFS() storage.FS {
 	return &s.fs
 }
@@ -153,6 +186,9 @@ func (s *Storage) GetAllFilesRefsInDir(path string, only ...map[string]bool) ([]
 		}
 
 		if f.IsDir() {
+			if filepath.Dir(filePath) == path && strings.EqualFold(f.Name(), ".tonutils-storage-pieces") {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 
