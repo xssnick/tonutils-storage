@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/xssnick/tonutils-go/adnl"
-	"github.com/xssnick/tonutils-go/adnl/overlay"
 	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"github.com/xssnick/tonutils-go/tl"
 )
@@ -45,62 +44,56 @@ func uploadBytes(c *PeerConnection) uint64 {
 }
 
 func TestUploadBudgetHeldUntilFinalRLDPCompletion(t *testing.T) {
-	peer := newUploadTestPeer()
-	conn := &PeerConnection{adnl: peer, srv: &Server{}}
-	tracked := &uploadTrackingPeer{Peer: peer, conn: conn}
-	ext := overlay.CreateExtendedADNL(tracked)
-	transport := rldp.NewClientV2(ext)
-	conn.rldp = transport
-	sender, err := conn.getUploadSender()
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { transport.Close(); sender.Close(); peer.Close(); conn.releaseUploads() })
-	data := make([]byte, int(rldp.PartSize)*2+12)
-	transfer := make([]byte, 32)
-	lease, err := conn.reserveUpload(transfer, uint64(len(data)), time.Now().Add(time.Minute))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var completed atomic.Int32
-	lease.setOnComplete(func() { completed.Add(1) })
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-	if err = sender.SendAnswer(ctx, 1<<25, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: data}); err != nil {
-		t.Fatal(err)
-	}
-	lease.retainUntil(lease.deadline)
-	if uploadBytes(conn) == 0 {
-		t.Fatal("SendAnswer returned its permit before completion")
-	}
-	id := []byte(reverseUploadTransferID(transfer))
-	// An out-of-order final ACK is ignored by both transport and accounting.
-	if err = peer.handler(&adnl.MessageCustom{Data: rldp.CompleteV2{TransferID: id, Part: 2}}); err != nil {
-		t.Fatal(err)
-	}
-	if uploadBytes(conn) == 0 {
-		t.Fatal("premature final ACK returned upload permit")
-	}
-	for part := uint32(0); part < 2; part++ {
-		if err = peer.handler(&adnl.MessageCustom{Data: rldp.CompleteV2{TransferID: id, Part: part}}); err != nil {
+	uploadVersions(t, func(t *testing.T, version rldp.Version) {
+		conn, peer, _ := newUploadSenderFixture(t, version, nil)
+		data := make([]byte, int(rldp.PartSize)*2+12)
+		transfer := make([]byte, 32)
+		lease, err := conn.reserveUpload(transfer, uint64(len(data)), time.Now().Add(time.Minute))
+		if err != nil {
+			t.Fatal(err)
+		}
+		sender, err := conn.getUploadSender(lease)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var completed atomic.Int32
+		lease.setOnComplete(func() { completed.Add(1) })
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err = lease.sendAnswer(ctx, 1<<25, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: data}); err != nil {
 			t.Fatal(err)
 		}
 		if uploadBytes(conn) == 0 {
-			t.Fatalf("part %d completion returned upload permit", part)
+			t.Fatal("SendAnswer returned its permit before completion")
 		}
-	}
-	if err = peer.handler(&adnl.MessageCustom{Data: rldp.CompleteV2{TransferID: id, Part: 2}}); err != nil {
-		t.Fatal(err)
-	}
-	if uploadBytes(conn) != 0 || completed.Load() != 1 || sender.Stats().Active.OutboundTransfers != 0 || sender.Stats().Version != rldp.Version2 {
-		t.Fatal("final completion did not release exactly once after transport retirement")
-	}
-	if err = peer.handler(&adnl.MessageCustom{Data: rldp.CompleteV2{TransferID: id, Part: 2}}); err != nil {
-		t.Fatal(err)
-	}
-	if completed.Load() != 1 {
-		t.Fatal("duplicate completion counted upload twice")
-	}
+		// An out-of-order final ACK is ignored by both transport and accounting.
+		if err = peer.handler(&adnl.MessageCustom{Data: uploadCompletion(version, transfer, 2)}); err != nil {
+			t.Fatal(err)
+		}
+		if uploadBytes(conn) == 0 {
+			t.Fatal("premature final ACK returned upload permit")
+		}
+		for part := uint32(0); part < 2; part++ {
+			if err = peer.handler(&adnl.MessageCustom{Data: uploadCompletion(version, transfer, part)}); err != nil {
+				t.Fatal(err)
+			}
+			if uploadBytes(conn) == 0 {
+				t.Fatalf("part %d completion returned upload permit", part)
+			}
+		}
+		if err = peer.handler(&adnl.MessageCustom{Data: uploadCompletion(version, transfer, 2)}); err != nil {
+			t.Fatal(err)
+		}
+		if uploadBytes(conn) != 0 || completed.Load() != 1 || sender.Stats().Active.OutboundTransfers != 0 || sender.Stats().Version != version {
+			t.Fatal("final completion did not release exactly once after transport retirement")
+		}
+		if err = peer.handler(&adnl.MessageCustom{Data: uploadCompletion(version, transfer, 2)}); err != nil {
+			t.Fatal(err)
+		}
+		if completed.Load() != 1 {
+			t.Fatal("duplicate completion counted upload twice")
+		}
+	})
 }
 
 type uploadBudgetRLDP struct {
@@ -115,23 +108,22 @@ func (r *uploadBudgetRLDP) Stats() rldp.Stats {
 func (r *uploadBudgetRLDP) Close() { r.closed.Store(true); r.active.Store(0) }
 
 func TestUploadBudgetTimeoutWaitsForTransportRetirement(t *testing.T) {
-	transport := &uploadBudgetRLDP{}
-	transport.active.Store(1)
-	conn := &PeerConnection{rldp: transport, srv: &Server{}}
-	lease, err := conn.reserveUpload(make([]byte, 32), 4096, time.Now().Add(-time.Second))
+	conn, _, _ := newUploadSenderFixture(t, rldp.Version2, nil)
+	transfer := make([]byte, 32)
+	lease, err := conn.reserveUpload(transfer, 4096, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease.retained = true
-	conn.expireUploads(time.Now())
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	if err = lease.sendAnswer(ctx, 1<<20, uint32(time.Now().Unix()+1), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+		t.Fatal(err)
+	}
+	conn.expireUploads(time.Now().Add(time.Hour))
 	if uploadBytes(conn) == 0 {
-		t.Fatal("expired permit released while transport retained data")
+		t.Fatal("expired permit released while its sender retained data")
 	}
-	transport.active.Store(0)
-	conn.expireUploads(time.Now())
-	if uploadBytes(conn) != 0 {
-		t.Fatal("expired permit not released after transport retirement")
-	}
+	waitUntil(t, 2*time.Second, func() bool { return uploadBytes(conn) == 0 }, "retired sender to return its permit")
 }
 
 func TestUploadBudgetConnectionCloseRetiresTransportBeforeRelease(t *testing.T) {

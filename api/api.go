@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
@@ -16,7 +17,6 @@ import (
 	"github.com/xssnick/tonutils-storage/internal/termui"
 	"github.com/xssnick/tonutils-storage/provider"
 	"github.com/xssnick/tonutils-storage/storage"
-	"math/bits"
 	"net/http"
 	"path/filepath"
 	"sort"
@@ -342,8 +342,48 @@ func (s *Server) handleRemove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	limit, offset := 0, 0
+	for _, parameter := range []struct {
+		name  string
+		min   int
+		value *int
+	}{
+		{"limit", 1, &limit},
+		{"offset", 0, &offset},
+	} {
+		if values, present := query[parameter.name]; present {
+			if len(values) != 1 {
+				response(w, http.StatusBadRequest, Error{"Invalid " + parameter.name})
+				return
+			}
+			value, err := strconv.Atoi(values[0])
+			if err != nil || value < parameter.min {
+				response(w, http.StatusBadRequest, Error{"Invalid " + parameter.name})
+				return
+			}
+			*parameter.value = value
+		}
+	}
+	torrents := s.store.GetAll()
+	if query.Has("limit") || query.Has("offset") {
+		// Offset pages need a deterministic order even when creation times match.
+		sort.Slice(torrents, func(i, j int) bool {
+			if order := torrents[i].CreatedAt.Compare(torrents[j].CreatedAt); order != 0 {
+				return order > 0
+			}
+			return bytes.Compare(torrents[i].BagID, torrents[j].BagID) < 0
+		})
+	}
+	torrents = torrents[min(offset, len(torrents)):]
+	if limit > 0 && len(torrents) > limit {
+		torrents = torrents[:limit]
+	}
 	var bags []Bag
-	for _, t := range s.store.GetAll() {
+	if len(torrents) > 0 || query.Has("limit") || query.Has("offset") {
+		bags = make([]Bag, 0, len(torrents))
+	}
+	for _, t := range torrents {
 		bags = append(bags, s.getBag(t, true).Bag)
 	}
 	response(w, http.StatusOK, List{Bags: bags})
@@ -427,13 +467,13 @@ func (s *Server) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-		if tor := s.store.GetTorrent(bag); tor != nil {
-			intact, err := tor.Verify(r.Context(), !req.OnlyFilesExistence)
-			if err != nil {
-				pterm.Error.Println("Failed to verify bag:", err.Error())
-				response(w, http.StatusInternalServerError, Error{err.Error()})
-				return
-			}
+	if tor := s.store.GetTorrent(bag); tor != nil {
+		intact, err := tor.Verify(r.Context(), !req.OnlyFilesExistence)
+		if err != nil {
+			pterm.Error.Println("Failed to verify bag:", err.Error())
+			response(w, http.StatusInternalServerError, Error{err.Error()})
+			return
+		}
 
 		response(w, http.StatusOK, Ok{Ok: intact})
 		return
@@ -539,6 +579,7 @@ func response(w http.ResponseWriter, status int, result any) {
 }
 
 func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
+	downloadAll := t.IsDownloadAll()
 	res := BagDetailed{
 		Files: []File{},
 		Peers: []Peer{},
@@ -566,14 +607,15 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 	completed, infoLoaded, headerLoaded := false, false, false
 	if t.Info != nil {
 		infoLoaded = true
-		mask := t.PiecesMask()
-		downloadedPieces := 0
-		for _, b := range mask {
-			downloadedPieces += bits.OnesCount8(b)
+		downloadedPieces := t.DownloadedPiecesNum()
+		completed = uint32(downloadedPieces) == t.Info.PiecesNum()
+		var mask []byte
+		if !short || (!completed && !downloadAll) {
+			mask = t.PiecesMask()
 		}
 
-		downloaded = uint64(downloadedPieces*int(t.Info.PieceSize)) - t.Info.HeaderSize
-		if uint64(downloadedPieces*int(t.Info.PieceSize)) < t.Info.HeaderSize { // 0 if header not fully downloaded
+		downloaded = uint64(downloadedPieces)*uint64(t.Info.PieceSize) - t.Info.HeaderSize
+		if uint64(downloadedPieces)*uint64(t.Info.PieceSize) < t.Info.HeaderSize { // 0 if header not fully downloaded
 			downloaded = 0
 		}
 
@@ -582,9 +624,8 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		if downloaded > full { // cut not full last piece
 			downloaded = full
 		}
-		completed = uint32(downloadedPieces) == t.Info.PiecesNum()
 
-		if !completed && !t.IsDownloadAll() && len(mask) > 0 {
+		if !completed && !downloadAll && len(mask) > 0 {
 			completed = true
 
 			var wantSz uint64
@@ -642,9 +683,11 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 			}
 		}
 
-		res.BagSize = t.Info.FileSize
-		res.PieceSize = t.Info.PieceSize
-		res.MerkleHash = hex.EncodeToString(t.Info.RootHash)
+		if !short {
+			res.BagSize = t.Info.FileSize
+			res.PieceSize = t.Info.PieceSize
+			res.MerkleHash = hex.EncodeToString(t.Info.RootHash)
+		}
 	}
 
 	res.Path = t.Path
@@ -665,7 +708,7 @@ func (s *Server) getBag(t *storage.Torrent, short bool) BagDetailed {
 		InfoLoaded:    infoLoaded,
 		Active:        active,
 		Seeding:       seeding,
-		DownloadAll:   t.IsDownloadAll(),
+		DownloadAll:   downloadAll,
 	}
 
 	return res

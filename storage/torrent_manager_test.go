@@ -12,17 +12,6 @@ import (
 
 func TestPeerManagerRetriesFinalHavePiecesAfterQueueBusy(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		previousLogger := Logger
-		defer func() { Logger = previousLogger }()
-		failed := make(chan struct{}, 1)
-		Logger = func(args ...any) {
-			if len(args) > 0 && args[0] == "[STORAGE] FAILED TO SEND UPDATE HAVE" {
-				select {
-				case failed <- struct{}{}:
-				default:
-				}
-			}
-		}
 		queried := make(chan struct{}, 1)
 		transport := &testRLDP{onQuery: func(tl.Serializable, tl.Serializable) error {
 			select {
@@ -41,7 +30,7 @@ func TestPeerManagerRetriesFinalHavePiecesAfterQueueBusy(t *testing.T) {
 		}
 		peer := &storagePeer{
 			torrent: torrent, nodeId: []byte("peer"), conn: conn, stop: func() {},
-			lastSentPieces: []byte{0x7f}, lastPingAt: time.Now(), lastNeighboursAt: time.Now(),
+			initSnapshotStarted: true, lastPingAt: time.Now(), lastNeighboursAt: time.Now(),
 			session: peerSessionState{sessionId: 1, sessionGen: 1, localInitSent: 1, remoteInitComplete: 1},
 		}
 		conn.UseFor(peer)
@@ -50,10 +39,14 @@ func TestPeerManagerRetriesFinalHavePiecesAfterQueueBusy(t *testing.T) {
 		torrent.opWg.Add(1)
 		go torrent.peersManager(ctx)
 		defer func() { cancel(); torrent.Wait() }()
+		synctest.Wait()
 		select {
-		case <-failed:
-		case <-time.After(time.Second):
-			t.Fatal("initial announcement did not reach the busy queue")
+		case <-queried:
+			t.Fatal("announcement bypassed the busy control queue")
+		default:
+		}
+		if atomic.LoadUint64(&peer.lastSentNewPiecesPos) != 0 {
+			t.Fatal("busy queue advanced the announcement cursor")
 		}
 		<-conn.controlQueue
 		select {

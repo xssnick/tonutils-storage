@@ -36,19 +36,18 @@ func TestUploadBudgetTimeoutReclaimsWhilePrimaryQueriesRemainActive(t *testing.T
 	if err := primary.DoQueryAsync(ctx, 1<<20, make([]byte, 32), GetPiece{PieceID: 0}, make(chan rldp.AsyncQueryResult, 1)); err != nil {
 		t.Fatal(err)
 	}
-	sender, err := conn.getUploadSender()
-	if err != nil {
-		t.Fatal(err)
-	}
 	transfer := make([]byte, 32)
 	lease, err := conn.reserveUpload(transfer, 4096, time.Now().Add(3*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = sender.SendAnswer(ctx, 1<<20, uint32(time.Now().Unix()+1), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+	sender, err := conn.getUploadSender(lease)
+	if err != nil {
 		t.Fatal(err)
 	}
-	lease.retainUntil(lease.deadline)
+	if err = lease.sendAnswer(ctx, 1<<20, uint32(time.Now().Unix()+1), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+		t.Fatal(err)
+	}
 	waitUntil(t, 2*time.Second, func() bool { return sender.Stats().Active.OutboundTransfers == 0 }, "bulk sender to expire its answer")
 	if primary.Stats().Active.OutboundTransfers == 0 {
 		t.Fatal("expected unrelated primary query to remain active")
@@ -70,7 +69,11 @@ func TestUploadSenderDoesNotDecodePrimaryAnswerPayloads(t *testing.T) {
 		}
 		return nil
 	})
-	sender, err := conn.getUploadSender()
+	lease, err := conn.reserveUpload(make([]byte, 32), 4096, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender, err := conn.getUploadSender(lease)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,10 +109,6 @@ func TestUploadSenderPreservesLegacyVersion(t *testing.T) {
 		}
 		return nil
 	})
-	sender, err := conn.getUploadSender()
-	if err != nil {
-		t.Fatal(err)
-	}
 	transfer := make([]byte, 32)
 	lease, err := conn.reserveUpload(transfer, 4096, time.Now().Add(time.Minute))
 	if err != nil {
@@ -117,10 +116,13 @@ func TestUploadSenderPreservesLegacyVersion(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err = sender.SendAnswer(ctx, 1<<20, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+	sender, err := conn.getUploadSender(lease)
+	if err != nil {
 		t.Fatal(err)
 	}
-	lease.retainUntil(lease.deadline)
+	if err = lease.sendAnswer(ctx, 1<<20, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+		t.Fatal(err)
+	}
 	if err = peer.handler(&adnl.MessageCustom{Data: rldp.Complete{TransferID: []byte(reverseUploadTransferID(transfer)), Part: 0}}); err != nil {
 		t.Fatal(err)
 	}
@@ -131,10 +133,6 @@ func TestUploadSenderPreservesLegacyVersion(t *testing.T) {
 
 func TestUploadSenderConnectionCloseRetiresBothTransports(t *testing.T) {
 	conn, peer, primary := newUploadSenderFixture(t, rldp.Version2, nil)
-	sender, err := conn.getUploadSender()
-	if err != nil {
-		t.Fatal(err)
-	}
 	transfer := make([]byte, 32)
 	lease, err := conn.reserveUpload(transfer, 4096, time.Now().Add(time.Minute))
 	if err != nil {
@@ -142,16 +140,19 @@ func TestUploadSenderConnectionCloseRetiresBothTransports(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	if err = sender.SendAnswer(ctx, 1<<20, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+	sender, err := conn.getUploadSender(lease)
+	if err != nil {
 		t.Fatal(err)
 	}
-	lease.retainUntil(lease.deadline)
+	if err = lease.sendAnswer(ctx, 1<<20, uint32(time.Now().Add(time.Minute).Unix()), make([]byte, 32), transfer, Piece{Data: make([]byte, 4096)}); err != nil {
+		t.Fatal(err)
+	}
 	peer.Close()
 	waitUntil(t, time.Second, func() bool { return uploadBytes(conn) == 0 }, "connection close to return bulk memory")
 	if !primary.Stats().Closed || !sender.Stats().Closed {
 		t.Fatal("connection close left a transport active after releasing its memory")
 	}
-	if _, err = conn.getUploadSender(); err == nil {
+	if _, err = conn.getUploadSender(lease); err == nil {
 		t.Fatal("closed connection created a new bulk sender")
 	}
 }

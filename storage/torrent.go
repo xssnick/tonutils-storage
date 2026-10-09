@@ -658,7 +658,7 @@ func (t *Torrent) compactNewPieces() {
 		}
 
 		peer.piecesMx.RLock()
-		hasInitSnapshot := peer.lastSentPieces != nil
+		hasInitSnapshot := peer.initSnapshotStarted
 		peer.piecesMx.RUnlock()
 		if !peer.isSessionReady() && !hasInitSnapshot {
 			continue
@@ -901,8 +901,14 @@ func (t *Torrent) getPieceInternal(id uint32, verify bool) (*Piece, error) {
 }
 
 func (t *Torrent) GetPieceProof(id uint32) ([]byte, error) {
-	if id >= t.Info.PiecesNum() {
-		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, t.Info.PiecesNum())
+	t.mx.RLock()
+	info := t.Info
+	t.mx.RUnlock()
+	if info == nil || info.PieceSize == 0 {
+		return nil, fmt.Errorf("torrent metadata is not loaded")
+	}
+	if id >= info.PiecesNum() {
+		return nil, fmt.Errorf("piece %d not found, pieces count: %d", id, info.PiecesNum())
 	}
 
 	piece, err := t.getPieceInternal(id, true)

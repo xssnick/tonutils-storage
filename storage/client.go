@@ -97,10 +97,12 @@ type storagePeer struct {
 	lastUpdatePiecesSeqno int64
 	lastSentNewPiecesPos  uint64
 
-	lastSentPieces []byte
-	hasPieces      []byte
-	hasPiecesNum   uint32
-	knownPieces    uint32
+	// Protect the incremental journal from compaction once an init snapshot
+	// starts, including before the session becomes ready. Guarded by piecesMx.
+	initSnapshotStarted bool
+	hasPieces           []byte
+	hasPiecesNum        uint32
+	knownPieces         uint32
 
 	initExpectedChunks uint32
 	initReceivedChunks uint32
@@ -906,6 +908,24 @@ func (p *storagePeer) initializeSession(attempt *peerSessionAttempt, doPing bool
 		Logger("[STORAGE] SESSION INITIALIZATION FAILED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", attempt.id, "GENERATION", attempt.generation, "ERR", err.Error())
 		p.Close()
 	}()
+
+	if p.conn != nil && p.conn.srv != nil {
+		var release func()
+		release, err = p.conn.srv.acquireSessionSlot(attempt.ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		p.sessionMx.Lock()
+		if !p.isSessionAttemptCurrent(*attempt) {
+			p.sessionMx.Unlock()
+			err = errStaleSessionAttempt
+			return err
+		}
+		// Queueing for a worker is not remote handshake time.
+		atomic.StoreInt64(&p.session.sessionInitAt, time.Now().UnixMilli())
+		p.sessionMx.Unlock()
+	}
 
 	if doPing {
 		err = p.pingWithRetry(attempt.ctx)

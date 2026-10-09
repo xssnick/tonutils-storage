@@ -6,7 +6,6 @@ import (
 	"errors"
 	"github.com/xssnick/tonutils-go/adnl"
 	"github.com/xssnick/tonutils-go/adnl/overlay"
-	"github.com/xssnick/tonutils-go/adnl/rldp"
 	"sync"
 	"sync/atomic"
 )
@@ -38,7 +37,8 @@ type PeerConnection struct {
 	uploadBytes        uint64
 	uploadSweepRunning bool
 	uploadSenderMx     sync.Mutex
-	uploadSender       atomic.Pointer[rldp.RLDP]
+	uploadIdleSender   *uploadSender
+	uploadsClosed      bool
 
 	mx         sync.RWMutex
 	usedByBags map[string]*storagePeer

@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"container/heap"
+	"container/list"
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
@@ -41,9 +43,12 @@ type Server struct {
 	bootstrapped map[string]*PeerConnection
 	mx           sync.RWMutex
 
-	dhtCache      map[string]*dhtCacheEntry
-	dhtCacheMx    sync.RWMutex
-	findSemaphore chan struct{}
+	dhtCache         map[string]*dhtCacheEntry
+	dhtCacheMx       sync.RWMutex
+	findSemaphore    chan struct{}
+	dhtCacheOrder    list.List
+	addressLookups   map[string]*addressLookup
+	sessionSemaphore chan struct{}
 
 	downloadMaxInflight  atomic.Int64
 	downloadInflight     atomic.Int64
@@ -57,22 +62,28 @@ type Server struct {
 type dhtCacheEntry struct {
 	addrs    *address.List
 	expireAt time.Time
+	order    *list.Element
 }
 
 func NewServer(dhtClient DHT, gate *adnl.Gateway, key ed25519.PrivateKey, serverMode bool, dhtParallelism int) *Server {
+	if dhtParallelism < 1 {
+		dhtParallelism = 1
+	}
 	var rateLimit = rldp.NewTokenBucket(1<<20, "storage")
 
 	s := &Server{
-		key:            key,
-		dht:            dhtClient,
-		gate:           gate,
-		netCtrl:        rateLimit,
-		bootstrapped:   map[string]*PeerConnection{},
-		serverMode:     serverMode,
-		dhtParallelism: dhtParallelism,
-		startedAt:      time.Now(),
-		dhtCache:       make(map[string]*dhtCacheEntry),
-		findSemaphore:  make(chan struct{}, dhtParallelism),
+		key:              key,
+		dht:              dhtClient,
+		gate:             gate,
+		netCtrl:          rateLimit,
+		bootstrapped:     map[string]*PeerConnection{},
+		serverMode:       serverMode,
+		dhtParallelism:   dhtParallelism,
+		startedAt:        time.Now(),
+		dhtCache:         make(map[string]*dhtCacheEntry),
+		findSemaphore:    make(chan struct{}, dhtParallelism),
+		addressLookups:   make(map[string]*addressLookup),
+		sessionSemaphore: make(chan struct{}, dhtParallelism),
 	}
 	s.downloadMaxInflight.Store(300) // TODO: high limit for now, add dynamic scaling based of bandwidth
 	s.closeCtx, s.closer = context.WithCancel(context.Background())
@@ -307,7 +318,10 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 		})
 		defer sessionInit.schedule()
 
-		ctx, cancel := context.WithTimeout(t.globalCtx, timeout)
+		t.mx.RLock()
+		queryCtx := t.globalCtx
+		t.mx.RUnlock()
+		ctx, cancel := context.WithTimeout(queryCtx, timeout)
 		defer cancel()
 
 		switch q := req.(type) {
@@ -366,11 +380,7 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 			uploadedBytes := uint64(len(pc.Data))
 			lease.setOnComplete(func() { t.UpdateUploadedPeer(stPeer, uploadedBytes) })
 
-			uploadSender, err := p.getUploadSender()
-			if err != nil {
-				return err
-			}
-			err = uploadSender.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, pc)
+			err = lease.sendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, pc)
 			if err != nil {
 				Logger("[STORAGE] FAIL ANSWER PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
 
@@ -379,10 +389,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 			Logger("[STORAGE] SENT PIECE", q.PieceID, hex.EncodeToString(adnlId), "TIME", time.Since(tm).String())
 			retained = true
-			// SendAnswer may extend an already elapsed peer deadline by one
-			// second. Recompute after its initial burst and keep a one-second
-			// margin so slow disk/serialization cannot retire the lease early.
-			lease.retainUntil(uploadTransferDeadline(ctx, query.Timeout).Add(time.Second))
 		case Ping:
 			err := peer.SendAnswer(ctx, query.MaxAnswerSize, query.Timeout, query.ID, transfer, Pong{})
 			if err != nil {
@@ -692,7 +698,7 @@ func (p *storagePeer) sendInitPieces(ctx context.Context, attempt peerSessionAtt
 		return errStaleSessionAttempt
 	}
 	p.piecesMx.Lock()
-	p.lastSentPieces = snapshot
+	p.initSnapshotStarted = true
 	atomic.StoreUint64(&p.lastSentNewPiecesPos, cursor)
 	p.piecesMx.Unlock()
 	p.sessionMx.Unlock()
@@ -1036,37 +1042,10 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 	if peer == nil {
 		start := time.Now()
 		if addrs == nil {
-
-			adnlIDStr := hex.EncodeToString(adnlID)
-
-			s.dhtCacheMx.RLock()
-			if entry := s.dhtCache[adnlIDStr]; entry != nil && entry.expireAt.After(time.Now()) {
-				addrs = entry.addrs
-				s.dhtCacheMx.RUnlock()
-			} else {
-				s.dhtCacheMx.RUnlock()
-
-				select {
-				case s.findSemaphore <- struct{}{}:
-					defer func() { <-s.findSemaphore }()
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-
-				lcCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-				addrs, _, err = s.dht.FindAddresses(lcCtx, adnlID)
-				cancel()
-				if err != nil {
-					Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID), "ERR", err.Error(), "TOOK", time.Since(start).String())
-					return fmt.Errorf("failed to find node address: %w", err)
-				}
-
-				s.dhtCacheMx.Lock()
-				s.dhtCache[adnlIDStr] = &dhtCacheEntry{
-					addrs:    addrs,
-					expireAt: time.Now().Add(150 * time.Second),
-				}
-				s.dhtCacheMx.Unlock()
+			addrs, err = s.lookupNodeAddresses(ctx, adnlID)
+			if err != nil {
+				Logger("[STORAGE] NOT FOUND NODE ADDR OF", hex.EncodeToString(adnlID), "FOR", hex.EncodeToString(t.BagID), "ERR", err.Error(), "TOOK", time.Since(start).String())
+				return fmt.Errorf("failed to find node address: %w", err)
 			}
 		}
 		if addrs == nil || len(addrs.Addresses) == 0 {
@@ -1232,39 +1211,22 @@ func (s *Server) startPeerSearcher() {
 	ticker := time.NewTicker(peerSearcherInterval)
 	defer ticker.Stop()
 
-	updateSem := make(chan struct{}, s.dhtParallelism)
-	updatePrioritySem := make(chan struct{}, s.dhtParallelism)
-
-	tryAcquire := func(prioritized bool) (bool, bool) {
-		if !prioritized {
-			select {
-			case updateSem <- struct{}{}:
-				return false, true
-			default:
-				return false, false
-			}
-		}
-
-		select {
-		case updateSem <- struct{}{}:
-			return false, true
-		case updatePrioritySem <- struct{}{}:
-			return true, true
-		default:
-			return false, false
-		}
-	}
-
-	release := func(isPriority bool) {
-		if !isPriority {
-			<-updateSem
-		} else {
-			<-updatePrioritySem
-		}
-	}
+	pool := newDHTJobPool(s.dhtParallelism)
 
 	launchDHTJob := func(t *Torrent, findPeers, prioritized, seedRefresh bool) bool {
-		isPr, ok := tryAcquire(prioritized)
+		t.mx.RLock()
+		jobCtx := t.globalCtx
+		t.mx.RUnlock()
+		if jobCtx == nil || jobCtx.Err() != nil {
+			return false
+		}
+		class := dhtRegularJob
+		if seedRefresh {
+			class = dhtSeedJob
+		} else if prioritized {
+			class = dhtPriorityJob
+		}
+		release, ok := pool.tryAcquire(class)
 		if !ok {
 			return false
 		}
@@ -1273,14 +1235,15 @@ func (s *Server) startPeerSearcher() {
 		atomic.StoreInt32(&t.lastDHTStoreFailed, 0)
 
 		go func() {
+			tm := time.Now()
 			defer func() {
-				release(isPr)
 				atomic.StoreInt64(&t.lastDHTStoreCompletedAt, time.Now().UnixNano())
+				release(time.Since(tm))
 			}()
 
-			tm := time.Now()
-
-			ctx, cancel := context.WithTimeout(t.globalCtx, 60*time.Second)
+			ctx, cancel := context.WithTimeout(jobCtx, 60*time.Second)
+			stopCancel := context.AfterFunc(s.closeCtx, cancel)
+			defer stopCancel()
 			var err error
 			stored := 0
 			if findPeers {
@@ -1289,6 +1252,9 @@ func (s *Server) startPeerSearcher() {
 				stored, err = s.storeBagDHTSelf(ctx, t)
 			}
 			cancel()
+			if seedRefresh && err == nil && stored == 0 {
+				err = fmt.Errorf("DHT did not store the seed record")
+			}
 
 			if err != nil {
 				atomic.StoreInt32(&t.lastDHTStoreFailed, 1)
@@ -1298,7 +1264,9 @@ func (s *Server) startPeerSearcher() {
 			}
 
 			if !findPeers && stored > 0 {
-				atomic.StoreInt64(&t.lastDHTStoreSuccessAt, time.Now().UnixNano())
+				// The overlay version is stamped before Store, so its age includes
+				// the Store duration. Refresh from that point, not completion time.
+				atomic.StoreInt64(&t.lastDHTStoreSuccessAt, tm.UnixNano())
 			}
 
 			if seedRefresh && stored < bagDHTSeedMinStoredNodes {
@@ -1319,17 +1287,16 @@ func (s *Server) startPeerSearcher() {
 		case <-ticker.C:
 		}
 
+		s.dhtCacheMx.Lock()
+		s.pruneAddressCacheLocked(time.Now())
+		s.dhtCacheMx.Unlock()
+
 		if s.store == nil {
 			continue
 		}
 
-		type seedCandidate struct {
-			torrent *Torrent
-			dueAt   time.Time
-		}
-
 		now := time.Now()
-		seedCandidates := make([]seedCandidate, 0)
+		seedCandidates := make(dhtSeedQueue, 0)
 		seedCount := 0
 
 		for _, t := range s.store.GetAll() {
@@ -1368,8 +1335,13 @@ func (s *Server) startPeerSearcher() {
 				failed := atomic.LoadInt32(&t.lastDHTStoreFailed) != 0
 				failStreak := atomic.LoadUint32(&t.dhtStoreFailStreak)
 				at := bagDHTSeedNextAttemptAt(s.startedAt, t.BagID, lastCompletedAt, lastSuccessAt, failed, failStreak)
+				if t.CreatedLocally && lastAttemptAt == 0 && t.CreatedAt.Add(15*time.Minute).After(now) {
+					// Publish new local bags promptly; only restored seeds need
+					// spreading across the startup window.
+					at = t.CreatedAt
+				}
 				if !now.Before(at) {
-					seedCandidates = append(seedCandidates, seedCandidate{
+					seedCandidates = append(seedCandidates, dhtSeedCandidate{
 						torrent: t,
 						dueAt:   at,
 					})
@@ -1420,19 +1392,12 @@ func (s *Server) startPeerSearcher() {
 			continue
 		}
 
-		sort.Slice(seedCandidates, func(i, j int) bool {
-			if !seedCandidates[i].dueAt.Equal(seedCandidates[j].dueAt) {
-				return seedCandidates[i].dueAt.Before(seedCandidates[j].dueAt)
-			}
-			return bytes.Compare(seedCandidates[i].torrent.BagID, seedCandidates[j].torrent.BagID) < 0
-		})
-
-		launchBudget := bagDHTSeedLaunchBudget(seedCount, s.dhtParallelism)
+		seedParallelism := pool.resizeSeeds(seedCount)
+		heap.Init(&seedCandidates)
+		launchBudget := bagDHTSeedLaunchBudget(seedCount, seedParallelism)
 		launched := 0
-		for _, candidate := range seedCandidates {
-			if launched >= launchBudget {
-				break
-			}
+		for seedCandidates.Len() > 0 && launched < launchBudget {
+			candidate := seedCandidates.next()
 
 			if !launchDHTJob(candidate.torrent, false, false, true) {
 				break
@@ -1486,7 +1451,7 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 
 		n.piecesMx.Lock()
 		n.resetPieceTrackingLocked(piecesNum)
-		n.lastSentPieces = nil
+		n.initSnapshotStarted = false
 		n.piecesMx.Unlock()
 
 		var sessionCtx context.Context
@@ -1527,7 +1492,7 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 	}
 	stNode.piecesMx.Lock()
 	stNode.resetPieceTrackingLocked(piecesNum)
-	stNode.lastSentPieces = nil
+	stNode.initSnapshotStarted = false
 	stNode.piecesMx.Unlock()
 	atomic.StoreUint64(&stNode.lastSentNewPiecesPos, 0)
 

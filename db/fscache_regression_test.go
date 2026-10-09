@@ -53,7 +53,7 @@ func TestAcquireReadConcurrentEviction(t *testing.T) {
 	wg.Wait()
 }
 
-func TestAcquireReadEvictsIdleDescriptorWhenOldestBusy(t *testing.T) {
+func TestAcquireReadEvictsIdleDescriptorWhenClockHandBusy(t *testing.T) {
 	cache, paths := smallCache(t, 2, 3)
 	for _, path := range paths[:2] {
 		if _, err := cache.AcquireRead(path, make([]byte, 1), 0); err != nil {
@@ -61,7 +61,7 @@ func TestAcquireReadEvictsIdleDescriptorWhenOldestBusy(t *testing.T) {
 		}
 	}
 	busy := cache.acquire(paths[0])
-	busy.usedAt.Store(0)
+	busy.referenced.Store(false)
 	defer func() {
 		busy.mx.RUnlock()
 		cache.signalAvailable()
@@ -77,7 +77,7 @@ func TestAcquireReadEvictsIdleDescriptorWhenOldestBusy(t *testing.T) {
 			t.Fatal(err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("idle descriptor was not evicted while the oldest was busy")
+		t.Fatal("idle descriptor was not evicted while the clock hand was busy")
 	}
 }
 
@@ -158,5 +158,157 @@ func TestResizePreservesPrefixAndRefreshesDescriptor(t *testing.T) {
 	data, err := os.ReadFile(path)
 	if err != nil || len(data) != 10 || string(data[:5]) != "valid" {
 		t.Fatalf("growing a resume file lost its prefix: %q, %v", data, err)
+	}
+}
+
+func TestClockKeepsRecentlyReadDescriptor(t *testing.T) {
+	cache, paths := smallCache(t, 3, 4)
+	for _, path := range paths[:3] {
+		if _, err := cache.AcquireRead(path, make([]byte, 1), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache.mx.Lock()
+	for _, desc := range cache.dsc {
+		desc.referenced.Store(false)
+	}
+	cache.mx.Unlock()
+	if _, err := cache.AcquireRead(paths[0], make([]byte, 1), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.AcquireRead(paths[3], make([]byte, 1), 0); err != nil {
+		t.Fatal(err)
+	}
+	cache.mx.RLock()
+	defer cache.mx.RUnlock()
+	if len(cache.dsc) != 3 || cache.dsc[paths[0]] == nil || cache.dsc[paths[1]] != nil {
+		t.Fatal("CLOCK did not give a recently read descriptor a second chance or exceeded the cap")
+	}
+}
+
+func TestFileLifecycleDoesNotBlockUnrelatedCachedRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(*FSControllerCache, string) error
+	}{
+		{"remove", func(cache *FSControllerCache, path string) error { return cache.RemoveFile(path) }},
+		{"resize", func(cache *FSControllerCache, path string) error { return cache.ResizeFile(path, 1) }},
+		{"remove directory", func(cache *FSControllerCache, path string) error { return cache.RemoveDir(filepath.Dir(path)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cache, paths := smallCache(t, 2, 2)
+			// Keep the second descriptor outside the directory being removed.
+			if tc.name == "remove directory" {
+				paths[1] = filepath.Join(t.TempDir(), "other")
+				if err := os.WriteFile(paths[1], []byte{1}, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = cache.RemoveDir(filepath.Dir(paths[1])) })
+			}
+			for _, path := range paths {
+				if _, err := cache.AcquireRead(path, make([]byte, 1), 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			busy := cache.acquire(paths[0])
+			released := false
+			defer func() {
+				if !released {
+					busy.mx.RUnlock()
+					cache.signalAvailable()
+				}
+			}()
+			done := make(chan error, 1)
+			go func() { done <- tc.run(cache, paths[0]) }()
+			// Wait until the operation detached its descriptor and is waiting
+			// for the held read, without blocking on a faulty cache map lock.
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				detached := false
+				if cache.mx.TryRLock() {
+					detached = cache.dsc[paths[0]] == nil
+					cache.mx.RUnlock()
+				}
+				if detached {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("file operation did not release the map lock while waiting for a read")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			hit := make(chan error, 1)
+			go func() {
+				_, err := cache.AcquireRead(paths[1], make([]byte, 1), 0)
+				hit <- err
+			}()
+			select {
+			case err := <-hit:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("a file operation blocked an unrelated cached read")
+			}
+			busy.mx.RUnlock()
+			cache.signalAvailable()
+			released = true
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("file operation did not finish after its reader released")
+			}
+		})
+	}
+}
+
+func TestAcquireReadConcurrentResize(t *testing.T) {
+	cache, paths := smallCache(t, 2, 1)
+	if err := os.WriteFile(paths[0], []byte("p"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Go(func() {
+			for range 100 {
+				buf := make([]byte, 1)
+				if _, err := cache.AcquireRead(paths[0], buf, 0); err != nil {
+					t.Errorf("read failed during resize: %v", err)
+					return
+				}
+				if buf[0] != 'p' {
+					t.Errorf("resize lost the existing prefix: %v", buf)
+					return
+				}
+			}
+		})
+	}
+	wg.Go(func() {
+		for i := range 100 {
+			if err := cache.ResizeFile(paths[0], int64(1+i%2)); err != nil {
+				t.Errorf("resize failed: %v", err)
+				return
+			}
+		}
+	})
+	wg.Wait()
+}
+
+func TestCacheRecoversAfterFailedOpen(t *testing.T) {
+	cache, paths := smallCache(t, 1, 3)
+	if _, err := cache.AcquireRead(paths[0], make([]byte, 1), 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths[2]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.AcquireRead(paths[2], make([]byte, 1), 0); !os.IsNotExist(err) {
+		t.Fatalf("missing file returned %v", err)
+	}
+	if _, err := cache.AcquireRead(paths[1], make([]byte, 1), 0); err != nil {
+		t.Fatalf("cache did not recover after failed open: %v", err)
 	}
 }

@@ -533,14 +533,6 @@ func newLoopbackPeerConnection(id []byte, remoteID []byte, remoteKey ed25519.Pub
 }
 
 func TestE2E_TwoNodeDownloadFlow(t *testing.T) {
-	prevLogger := Logger
-	Logger = func(v ...any) {
-		t.Log(v...)
-	}
-	defer func() {
-		Logger = prevLogger
-	}()
-
 	seedDir := t.TempDir()
 	downloadDir := t.TempDir()
 
