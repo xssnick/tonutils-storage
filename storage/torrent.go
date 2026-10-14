@@ -350,7 +350,11 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 			t.peersMx.RLock()
 			peers := make([]*storagePeer, 0, len(t.peers))
 			for _, peer := range t.peers {
-				peers = append(peers, peer.peer)
+				// Restart can publish peers for the replacement globalCtx before
+				// this manager exits. Cleanup must keep its original ownership.
+				if peer.peer.managerCtx == nil || peer.peer.managerCtx == workerCtx {
+					peers = append(peers, peer.peer)
+				}
 			}
 			t.peersMx.RUnlock()
 
@@ -366,13 +370,19 @@ func (t *Torrent) peersManager(workerCtx context.Context) {
 			default:
 			}
 		}
+		if workerCtx.Err() != nil {
+			continue
+		}
 		ticker.Reset(time.Second)
 
 		t.peersMx.RLock()
 		peers := make([]*storagePeer, 0, len(t.peers))
 		known := make([]*KnownNode, 0, len(t.knownNodes))
 		for _, peer := range t.peers {
-			peers = append(peers, peer.peer)
+			if (peer.peer.managerCtx == nil || peer.peer.managerCtx == workerCtx) &&
+				(peer.peer.closerCtx == nil || peer.peer.closerCtx.Err() == nil) {
+				peers = append(peers, peer.peer)
+			}
 		}
 		for id, k := range t.knownNodes {
 			if t.peers[id] != nil {
@@ -769,6 +779,9 @@ func (t *Torrent) SetActiveFilesIDs(ids []uint32) error {
 	t.downloadAll = false
 	t.activeFiles = append([]uint32(nil), ids...)
 	t.activeFileSet = fileIDsSet(ids)
+	if t.CreatedLocally {
+		return nil
+	}
 	return t.startDownload(nil)
 }
 

@@ -296,6 +296,15 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 
 		switch q := req.(type) {
 		case GetPiece:
+			if !isUpl {
+				return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("bag is not for upload"))
+			}
+			t.mx.RLock()
+			metadataLoaded := t.Info != nil && t.Info.PieceSize != 0
+			t.mx.RUnlock()
+			if !metadataLoaded {
+				return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("torrent metadata is not loaded"))
+			}
 			timeout = t.transmitTimeout()
 		case Ping:
 			sesId = &q.SessionID
@@ -350,10 +359,6 @@ func (s *Server) handleRLDPQuery(peer *overlay.RLDPWrapper) func(transfer []byte
 				return err
 			}
 		case GetPiece:
-			if !isUpl {
-				return answerRLDPStorageError(peer, transfer, query, fmt.Errorf("bag is not for upload"))
-			}
-
 			tm := time.Now()
 			lease, err := p.reserveUpload(transfer, uint64(t.Info.PieceSize), uploadTransferDeadline(ctx, query.Timeout))
 			if err != nil {
@@ -1028,6 +1033,9 @@ func (t *Torrent) addNode(node overlay.Node) {
 }
 
 func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.Node, addrs *address.List) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	key, ok := node.ID.(keys.PublicKeyED25519)
 	if !ok {
 		return fmt.Errorf("invalid node type")
@@ -1066,18 +1074,40 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		Logger("[STORAGE] HAS ALREADY ACTIVE PEER FOR NODE ", hex.EncodeToString(adnlID), "ADDR", peer.adnl.RemoteAddr(), "ADDING FOR", hex.EncodeToString(t.BagID))
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	stNode, sessionAttempt := t.prepareStoragePeer(node.Overlay, node, peer, nil)
+	lifetimeCtx := stNode.closerCtx
+	if sessionAttempt != nil {
+		lifetimeCtx = sessionAttempt.ctx
+	}
+	operationCtx, cancel := context.WithCancel(ctx)
+	stopCancel := context.AfterFunc(lifetimeCtx, cancel)
+	defer stopCancel()
+	defer cancel()
+	closeOwnedAttempt := func() {
+		if sessionAttempt != nil {
+			stNode.closeSessionAttempt(*sessionAttempt)
+		}
+	}
 
 	select {
-	case <-ctx.Done():
-		stNode.Close()
-		return ctx.Err()
+	case <-operationCtx.Done():
+		closeOwnedAttempt()
+		return operationCtx.Err()
 	case peer.bagsInitQueue <- struct{}{}:
 		defer func() { <-peer.bagsInitQueue }()
 	}
+	if err := operationCtx.Err(); err != nil {
+		closeOwnedAttempt()
+		return err
+	}
 
 	if sessionAttempt != nil {
-		err = stNode.initializeSession(sessionAttempt, true)
+		attempt := *sessionAttempt
+		attempt.ctx = operationCtx
+		err = stNode.initializeSession(&attempt, true)
 		if err != nil {
 			return err
 		}
@@ -1088,11 +1118,18 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 	Logger("[STORAGE] PEER CONNECTED", hex.EncodeToString(adnlID), peer.adnl.RemoteAddr(), "FOR", hex.EncodeToString(t.BagID), "PING", atomic.LoadInt64(&stNode.currentPing), "MS")
 
 	for {
+		if err := operationCtx.Err(); err != nil {
+			closeOwnedAttempt()
+			return err
+		}
+		if sessionAttempt != nil && !stNode.isSessionAttemptCurrent(*sessionAttempt) {
+			return errStaleSessionAttempt
+		}
 		ready := stNode.isSessionReady()
 		usable := stNode.isDownloadUsable()
 		if !ready && !usable && stNode.initProgressTimedOut(time.Now(), 45*time.Second) {
 			Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(stNode.nodeId), "HAS NOT SENT UPDATE INIT, SOMETHING WRONG, CLOSING CONNECTION", "BAG", hex.EncodeToString(t.BagID))
-			stNode.Close()
+			closeOwnedAttempt()
 			return fmt.Errorf("peer has not sent update init")
 		} else if ready || usable {
 			Logger("[STORAGE_PEERS] PEER", hex.EncodeToString(stNode.nodeId), "SESSION IS USABLE, BAG", hex.EncodeToString(t.BagID), "READY", ready, "KNOWN_PIECES", atomic.LoadUint32(&stNode.knownPieces))
@@ -1100,9 +1137,9 @@ func (s *Server) ConnectToNode(ctx context.Context, t *Torrent, node *overlay.No
 		}
 
 		select {
-		case <-ctx.Done():
-			stNode.Close()
-			return ctx.Err()
+		case <-operationCtx.Done():
+			closeOwnedAttempt()
+			return operationCtx.Err()
 		case <-time.After(25 * time.Millisecond):
 		}
 	}
@@ -1469,6 +1506,7 @@ func (t *Torrent) prepareStoragePeer(over []byte, oNode *overlay.Node, conn *Pee
 
 	stNode := &storagePeer{
 		torrent:        t,
+		managerCtx:     t.globalCtx,
 		nodeAddr:       conn.adnl.RemoteAddr(),
 		nodeId:         conn.adnl.GetID(),
 		conn:           conn,

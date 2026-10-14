@@ -122,8 +122,9 @@ type storagePeer struct {
 
 	stopSession func()
 
-	closerCtx context.Context
-	stop      func()
+	managerCtx context.Context
+	closerCtx  context.Context
+	stop       func()
 }
 
 const maxPendingInitBytes = 32 << 20
@@ -859,8 +860,16 @@ func (p *storagePeer) Close() {
 		Logger("[STORAGE] CLOSING CONNECTION OF", hex.EncodeToString(p.nodeId), p.nodeAddr, "BAG", hex.EncodeToString(p.torrent.BagID))
 		p.stop()
 		p.conn.CloseFor(p)
-		p.torrent.RemovePeer(p.nodeId)
+		p.torrent.removePeerIfCurrent(p)
 	})
+}
+
+func (p *storagePeer) closeSessionAttempt(attempt peerSessionAttempt) {
+	p.sessionMx.Lock()
+	defer p.sessionMx.Unlock()
+	if p.isSessionAttemptCurrent(attempt) {
+		p.Close()
+	}
 }
 
 func (p *storagePeer) isLocalInitSent() bool {
@@ -906,7 +915,7 @@ func (p *storagePeer) initializeSession(attempt *peerSessionAttempt, doPing bool
 		}
 
 		Logger("[STORAGE] SESSION INITIALIZATION FAILED FOR", hex.EncodeToString(p.nodeId), "BAG", hex.EncodeToString(p.torrent.BagID), "SESSION", attempt.id, "GENERATION", attempt.generation, "ERR", err.Error())
-		p.Close()
+		p.closeSessionAttempt(*attempt)
 	}()
 
 	if p.conn != nil && p.conn.srv != nil {

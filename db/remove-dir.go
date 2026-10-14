@@ -1,13 +1,41 @@
 package db
 
 import (
+	"errors"
 	"fmt"
 	"github.com/xssnick/tonutils-storage/storage"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
+
+// removeEmptyDir leaves unrelated content in place without failing bag removal.
+func removeEmptyDir(path string, fs storage.FSController) error {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to read dir %s: %w", path, err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !isIgnoredSystemFile(entry.Name()) {
+			return nil
+		}
+	}
+	for _, entry := range entries {
+		file := filepath.Join(path, entry.Name())
+		if err := fs.RemoveFile(file); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("failed to remove ignored system file %s: %w", file, err)
+		}
+	}
+	if err := fs.RemoveFile(path); err != nil && !os.IsNotExist(err) && !os.IsExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return fmt.Errorf("failed to remove dir %s: %w", path, err)
+	}
+	return nil
+}
 
 type Node struct {
 	Id       string

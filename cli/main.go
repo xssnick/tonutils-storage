@@ -1591,12 +1591,12 @@ func rentStorage(ctx context.Context, bagId, addrStr, providerId, amount string)
 	}
 
 	if rates.SpaceAvailableMB < rates.Size {
-		pterm.Warning.Println("Torrent is too big for this provider", err.Error())
+		pterm.Warning.Println("Torrent is too big for this provider")
 		return
 	}
 
 	if !rates.Available {
-		pterm.Warning.Println("Provider is currently not accepting storage requests", err.Error())
+		pterm.Warning.Println("Provider is currently not accepting storage requests")
 		return
 	}
 

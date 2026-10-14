@@ -180,24 +180,44 @@ func (s *Storage) removeTorrentFiles(t *storage.Torrent) error {
 		return err
 	}
 
+	root := filepath.Clean(t.Path)
+	contentRoot := filepath.Join(root, string(t.Header.DirName))
+	removeRoot := !t.CreatedLocally || len(t.Header.DirName) > 0
+	if t.CreatedLocally {
+		root = contentRoot
+	}
+	directories := make(map[string]struct{})
+	if removeRoot {
+		directories[root] = struct{}{}
+	}
+	if !t.CreatedLocally {
+		directories[filepath.Join(root, ".tonutils-storage-pieces")] = struct{}{}
+	}
+
 	var firstErr error
 	for _, f := range list {
-		path := filepath.Join(t.Path, string(t.Header.DirName), f)
+		path := filepath.Join(contentRoot, f)
 		if errR := s.fs.GetController().RemoveFile(path); errR != nil {
 			log.Warn().Str("path", path).Err(errR).Msg("remove err")
 			if firstErr == nil {
 				firstErr = errR
 			}
 		}
+		for dir := filepath.Dir(path); dir != root; dir = filepath.Dir(dir) {
+			directories[dir] = struct{}{}
+		}
 	}
 
-	path := filepath.Clean(t.Path)
-	if t.CreatedLocally {
-		path = filepath.Join(path, string(t.Header.DirName))
+	// Only prune ancestors of bag files; unrelated sibling directories may be shared.
+	paths := make([]string, 0, len(directories))
+	for path := range directories {
+		paths = append(paths, path)
 	}
-
-	if err := recursiveEmptyDelete(buildTreeFromDir(filepath.Clean(path)), s.fs.GetController()); err != nil && firstErr == nil {
-		firstErr = err
+	sort.Slice(paths, func(i, j int) bool { return len(paths[i]) > len(paths[j]) })
+	for _, path := range paths {
+		if err := removeEmptyDir(path, s.fs.GetController()); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 
 	return firstErr

@@ -12,6 +12,7 @@ import (
 	"github.com/xssnick/tonutils-storage-provider/pkg/contract"
 	"github.com/xssnick/tonutils-storage-provider/pkg/transport"
 	"github.com/xssnick/tonutils-storage/db"
+	"github.com/xssnick/tonutils-storage/storage"
 	"log"
 	"math"
 	"math/big"
@@ -248,26 +249,11 @@ func (c *Client) RequestProviderStorageInfo(ctx context.Context, torrentHash, pr
 			progress, _ := new(big.Float).Quo(new(big.Float).SetUint64(info.Downloaded), new(big.Float).SetUint64(t.Info.FileSize)).Float64()
 
 			if info.Status == "active" {
-				proved := false
-				// verify proof
-				proof, err := cell.FromBOC(info.Proof)
-				if err == nil {
-					if proofData, err := cell.UnwrapProof(proof, t.Info.RootHash); err == nil {
-						piece := uint32(proofByte / uint64(t.Info.PieceSize))
-						pieces := uint32(t.Info.FileSize / uint64(t.Info.PieceSize))
-
-						if err = checkProofBranch(proofData, piece, pieces); err == nil {
-							info.Reason = fmt.Sprintf("Storage proof received just now, but not connected with peer")
-							proved = true
-						}
-					} else {
-						Logger("failed to unwrap proof:", err)
-					}
-				}
-
-				if !proved {
+				if err := verifyStorageProof(t.Info, proofByte, info.Proof); err != nil {
 					info.Status = "untrusted"
 					info.Reason = "Incorrect proof received"
+				} else {
+					info.Reason = "Storage proof received just now, but not connected with peer"
 				}
 			} else if info.Status == "downloading" {
 				info.Reason = fmt.Sprintf("Progress: %.2f", progress*100) + "%"
@@ -309,6 +295,27 @@ func (c *Client) RequestProviderStorageInfo(ctx context.Context, torrentHash, pr
 	}
 
 	return v, nil
+}
+
+func verifyStorageProof(info *storage.TorrentInfo, proofByte uint64, proof []byte) error {
+	if info == nil || info.PieceSize == 0 || proofByte >= info.FileSize {
+		return fmt.Errorf("invalid proof byte or torrent metadata")
+	}
+
+	proofCell, err := cell.FromBOC(proof)
+	if err != nil {
+		return fmt.Errorf("parse storage proof: %w", err)
+	}
+	proofData, err := cell.UnwrapProof(proofCell, info.RootHash)
+	if err != nil {
+		return fmt.Errorf("unwrap storage proof: %w", err)
+	}
+
+	piece := uint32(proofByte / uint64(info.PieceSize))
+	if err := checkProofBranch(proofData, piece, info.PiecesNum()); err != nil {
+		return fmt.Errorf("check storage proof branch: %w", err)
+	}
+	return nil
 }
 
 func checkProofBranch(proof *cell.Cell, piece, piecesNum uint32) error {

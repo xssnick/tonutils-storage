@@ -656,10 +656,6 @@ func writeOrdered(ctx context.Context, t *Torrent, list []fileInfo, piecesMap ma
 			return err
 		}
 		err := func() error {
-			if strings.Contains(off.path, "..") {
-				Logger("Malicious file with path traversal was skipped: " + off.path)
-				return fmt.Errorf("malicious file")
-			}
 			if err := validateFileName(off.path, true); err != nil {
 				Logger(fmt.Sprintf("Malicious file '%s' was skipped: %v", off.path, err))
 				return fmt.Errorf("malicious file %q", off.path)

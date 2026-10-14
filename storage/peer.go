@@ -93,6 +93,21 @@ func (t *Torrent) RemovePeer(id []byte) {
 	t.wake.fire()
 }
 
+func (t *Torrent) removePeerIfCurrent(peer *storagePeer) {
+	strID := hex.EncodeToString(peer.nodeId)
+	t.peersMx.Lock()
+	current := t.peers[strID]
+	removed := current != nil && current.peer == peer
+	if removed {
+		delete(t.peers, strID)
+	}
+	t.peersMx.Unlock()
+	if removed {
+		t.compactNewPieces()
+		t.wake.fire()
+	}
+}
+
 func (t *Torrent) GetPeer(id []byte) *PeerInfo {
 	t.peersMx.RLock()
 	defer t.peersMx.RUnlock()

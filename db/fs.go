@@ -124,8 +124,8 @@ func (s *Storage) DetectFileRefs(path string, only ...map[string]bool) (rootPath
 
 		dir := filepath.Base(path) + "/"
 		if strings.HasPrefix(dir, ".") || strings.HasPrefix(dir, "/") {
-			// fallback to empty name
-			dir = ""
+			// File references stay relative to this directory when its name is omitted.
+			return path, "", files, nil
 		}
 
 		return filepath.Dir(path), dir, files, nil
@@ -200,7 +200,7 @@ func (s *Storage) GetAllFilesRefsInDir(path string, only ...map[string]bool) ([]
 		name := filePath[len(path)+1:]
 		name = strings.ReplaceAll(name, "\\", "/") // to unix style
 
-		if isIgnoredSystemFile(name) {
+		if isIgnoredSystemFile(f.Name()) {
 			// exclude OS-created files that can be modified automatically and thus break some torrent pieces
 			return nil
 		}
